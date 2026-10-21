@@ -16,6 +16,7 @@ import { fmtDateTimeMin } from "@/lib/datetime"
 import type { Approval, AttachmentInfo, Asset, Autonomy, BBEvent, ContextUsage, DecideApprovalResult, ModelInfo, OrchPersona, OrchProposal, OrchTickResult, PhaseGoal, ProjectUsage, RoleInfo, Session, Team, TeamMemberInput } from "@/lib/types"
 import { StatusDot, type SessionStatus } from "@/components/StatusDot"
 import { Button } from "@/components/ui/button"
+import { AttachmentChipRow } from "@/components/chat/AttachmentChip"
 import { ChatStats } from "@/components/chat/ChatStats"
 import { cn } from "@/lib/utils"
 
@@ -54,12 +55,6 @@ const ORCH_SLASH_COMMANDS = [
   { cmd: "/context", desc: "查看指挥上下文用量（占用 / 窗口）" },
   { cmd: "/compact", desc: "压缩指挥对话上下文：旧历史压成摘要，后续对话从摘要续起" },
 ]
-
-function fmtBytes(n: number): string {
-  if (n >= 1_048_576) return `${(n / 1_048_576).toFixed(1)}MB`
-  if (n >= 1024) return `${Math.floor(n / 1024)}KB`
-  return `${n}B`
-}
 
 // 自主级别（DESIGN §6.8）；档位行为已全部落地（批 4 开窗审批 / 批 5 自动链 / 批 6 L0 提案）
 // 编排器态 chip 通用样式（2026-09-19 顶部第二行工具栏并入 composer 后的统一胶囊钮）
@@ -1540,32 +1535,20 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
             </button>
           </div>
         ))}
-        {/* 附件 chips 行（与编排对话模式下半透明保留 + 提示） */}
+        {/* 附件 chips 行（与编排对话模式下半透明保留 + 提示）；胶囊件与工作台共用。
+            提示只在**有附件**时出现——编排模式下常驻一句「不支持附件」是噪声。 */}
         {pendingFiles.length > 0 && (
-          <div className={cn("mb-2 flex flex-wrap items-center gap-1.5", inputMode === "orch" && "opacity-50")}>
-            {pendingFiles.map((f) => (
-              <span key={f.key}
-                className={cn("inline-flex max-w-64 items-center gap-1 rounded-md border px-2 py-1 text-xs",
-                  f.status === "error" && "border-destructive/50 text-destructive",
-                  f.status === "uploading" && "opacity-60")}
-                title={f.status === "error" ? "上传失败，点「重试」再传" : `${f.name}（${fmtBytes(f.size)}）`}>
-                <Paperclip className="size-3 shrink-0" />
-                <span className="min-w-0 truncate">{f.name}</span>
-                <span className="shrink-0 text-[10px] text-muted-foreground">{fmtBytes(f.size)}</span>
-                {f.status === "uploading" && <span className="shrink-0 text-[10px]">上传中…</span>}
-                {f.status === "error" && (
-                  <button type="button" className="shrink-0 underline" onClick={() => retryFile(f.key)}>重试</button>
-                )}
-                <button type="button" className="shrink-0 text-muted-foreground hover:text-foreground"
-                        onClick={() => removeFile(f.key)} title="移除附件">
-                  <X className="size-3" />
-                </button>
-              </span>
-            ))}
-            {inputMode === "orch" && (
-              <span className="text-[10px] text-muted-foreground">与编排对话不支持附件</span>
-            )}
-          </div>
+          <AttachmentChipRow
+            className={cn("mb-2", inputMode === "orch" && "opacity-50")}
+            items={pendingFiles.map((f) => ({
+              key: f.key, name: f.name, size: f.size, status: f.status,
+            }))}
+            onRemove={removeFile}
+            onRetry={retryFile}
+            trailing={inputMode === "orch"
+              ? <span className="text-[10px] text-muted-foreground">与编排对话不支持附件</span>
+              : undefined}
+          />
         )}
         {/* 会话态斜杠命令提示（2026-10-06）：输入以 / 开头时浮出候选（目前仅 /compact），
             点击即执行；Esc 关闭（清空输入）。 */}

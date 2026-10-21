@@ -1,10 +1,10 @@
-## PHP反序列化漏洞总结
+# PHP反序列化漏洞总结
 
 > 创建: 未知 | 更新: 2026-05-21 | 适用: PHP 5.x / 7.x | ⚠️ 部分图片托管于外部CDN
 
 > 找实习时被问到了相关问题，虽说前前后后还是能答出来，但是感觉有些东西已经忘的差不多了，答的不利索，索性直接写一篇总结博文好了。
 
-### PHP反序列化漏洞概述
+## PHP反序列化漏洞概述
 
 PHP反序列化一直是CTF竞赛中的宠儿吧，自己做CTF题目时时常会做到PHP的题目，但凡是PHP的题目，反序列化一般都少不了。
 
@@ -997,7 +997,7 @@ echo unserialize($data);
 
 与上面相反，服务端替换为了更短的字符串，这就为我们提供了遍历，只需要利用这一特性往里面加入被替换的字符串，就可以为我们留出自己的恶意串的位置。
 
-# 原理
+## 原理
 
 未对用户输入的序列化字符串进行检测，导致攻击者可以控制反序列化过程，从而导致代码执行，SQL注入，目录遍历等不可控后果。
 
@@ -1027,7 +1027,7 @@ print (serialize($a));
 
 [![image-20221209162056383](https://sakurahack-y.github.io/2022/12/08/php%E5%8F%8D%E5%BA%8F%E5%88%97%E5%8C%96%E6%80%BB%E7%BB%93/image-20221209162056383.png)](https://sakurahack-y.github.io/2022/12/08/php反序列化总结/image-20221209162056383.png)
 
-# 常用魔术方法总结
+## 常用魔术方法总结
 
 一、__construct(构造方法)
 
@@ -1358,7 +1358,7 @@ unserialize($a);
 12345678910111213141516
 ```
 
-# 魔术方法的执行顺序
+## 魔术方法的执行顺序
 
 不同的魔术方法的执行顺序是不一样的，我们只需要搞清楚最开始会先执行什么，最后会执行什么就可以了
 
@@ -1434,7 +1434,7 @@ unserialize($b);
 
 到这里基础知识就已经够了，接下来我们就来看一些反序列化在ctf中的常见考法
 
-# 对象注入
+## 对象注入
 
 当用户的请求在传给反序列化函数`unserialize()`之前没有被正确的过滤时就会产生漏洞。因为PHP允许对象序列化，攻击者就可以提交特定的序列化的字符串给一个具有该漏洞的`unserialize`函数，最终导致一个在该应用范围内的任意PHP对象注入。
 
@@ -1457,7 +1457,7 @@ unserialize($a);
 
 [![image-20221210172357978](https://sakurahack-y.github.io/2022/12/08/php%E5%8F%8D%E5%BA%8F%E5%88%97%E5%8C%96%E6%80%BB%E7%BB%93/image-20221210172357978.png)](https://sakurahack-y.github.io/2022/12/08/php反序列化总结/image-20221210172357978.png)
 
-# 指针引用
+## 指针引用
 
 在php反序列化中,r、R 分别表示对象引用和指针引用，在 PHP 中，标量类型数据是值传递的，而复合类型数据（对象和数组）是引用传递的。但是复合类型数据的引用传递和用 & 符号明确指定的引用传递是有区别的，前者的引用传递是对象引用，而后者是指针引用。
 
@@ -1604,7 +1604,7 @@ print serialize($a);
 
 我们给`filename`随意赋值为`HY`,然后使用一个指针引用。当反序列化的时候，调用`__wakeup`魔术方法,`filename`被赋值为了`nonoflag`,但是它下一步的时候,`secret`参数就接收了我们传入的`flag.php`,由于指针引用的关系,`filename`也跟着`secret`变为了`flag.php`
 
-# 绕过部分正则
+## 绕过部分正则
 
 `preg_match('/^O:\d+/')`匹配序列化字符串是否是对象字符串开头,这在曾经的CTF中也出过类似的考点
 
@@ -1640,7 +1640,7 @@ unserialize('a:1:{i:0;O:4:"test":1:{s:1:"a";s:3:"abc";}}');
 
 [![image-20221210010008949](https://sakurahack-y.github.io/2022/12/08/php%E5%8F%8D%E5%BA%8F%E5%88%97%E5%8C%96%E6%80%BB%E7%BB%93/image-20221210010008949.png)](https://sakurahack-y.github.io/2022/12/08/php反序列化总结/image-20221210010008949.png)
 
-# fast destruct(绕过__wakeup)
+## fast destruct(绕过__wakeup)
 
 今天介绍的这个技巧被称为`fast destruct`，可以在`unserialize`函数执行完后，立即触发我们的poc,这样就可以绕过一些限制，如`__wakeup`魔术方法
 
@@ -1700,7 +1700,7 @@ O:6:"sakura":2:{s:1:"a";s:2:"HY";s:1:"b";s:3:"666";
 
 我在windows上复现失败了，不过这种方法是可行的，就不再复现了
 
-# php7.1+反序列化对类属性不敏感
+## php7.1+反序列化对类属性不敏感
 
 在序列化的时候:如果变量前是protected，则是\x00*\x00变量名的形式,如果变量前是private,则是\x00类名\x00的形式
 
@@ -1741,7 +1741,7 @@ class test{
 unserialize('O:4:"test":1:{s:1:"a";s:3:"abc";}');
 ```
 
-# 16进制绕过字符的过滤
+## 16进制绕过字符的过滤
 
 ```
 O:4:"test":2:{s:4:"%00*%00a";s:3:"abc";s:7:"%00test%00b";s:3:"def";}
@@ -1785,7 +1785,7 @@ unserialize($a);
 
 如图，处理后成功的绕过了!
 
-# PHP反序列化字符逃逸
+## PHP反序列化字符逃逸
 
 一般触发字符逃逸的前提是这个替换函数str_replace，能将字符串的长度改变。其主要原理就是运用闭合的思想。
 
@@ -2010,7 +2010,7 @@ O:6:"sakura":2:{s:4:"name";s:2:"HY";s:3:"age";s:2:"25";}
 
 [![image-20221210170054095](https://sakurahack-y.github.io/2022/12/08/php%E5%8F%8D%E5%BA%8F%E5%88%97%E5%8C%96%E6%80%BB%E7%BB%93/image-20221210170054095.png)](https://sakurahack-y.github.io/2022/12/08/php反序列化总结/image-20221210170054095.png)
 
-# phar反序列化
+## phar反序列化
 
 **概要**
 
@@ -2227,7 +2227,7 @@ php识别phar文件是通过其文件头的stub，更确切一点来说是`__HAL
 2. 要有可用的魔术方法作为“跳板”。
 3. 文件操作函数的参数可控，且`:`、`/`、`phar`等特殊字符没有被过滤。
 
-# php session反序列化
+## php session反序列化
 
 php中的session中的内容并不是放在内存中的，而是以文件的方式来存储的，存储的方式就是由配置项session_save_handler来进行确定的，默认是以文件的方式存储。
 存储的文件是以sess_sessionid来进行命名的，文件的内容就是session值的序列话之后的内容
@@ -2282,7 +2282,7 @@ a:1:{s:4:"name";s:5:"|O:5:"Smi1e":1:{s:4:"test";s:3:"AAA";}";}
 
 而反序列化引擎如果使用的是php，就会把|作为作为key和value的分隔符。把a:1:{s:4:“name”;s:5:”当作键名，而把O:5:“Smi1e”:1:{s:4:“test”;s:3:“AAA”;}当作经过serialize()函数处理过的值，最后会把它进行unserialize处理，此时就构成了一次反序列化注入攻击。
 
-# PHP原生类SoapClient反序列化利用
+## PHP原生类SoapClient反序列化利用
 
 soapClient：专门用来访问web服务的类，可以提供一个基于SOAP协议访问Web服务的 PHP 客户端。
 类介绍：
@@ -2385,7 +2385,7 @@ $c->not_exists_function();
 
 如上，使用SoapClient[反序列化](https://so.csdn.net/so/search?q=反序列化&spm=1001.2101.3001.7020)+CRLF**可以生成任意POST请求**。
 
-# 安洵杯2022 babyphp
+## 安洵杯2022 babyphp
 
 这题结合了pop链构造，php原生类使用，和php session反序列化的利用
 
@@ -2741,7 +2741,7 @@ sess=|O%3A10%3A%22SoapClient%22%3A4%3A%7Bs%3A3%3A%22uri%22%3Bs%3A4%3A%22aaab%22%
 
 [![img](https://sakurahack-y.github.io/2022/12/08/php%E5%8F%8D%E5%BA%8F%E5%88%97%E5%8C%96%E6%80%BB%E7%BB%93/1669574785928-ec75acf4-bc07-40e5-b354-204c3470effd.png)](https://sakurahack-y.github.io/2022/12/08/php反序列化总结/1669574785928-ec75acf4-bc07-40e5-b354-204c3470effd.png)
 
-# 一、基础
+## 一、基础
 
 ## 1、简介
 
@@ -2832,7 +2832,7 @@ __toString() //把类当作字符串使用时触发
 __invoke() //当尝试将对象调用为函数时触发
 ```
 
-# 二、反序列化漏洞利用（绕过）
+## 二、反序列化漏洞利用（绕过）
 
 ## 1、php7.1+反序列化对类属性不敏感
 
@@ -3692,7 +3692,7 @@ object(user)#2 (3) {
 
 **tips：数组逃逸闭合要加一个}，即用";}闭合**
 
-# 三、对象注入
+## 三、对象注入
 
 当用户的请求在传给反序列化函数unserialize()之前没有被正确的过滤时就会产生漏洞。因为PHP允许对象序列化，攻击者就可以提交特定的序列化的字符串给一个具有该漏洞的unserialize函数，最终导致一个在该应用范围内的任意PHP对象注入。对象注入类似于一个利用反序列化魔术方法进行变量覆盖的过程。
 
@@ -3716,7 +3716,7 @@ unserialize($a);
 
 在脚本运行结束后便会调用_destruct函数，同时会覆盖test变量输出maomi
 
-# 四、phar反序列化
+## 四、phar反序列化
 
 phar，全称为PHP Archive，phar扩展提供了一种将整个PHP应用程序放入.phar文件中的方法，以方便移动、
 
@@ -3977,7 +3977,7 @@ php识别phar文件是通过其文件头的stub，更确切一点来说是__HALT
 
 ![图片.png](https://shs3.b.qianxin.com/attack_forum/2024/05/attach-85f71b01da15bb5199904bc0015e826fe589e7f8.png)
 
-# 五、session反序列化
+## 五、session反序列化
 
 ## 1、序列化和反序列化session机制
 
@@ -6965,7 +6965,7 @@ Writeup: [https://www.qwesec.com/2023/11/buuctfWeb.html#%E5%89%8D%E7%BD%AE%E7%9F
 
 ## 相关资源
 
-- **靶场WP**: [ctfshow-反序列化WP](WP汇总/CTfshow-反序序列化wp.md)
-- **脚本**: [python-Pickle序列化脚本](CTF常用脚本及工具/python-Picke序列化/) — Pickle反序列化利用
+- **靶场WP**: [[web/赛事专题/靶场复盘/ctfshow 反序列化 WP 汇总.md|ctfshow-反序列化WP]]
+- **脚本**: `misc/载荷与字典/CTF常用脚本及工具__python-Picke序列化__1.py` — Pickle反序列化利用
 - **文件包含**: [[web/实战打法/文件包含.md|文件包含.md]] — phar伪协议触发反序列化
-- **代码审计**: [[web/实战打法/php代码审计.md|php代码审计.md]] — 魔术方法/变量覆盖审计
+- **代码审计**: [[web/实战打法/PHP 代码审计.md|php代码审计.md]] — 魔术方法/变量覆盖审计

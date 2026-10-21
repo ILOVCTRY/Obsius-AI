@@ -13,14 +13,14 @@ mode: self-contained
 
 | 场景/特征 | 手册 |
 |---|---|
-| 拿到 APK 不知道往哪层打 | `binary/移动安全/triage-and-layering.md`（四分判据 + 分诊命令 + 特征词声明） |
-| native so 校验（has_jni） | `binary/移动安全/native-five-lines.md`（JNI 桥 / 常量 / SMC / 验证 / 诱饵） |
-| so 被壳折叠（packed_so） | `binary/移动安全/unpacking.md`（识别四征 + unicorn 脱壳工程） |
-| Godot 引擎 APK（godot_engine） | `binary/移动安全/godot.md`（markers + GDExtension + 加密信封） |
-| 动态 hook（运行时行为/算法观察） | `binary/移动安全/frida-cookbook.md`（加密捕获/网络/存储/脱壳 dump 脚本集） |
-| 反检测对抗（root/SSL/模拟器/反调试） | `binary/移动安全/frida-bypass-kit.md`（四合一绕过框架 + 升级对抗） |
-| native 深度操作 / 框架专项 | `binary/移动安全/android-advanced.md`（IDA JNI 技巧/native hook/加固厂商表/Flutter/RN） |
-| 安全审计视角（产出报告） | `binary/移动安全/apk-security-checklist.md`（MASTG 清单） |
+| 拿到 APK 不知道往哪层打 | `binary/移动安全/分诊与分层（Android、APK）.md`（四分判据 + 分诊命令 + 特征词声明） |
+| native so 校验（has_jni） | `binary/移动安全/Native 五线（JNI、常量、SMC、验证、诱饵）.md`（JNI 桥 / 常量 / SMC / 验证 / 诱饵） |
+| so 被壳折叠（packed_so） | `binary/移动安全/壳与脱壳（packed、unpacking）.md`（识别四征 + unicorn 脱壳工程） |
+| Godot 引擎 APK（godot_engine） | `binary/移动安全/Godot 引擎 APK 专项.md`（markers + GDExtension + 加密信封） |
+| 动态 hook（运行时行为/算法观察） | `binary/移动安全/Frida 实战 Hook 脚本速查（Android）.md`（加密捕获/网络/存储/脱壳 dump 脚本集） |
+| 反检测对抗（root/SSL/模拟器/反调试） | `binary/移动安全/Android 动态调试绕过框架速查.md`（四合一绕过框架 + 升级对抗） |
+| native 深度操作 / 框架专项 | `binary/移动安全/Android 高级逆向参考（native、框架、加固）.md`（IDA JNI 技巧/native hook/加固厂商表/Flutter/RN） |
+| 安全审计视角（产出报告） | `binary/移动安全/Android 应用安全审计清单（MASTG）.md`（MASTG 清单） |
 | 已解题型比对 | `android/cases/`（命中识别特征直接复用 solver 重验证） |
 
 ## 反空转规则（先于一切）
@@ -62,5 +62,5 @@ mode: self-contained
   nrv2b），依赖 unicorn。
 
 **降级纪律**：工具缺失或依赖（unicorn）未装时**不空等安装**——回手册手工路径
-（`binary/移动安全/unpacking.md` ②脱壳工程 / `binary/移动安全/godot.md` ⑥手工兜底），结论照常落 finding；
+（`binary/移动安全/壳与脱壳（packed、unpacking）.md` ②脱壳工程 / `binary/移动安全/Godot 引擎 APK 专项.md` ⑥手工兜底），结论照常落 finding；
 环境能力清单（detector）已列缺什么，不要自己猜。

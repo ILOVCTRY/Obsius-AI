@@ -77,9 +77,9 @@ docker run --rm -it -v "${PWD}:/workspace/scratch" -w /workspace/scratch cyberst
 
 | 场景/特征 | 手册 |
 |---|---|
-| 旧版有符号、新版无符号（缺 PDB/程序更新） | `binary/逆向工程/sym-diff.md`（LLM 符号迁移 + 平台 MCP 对接） |
-| ARM64 跳转表平坦化 / 循环 XOR 解密器 / 无 IDA 低依赖路线 | `binary/逆向工程/cases/arm64-self-extract-source-recovery.md` |
-| Go 二进制源码级恢复 | `binary/逆向工程/cases/go-tls-proxy-source-recovery.md`（GoReSym 管线） |
-| 平坦化 + DSL VM / 验证码类 | `binary/逆向工程/cases/dsl-vm-captcha-reverse.md` |
-| Electron/Bytenode 跨层审计 | `binary/逆向工程/cases/electron-bytenode-update-chain-audit.md` |
+| 旧版有符号、新版无符号（缺 PDB/程序更新） | `binary/逆向工程/跨版本符号迁移（LLM 辅助 Binary Diff）.md`（LLM 符号迁移 + 平台 MCP 对接） |
+| ARM64 跳转表平坦化 / 循环 XOR 解密器 / 无 IDA 低依赖路线 | `binary/逆向工程/cases/案例：Android ARM64 自解压程序源码恢复.md` |
+| Go 二进制源码级恢复 | `binary/逆向工程/cases/案例：Go TLS 分片代理 lumine 全量源码重建.md`（GoReSym 管线） |
+| 平坦化 + DSL VM / 验证码类 | `binary/逆向工程/cases/案例：DSL 虚拟机验证码系统逆向.md` |
+| Electron/Bytenode 跨层审计 | `binary/逆向工程/cases/案例：Electron Bytenode 特权更新链分析.md` |
 | .NET/C# 托管样本 | 切 NET逆向手法 技能（混淆器/脱壳/IL patch） |

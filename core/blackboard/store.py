@@ -62,10 +62,49 @@ def validate_finding_pocs(pocs: Any) -> list[dict[str, str]]:
     return out
 
 
+# 「正式漏洞报告契约」只在**渗透结论**语义下成立：那十项（测试环境/操作步骤/
+# 验证结果/风险影响评估/POC…）是为人类审核报告设计的字段。CTF 轨的「解出」
+# 由 flag 台账派生（`challenge_flags`），研究轨（rev/pwn 逆向分析）的产物是
+# 分析结论而非可交付报告——**两者都没有这份契约的消费者**。
+#
+# 2026-10-21 修正（用户实测 CTF 轨 pwn 题被拒）：本函数此前**没有 track 参数**，
+# 任何轨道上 verified+vuln 都套十项契约。而同族的 `_check_vuln_gates` 第一行
+# 就是 `if track not in ("pentest", "redteam"): return`——**同一批 verified 门禁
+# 一半按轨放行、一半不按轨放行**。DESIGN.md 里 challenge-flag-ledger 的立项理由
+# 写得很清楚（「正式漏洞契约是为渗透结论设计的，CTF flag 不是漏洞」），口径在
+# 文档里成立、在代码里只落实了一半。
+_FORMAL_REPORT_TRACKS = ("pentest", "redteam")
+
+
 def validate_formal_vuln(*, status: str, category: str, title: str,
                          vuln_class: str, severity: str, target_asset_id: str | None,
-                         report: dict[str, str], pocs: list[dict[str, str]]) -> None:
+                         report: dict[str, str], pocs: list[dict[str, str]],
+                         evidence: dict | None = None,
+                         track: str | None = None) -> None:
+    """正式漏洞十项报告契约（**仅渗透/红队轨**）。
+
+    ``track`` 缺省按 ``None`` 处理 = **仍套严格契约**（保持存量调用方与
+    `test_structured_finding_report_contract` 的严格语义：不传 track 就当作
+    渗透结论看待，宁严勿松）。只有明确是 CTF/研究轨才降级为「有复现证据即可」。
+
+    CTF/研究轨的降级口径**不放弃红线**：仍要求 `has_repro_evidence`（有
+    code/artifact_id + expected 的复现步骤，或旧结构 POC）——「无证据不下结论」
+    是全线红线，只是不再逼 CTF 写「测试环境/风险影响评估」这类渗透报告字段。
+    """
     if status != "verified" or category != "vuln":
+        return
+    if (track or "").strip() and (track or "").strip() not in _FORMAL_REPORT_TRACKS:
+        # CTF / 研究轨：契约不适用，退回「有复现证据」这一条硬红线
+        if not (pocs or has_repro_evidence(evidence)):
+            raise ValueError(
+                f"验证结论缺少复现证据（{track} 轨不要求渗透报告十项契约，但"
+                "「无证据不下结论」是全线红线）——请补 evidence.repro_steps："
+                "至少一步带 code（或 artifact_id）且该步 expected 非空。"
+                "可复制最小示例："
+                '{"category":"vuln","severity":"critical","status":"verified",'
+                '"title":"…","evidence":{"repro_steps":[{"desc":"重放 PoC",'
+                '"type":"cmd","code":"python poc.py --target …",'
+                '"expected":"拿到 shell / flag"}]}}')
         return
     required = {
         "漏洞名称": title, "漏洞等级": severity, "漏洞类型": vuln_class,
@@ -73,7 +112,12 @@ def validate_formal_vuln(*, status: str, category: str, title: str,
         "漏洞摘要": report["summary"], "测试环境": report["test_environment"],
         "操作步骤": report["reproduction_steps"],
         "验证结果": report["verification_result"],
-        "风险影响评估": report["risk_assessment"], "POC": pocs,
+        "风险影响评估": report["risk_assessment"],
+        # POC 与门禁同源（2026-10-21）：此前只认顶层 `pocs`，而 `has_repro_evidence`
+        # 认 `evidence.repro_steps` 里的 code+expected——**两个函数对「有没有证据」
+        # 给出相反答案**。实测用户交了 4 条完整 repro_steps（每条 code+expected），
+        # 仍被判「缺 POC」。复现步骤本身就是可执行 POC，不该被当成没交。
+        "POC": pocs or (["evidence.repro_steps"] if has_repro_evidence(evidence) else []),
     }
     missing = [label for label, value in required.items() if not value]
     if missing:
@@ -2263,7 +2307,7 @@ class Blackboard:
                         status=new_status, category=new_category, title=title or row["title"],
                         vuln_class=vuln_class or row["vuln_class"], severity=new_severity,
                         target_asset_id=target_asset_id or row["target_asset_id"],
-                        report=report, pocs=merged_pocs)
+                        report=report, pocs=merged_pocs, evidence=merged_ev, track=track)
                 # A4 变化检测（事务内算标志，事务后投递，多变化聚合一条 finding_update）
                 if len(merged_ev.get("pocs") or []) > old_poc_n or (
                         not row["poc_artifact_id"] and poc_artifact_id):
@@ -2310,7 +2354,7 @@ class Blackboard:
                     validate_formal_vuln(
                         status=status, category=category, title=title, vuln_class=vuln_class,
                         severity=severity, target_asset_id=target_asset_id,
-                        report=report, pocs=clean_pocs)
+                        report=report, pocs=clean_pocs, evidence=evidence, track=track)
                 finding_id = new_id("find")
                 merged = False
                 if key is None:  # 无去重键：以自身 id 为唯一指纹（列 NOT NULL，且永不合并）
@@ -2709,7 +2753,8 @@ class Blackboard:
                     status=effective_status, category=effective_category,
                     title=effective_title, vuln_class=effective_vuln_class,
                     severity=effective_severity, target_asset_id=row["target_asset_id"],
-                    report=report_values, pocs=effective_pocs)
+                    report=report_values, pocs=effective_pocs,
+                    evidence=merged if evidence is not None else old_ev, track=track)
             if sets:
                 sets.append("updated_at=?")
                 sets.append("revision=revision+1")

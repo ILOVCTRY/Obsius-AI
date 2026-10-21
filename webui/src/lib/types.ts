@@ -1002,7 +1002,6 @@ export interface RoleInfo {
   name: string
   description?: string | null
   persona?: string | null
-  task_types: string[] | null
   tools?: string[] | null
   /** MCP server 白名单；缺省/null = 跟随全局已启用 server */
   mcp_servers?: string[] | null
@@ -1336,7 +1335,6 @@ export interface PackRole {
   description?: string | null
   persona?: string | null
   skills: string[] | null
-  task_types: string[] | null
   tools?: string[] | null
   /** MCP server 白名单；缺省/null = 跟随全局已启用 server */
   mcp_servers?: string[] | null
@@ -1354,7 +1352,6 @@ export interface Expert {
   skills?: string[] | null // null = 全量专家（不限定）
   /** kb 方向白名单；null 或 [] 都表示不限方向（两态字段） */
   knowledge?: string[] | null
-  task_types?: string[] | null
   tools?: string[] | null
   /** 控制器类智能体的**可勾选候选全集**（后端下发）。
    *  必须含 `artex_*` / `ctf_*` / `todo_write` / `call_expert`——它们不在
@@ -1435,7 +1432,7 @@ export interface ExpertBody {
   skills?: string[] | null
   /** kb 方向白名单；null 或 [] 都表示不限方向（两态字段） */
   knowledge?: string[] | null
-  task_types?: string[] | null
+  // task_types 已退役（2026-10-21）：不提交，后端也不再序列化该键。
   tools?: string[] | null
   /** MCP server 白名单；缺省/null = 跟随全局已启用 server */
   mcp_servers?: string[] | null
@@ -1653,6 +1650,34 @@ export interface ReviewProposalsResult {
   rejected: { summary: string; error: string }[]
   error?: string
   raw_head?: string
+}
+
+/** 知识库迭代触发规则（GET /api/proposals/rules）——与后端判定同源。 */
+export interface KbIterationRule {
+  key: string
+  label: string
+  detail: string
+}
+
+export interface KbIterationChannel {
+  key: string
+  label: string
+  detail: string
+}
+
+export interface KbIterationRules {
+  /** 项目开关当前状态；未传 pid 时为 null */
+  enabled: boolean | null
+  switch: {
+    key: string
+    label: string
+    scope: string
+    off_meaning: string
+  }
+  channels: KbIterationChannel[]
+  rules: KbIterationRule[]
+  limits: { per_session_proposals: number; note: string }
+  landing: string
 }
 
 /** POST /api/skills/route-preview 试算入参 */
@@ -2428,6 +2453,32 @@ export interface DiagSystemPrompt {
   tokens: number
   sha256: string
   updated_at: string
+}
+
+/** 技能使用统计（diagnostics-skills，2026-10-21）：Agent 到底有没有用技能/知识库。 */
+export interface DiagSkillRow {
+  name: string
+  /** 本轮被注入系统提示的次数 */
+  injected: number
+  /** 正文真被 skill_open 的次数 */
+  opened: number
+  /** 打开率 = opened / injected；从未注入过为 null */
+  opened_rate: number | null
+}
+
+export interface DiagSkillUsage {
+  skills: DiagSkillRow[]
+  totals: {
+    skill_open: number
+    skill_injected: number
+    distinct_skills_opened: number
+    kb_search: number
+    kb_open: number
+    /** kb.search 零命中次数（知识缺口信号） */
+    kb_search_zero: number
+    kb_zero_rate: number | null
+  }
+  events_scanned: number
 }
 
 /** 请求体留痕开关（diagnostics-request-body，2026-10-17）：进程级开关，默认关。 */

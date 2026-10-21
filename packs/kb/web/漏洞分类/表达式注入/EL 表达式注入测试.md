@@ -8,7 +8,7 @@ summary: Java 系的表达式注入（SpEL / OGNL / Java EL）。先靠三个探
 
 # EL 表达式注入测试
 
-SSTI 通用识别（Jinja2/Twig/Mako/EJS/ERB）见 [[web/漏洞分类/注入类/server-side.md|server-side.md]]。
+SSTI 通用识别（Jinja2/Twig/Mako/EJS/ERB）见 [[web/漏洞分类/注入类/服务端注入总入口.md|server-side.md]]。
 
 ## 0. 判据速查
 
@@ -134,7 +134,7 @@ ${''.class.forName('java.lang.Runtime').getMethod('exec',''.class).invoke(''.cla
 
 ### 2.8 无 shell 时读文件
 
-见 [[web/漏洞分类/注入类/server-side-exec.md|server-side-exec.md §7.4]] —— `FileCopyUtils.copyToByteArray` / `StreamUtils.copyToString` / `Files.readAllBytes`，不需要拉进程。
+见 [[web/漏洞分类/注入类/代码执行与命令执行.md|server-side-exec.md §7.4]] —— `FileCopyUtils.copyToByteArray` / `StreamUtils.copyToString` / `Files.readAllBytes`，不需要拉进程。
 
 ---
 

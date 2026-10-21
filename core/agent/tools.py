@@ -297,6 +297,48 @@ def _attachment_sha12(p: Path) -> str:
     return h.hexdigest()[:12]
 
 
+def _find_attachment_by_name(att_dir: Path, raw: str) -> tuple[Path | None, str]:
+    """按「用户原始文件名」在附件平铺目录里找盘上文件（2026-10-20）。
+
+    盘上命名恒为 `<sha12>_<原始名>`（见 `_attachment_sha12` 的反向约定），
+    而模型手里只有原始名（`repeater.zip`）。原实现直接拼
+    `attachments/repeater.zip` → 必然 miss，模型只能去 `ls` 目录抄 hash
+    前缀，白费一轮调用（实测还会抄到前序会话已解压的旧副本）。
+
+    返回 `(命中路径, "")`；找不到时返回 `(None, 带候选清单的错误文案)`，
+    让模型一眼看到「盘上到底有什么」，不用再 `ls` 一次。
+    """
+    name = Path(str(raw).replace("\\", "/")).name
+    if not name or name in (".", ".."):
+        return None, ""
+    try:
+        entries = [e for e in att_dir.iterdir() if e.is_file()]
+    except OSError:
+        return None, ""
+    # ① 精确同名（用户上传名恰好无前缀，或手工放进去的）
+    for e in entries:
+        if e.name == name:
+            return e, ""
+    # ② `<sha12>_<name>`：上传命名的标准形态
+    for e in entries:
+        if _ATT_SHA_RE.match(e.name) and e.name.split("_", 1)[1] == name:
+            return e, ""
+    # ③ 大小写/编码差异（Windows 上传常见）+ 剥前缀后同名
+    low = name.lower()
+    for e in entries:
+        tail = e.name.split("_", 1)[1] if _ATT_SHA_RE.match(e.name) else e.name
+        if tail.lower() == low:
+            return e, ""
+    if not entries:
+        return None, (f"[错误] 附件目录为空: {att_dir.name}/（还没有任何上传）")
+    shown = sorted(e.name for e in entries)[:20]
+    more = "" if len(entries) <= 20 else f" 等 {len(entries)} 个"
+    return None, (f"[错误] 附件不存在: {raw}\n"
+                  f"盘上实际有：{', '.join(shown)}{more}\n"
+                  f"可直接传完整路径 /workspace/artifacts/attachments/<上述文件名>，"
+                  "或只传去掉 `<sha12>_` 前缀的原始名。")
+
+
 def _guess_kind(p: Path) -> str:
     """文件类型粗判：魔数优先、扩展名兜底（解包清单展示用）。"""
     try:
@@ -1096,10 +1138,17 @@ class ToolDispatcher:
         scratch = ws / "scratch"
         p = _resolve_read_path(raw, ws, scratch)
         if not p.is_file() and "/" not in raw and "\\" not in raw:
-            # 宽容：只传文件名时自动去附件平铺目录找
-            cand = ws / "artifacts" / "attachments" / Path(raw).name
-            if cand.is_file():
+            # 宽容：只传文件名时自动去附件平铺目录找（2026-10-20 修）。
+            # 原实现只做 `attachments/<raw>` 精确匹配，但盘上文件名恒为
+            # `<sha12>_<原名>`——模型传 `repeater.zip` 必然 miss，只能退回去
+            # `ls` 目录抄 hash 前缀（实测浪费一整轮工具调用，且它抄到的是
+            # 前序会话已解压过的副本）。改为三级匹配：
+            #   ① 精确同名；② `<sha12>_<raw>` 后缀匹配；③ 剥掉任意 hash 前缀后同名。
+            cand, err = _find_attachment_by_name(ws / "artifacts" / "attachments", raw)
+            if cand is not None:
                 p = cand
+            elif err:
+                return err
         if not p.is_file():
             return (f"[错误] 附件不存在: {raw}（相对 scratch 解析；附件行给的是"
                     " /workspace/... 形态，原样传入即可；也可只传文件名）")
@@ -2199,18 +2248,31 @@ class ToolDispatcher:
                     gate_note = f" 漏洞核对：✓ 通过（{reason}）"
             except Exception as e:  # noqa: BLE001 —— 核对失败降级跳过
                 gate_note = f" 漏洞核对跳过：{e}"
-        r = self.bb.add_finding(
-            self.project_id, vuln_class, title, severity=severity, status=status,
-            evidence=ev, target_asset_id=target_asset_id,
-            poc_artifact_id=poc_artifact_id,
-            confidence=confidence, dedup_key=dedup_key, author=self.author,
-            rating_basis=rating_basis, impact=impact, remediation=remediation,
-            summary=summary, affected_assets=affected_assets,
-            test_environment=test_environment, reproduction_steps=reproduction_steps,
-            verification_result=verification_result, risk_assessment=risk_assessment,
-            pocs=pocs,
-            category=category, track=self.track,
-        )
+        try:
+            r = self.bb.add_finding(
+                self.project_id, vuln_class, title, severity=severity, status=status,
+                evidence=ev, target_asset_id=target_asset_id,
+                poc_artifact_id=poc_artifact_id,
+                confidence=confidence, dedup_key=dedup_key, author=self.author,
+                rating_basis=rating_basis, impact=impact, remediation=remediation,
+                summary=summary, affected_assets=affected_assets,
+                test_environment=test_environment, reproduction_steps=reproduction_steps,
+                verification_result=verification_result, risk_assessment=risk_assessment,
+                pocs=pocs,
+                category=category, track=self.track,
+            )
+        except ValueError as e:
+            # 门禁拒绝必须以 `[拒绝]` 回填（前缀纪律，2026-10-21）：裸 ValueError
+            # 会穿到 `_dispatch` 的兜底分支变成 `[工具异常] ValueError: …`——
+            # 那是「工具坏了」的语义，模型会倾向重试同一个调用，而这里要的是
+            # **改参数**。同族的 `ctf_submit_flag` 一直是捕获后返回 `[拒绝] …`。
+            # `[拒绝]` 同时进 HARD_REJECT_PREFIXES（连续 3 步硬拒 → E2 熔断挂人），
+            # 所以回填必须带**具体可执行的改法**，否则会把模型逼进熔断。
+            self.last_progress_step = self._step
+            return (f"[拒绝] bb_add_finding 未通过门禁：{e}\n"
+                    "——这是**参数不满足收录口径**，不是工具故障：按上面的要求补齐"
+                    "字段后**改参重报**（同一内容重发不会重复登记，会自动并入）；"
+                    "若确实够不上漏洞档（纯观察/线索），改 category=intel 再报。")
         self.last_progress_step = self._step
         # M5 D1 疑似重复警告（orchestrator-efficiency §0-9）：同链+同类但指纹
         # 不同——只提示不阻塞；警告进工具返回值（单次按需），不落事件无频控。

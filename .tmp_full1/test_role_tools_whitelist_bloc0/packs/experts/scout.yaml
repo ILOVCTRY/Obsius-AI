@@ -1,0 +1,4 @@
+name: scout
+persona: "侦察"
+skills: null
+tools: [bb_query]

@@ -147,6 +147,18 @@ class KbSearchIndex:
             return self._sync_locked(capabilities)
 
     def _sync_locked(self, capabilities: list[str] | None = None) -> dict[str, int]:
+        # **空方向保护（2026-10-21）**：`capabilities` 为空/None 时
+        # `load_kb_sources()` 返回零个源 → `wanted` 为空 → 下面的 stale 计算会把
+        # **全库**当成过期清掉（实测一次 `sync(None)` 删掉 1559 篇）。而 `search()`
+        # 每次都会先调 `sync(capabilities)`，任何没有方向的会话/调用方只要搜一次
+        # 就会把共享索引清空——这是数据丢失级隐患，不是「调用方用错参数」。
+        #
+        # 语义上「没有启用方向」= **本次不索引任何域**，而不是「磁盘上什么都不要了」；
+        # 索引是全局共享的（按 path 存多域），单次调用无权代表全库做删除决定。
+        # 故直接返回零变更，保留既有索引（检索时 `caps` 过滤仍会正确排除其他域）。
+        if not capabilities:
+            return {"added": 0, "updated": 0, "removed": 0, "total": 0,
+                    "skipped": "no_directions"}
         wanted: dict[str, tuple[Any, Path]] = {}
         for src, path in _iter_files(self.packs_root, capabilities):
             rel = path.relative_to(src.root).as_posix()

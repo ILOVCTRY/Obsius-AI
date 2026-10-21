@@ -309,7 +309,6 @@ function ExpertsPane({ tax, focus }: { tax: Taxonomy | null; focus: ExpertFocus 
   const [trackSel, setTrackSel] = useState<string[]>([]) // 空 = null = 服务全轨
   const [skills, setSkills] = useState<string[] | null>(null)
   const [skillCatalog, setSkillCatalog] = useState<SkillDef[]>([])
-  const [taskTypes, setTaskTypes] = useState("")
   const [tools, setTools] = useState<string[] | null>(null)
   const [toolCatalog, setToolCatalog] = useState<AgentTool[]>([])
   const [toolGroups, setToolGroups] = useState<string[]>([])
@@ -406,7 +405,6 @@ function ExpertsPane({ tax, focus }: { tax: Taxonomy | null; focus: ExpertFocus 
     // null 必须原样保留：null = 全量（后端不落键），[] = 一个都不启用。
     // 读成 [] 再保存会把「未限制」写成「全部禁用」。
     setSkills(cur.skills ?? null)
-    setTaskTypes((cur.task_types ?? []).join(", "))
     setTools(cur.tools ?? null)
     setMcpServers(cur.mcp_servers ?? null)
     setSteps(cur.max_steps != null ? String(cur.max_steps) : "")
@@ -419,7 +417,6 @@ function ExpertsPane({ tax, focus }: { tax: Taxonomy | null; focus: ExpertFocus 
 
   const save = async () => {
     if (!cur) return
-    const toList = (s: string) => s.split(/[,，]/).map((x) => x.trim()).filter(Boolean)
     const stepsTrim = steps.trim()
     try {
       // 全字段覆写（表单即最终态）：空值=null 不落键。
@@ -433,7 +430,8 @@ function ExpertsPane({ tax, focus }: { tax: Taxonomy | null; focus: ExpertFocus 
         skills,
         // kb 方向两态（null/[] 都=不限），表单不编辑但必须原样回传，否则覆写会清空。
         knowledge: cur.knowledge ?? null,
-        task_types: taskTypes.trim() ? toList(taskTypes) : null,
+        // task_types 已退役（2026-10-21）：不提交——全字段覆写时后端不再序列化
+        // 该键，存量 yaml 里的旧值随之被清掉（这是刻意行为）。
         // 工具白名单：勾选即开关（controller-tool-select，2026-10-20）。
         // 控制器与子专家同口径——null = 不落键（控制器此时回落代码默认面），
         // [] = 明确一个都不开，非空 = 勾选清单。
@@ -543,8 +541,8 @@ function ExpertsPane({ tax, focus }: { tax: Taxonomy | null; focus: ExpertFocus 
               kb 方向 knowledge（两态：空 = 不限方向；保存时原样保留，改方向请直接编辑 yaml）
               ：<code className="font-mono">{cur.knowledge?.length ? cur.knowledge.join(", ") : "不限"}</code>
             </p>
-            <label className="text-[10px] text-muted-foreground">任务类型 task_types（Worker 认领过滤器；按各轨注册表并集体检；留空 = 不限）</label>
-            <Input value={taskTypes} onChange={(e) => setTaskTypes(e.target.value)} className="font-mono text-xs" placeholder="recon, exploit" />
+            {/* task_types 输入框已移除（2026-10-21）：任务认领机制 2026-10-06
+                退役后该字段零运行时消费，留着只会让人对着无效字段做决策。 */}
             {/* 工具白名单（controller-tool-select，2026-10-20 定稿）：
                 控制器类智能体（chat-orchestrator / aggressive / artex / ctf-controller）
                 的 yaml `tools` 现在是**真实开关**——勾了就下发、没勾就既不下发 schema

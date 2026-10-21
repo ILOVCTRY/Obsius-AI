@@ -19,15 +19,15 @@ mode: self-contained
 
 | 特征 | 方法论（`web/漏洞分类/` 下） | 打法/弹药（`web/实战打法/` 下） |
 |---|---|---|
-| 登录页/鉴权逻辑整体 | `web/漏洞分类/认证绕过/认证绕过（登录-会话-密码重置-2FA）.md` | `web/实战打法/arbitrary-x-authz.md` |
-| 401/403 接口 | `web/漏洞分类/401与403绕过/401-403 状态码绕过测试.md`（path/METHOD/头现场改） | — |
-| JWT（none/弱密钥/混淆） | `web/漏洞分类/JWT/OAuth-JWT-SAML 安全.md` | `web/实战打法/oauth-saml-jwt/12-jwt.md`、`web/实战打法/api-rest/12-jwt-api.md` |
-| OAuth 授权码/redirect | `web/漏洞分类/JWT/OAuth-JWT-SAML 安全.md` | `web/实战打法/oauth-saml-jwt/10-oauth-redirect.md` |
-| SAML / SSO | `web/漏洞分类/JWT/OAuth-JWT-SAML 安全.md` | `web/实战打法/oauth-saml-jwt/11-saml.md` |
-| 认证杂项（session/cookie/记住我） | `web/漏洞分类/JWT/OAuth-JWT-SAML 安全.md` | `web/实战打法/oauth-saml-jwt/13-auth-misc.md` |
-| 验证码（图形/滑块/短信） | `web/漏洞分类/验证码识别/图形验证码 OCR 破解（ddddocr）.md` | — |
-| 类型戏法/松散比较绕过 | `web/漏洞分类/类型混淆/类型混淆（Type Juggling）测试.md` | — |
-| 短信/邮件轰炸类 | `web/漏洞分类/业务逻辑/逻辑漏洞.md` | — |
+| 登录页/鉴权逻辑整体 | `web/漏洞分类/认证绕过/authbypass-authentication-flaws.md` | `web/实战打法/任意 X 子授权——比 IDOR 更狠的权限维度漏洞.md` |
+| 401/403 接口 | `web/漏洞分类/401与403绕过/401-403-bypass（禁开磨登录 HTML）.md`（path/METHOD/头现场改） | — |
+| JWT（none/弱密钥/混淆） | `web/漏洞分类/JWT/OAuth、JWT、SAML 认证安全测试.md` | `web/实战打法/oauth-saml-jwt/12-JWT payload 库.md`、`web/实战打法/api-rest/12-JWT 安全(API 视角补充)payload 库.md` |
+| OAuth 授权码/redirect | `web/漏洞分类/JWT/OAuth、JWT、SAML 认证安全测试.md` | `web/实战打法/oauth-saml-jwt/10-OAuth、开放重定向 payload 库.md` |
+| SAML / SSO | `web/漏洞分类/JWT/OAuth、JWT、SAML 认证安全测试.md` | `web/实战打法/oauth-saml-jwt/11-SAML payload 库.md` |
+| 认证杂项（session/cookie/记住我） | `web/漏洞分类/JWT/OAuth、JWT、SAML 认证安全测试.md` | `web/实战打法/oauth-saml-jwt/13-通用认证、会话、密码重置、2FA payload 库.md` |
+| 验证码（图形/滑块/短信） | `web/漏洞分类/验证码识别/图形验证码 OCR 破解（ddddocr）— 解锁登录爆破链路.md` | — |
+| 类型戏法/松散比较绕过 | `web/漏洞分类/类型混淆/PHP 类型混淆（松散比较）全手法.md` | — |
+| 短信/邮件轰炸类 | `web/漏洞分类/业务逻辑/逻辑漏洞测试手册.md` | — |
 
 ## 纪律
 

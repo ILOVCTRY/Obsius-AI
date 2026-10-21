@@ -35,11 +35,11 @@ mode: self-contained
 ### 1.1 深挖细则（src-strike 侦察方法论，按需 Read，禁通读）
 
 - **锁面/自由跳判定与节奏**（一种子闭环、测绘节奏、种子队列）：
-  `kb_open(module="web/实战打法/rules/dig-scope-workflow.md")`（68K 大文件，
+  `kb_open(module="web/实战打法/rules/挖洞范围 · 锁面、自由跳（永久）.md")`（68K 大文件，
   只看需要的节，禁通读）。
-- **挖什么/类型矩阵**：`kb_open(module="web/实战打法/rules/src-value-hunting.md")`。
+- **挖什么/类型矩阵**：`kb_open(module="web/实战打法/rules/SRC 价值导向挖洞规则（强制经验）.md")`。
 - **测绘语法备忘/侦察方法论**：
-  `kb_open(module="web/信息收集/methodology/手册.md")`。
+  `kb_open(module="web/信息收集/methodology/信息收集与测试方法论.md")`。
 - 知识源引用的是包内快照路径；模块不存在时 kb_open 会回可选清单，照清单改选。
 
 ## 2. 产出落点（黑板联动）

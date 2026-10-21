@@ -28,6 +28,17 @@
 - `ChatStats.tsx` — **统计行**：`{tokens} tokens（含缓存） · 最后更新 {相对时间} · {N} 条消息`。
   导出 `fmtTokenCount`（847/1.2k/1.2m）与 `fmtRelative`（刚刚/N 分钟前…）。工作台传精确
   值（`thread.usage`），直播间传窗口内近似（`llm.usage` 事件求和 + `visible.length`）。
+- `CandidateFlagCard.tsx`（**2026-10-20**）— **候选 flag 确认卡**：CTF 解题主控的子代理
+  提交候选 flag（`verdict=pending`）时，后端唤醒主控说一段话（`core/chat/ctf_wake.py`），
+  本卡贴在 composer 上方给出「复制 / 确认有效 / 标记为错误」。三处刻意设计：
+  ① **flag 完整显示 + 独立复制钮**（不是徽章式点复制——对话流里没有台账表格的上下文提示，
+  徽章点复制不好发现）；② **确认按钮写明后果**（确认 = 题目判为解出 + **通知本项目所有在跑的
+  轮次尽快收工**——用词是「通知收工」不是「中止」：轮次会在下一个步边界读到事实、写完手上的
+  结论再停，不会被掐在半个工具调用里）；③ **标记为错误强制填理由**（理由进台账后同串再提交被 `is_rejected` 拦下，不填等于
+  让模型反复提交同一串）。数据源 `lib/useCandidateFlags.ts`（3s 轮询台账 + `wakeKey` 即重拉）——
+  **取台账不取事件载荷**：事件里 flag 被截到 120 字符，拿它做复制会复制出半截串。
+  徽章「可回环复算 / 仅形态判定」由 `flag.transform` 是否为空决定，这是人类判断「像不像答案」
+  的唯一机械依据。
 - `TeamCard.tsx`（**2026-10-06**）— **会话内团队卡**：直播间「指挥」对话流里呈现 Team
   （`core/team` 域，任务机制退役后的新执行单元）。两形态对齐 cc-haha Agent Teams 参考图——
   待确认态（`draft`/`ready`）：`等待人工确认 · 尚未启动成员 · N 位成员` + 团队名 + 「查看并配置」；
@@ -37,6 +48,19 @@
   [`components/team/TeamConfigDialog.tsx`](../team/CLAUDE.md)（名册编辑 + preflight + 四项确认启动）；
   运行态「打开运行报告」→ `views/live/TeamRunReport.tsx`（Run 成员执行明细）。
   **旧 `CoordinationProposalCard` 已随协调 DAG 退役（2026-10-06）**，团队卡是其替代。
+- `AttachmentChip.tsx`（**2026-10-20**）— **待发附件胶囊**：工作台 composer 与直播间插话框
+  共用（`AttachmentChipRow` 是一组胶囊的壳，空列表渲染 null）。这次是**重做**：旧版两处各粘
+  一份手写 `<span>` 方角小方块（`rounded-md border px-2 py-1`），图标一律 paperclip、文件名与
+  字节同字号——而 composer 其余控件（agent 选择、`.wb-cap`、用量环、发送键）全是圆胶囊，
+  只有附件方角，形态自成一族；也不看扩展名，任何文件长得一样（Nan 反馈「不够高级/太简陋/不协调」）。
+  现口径：**圆胶囊 + 类型图标 + 三层信息**（类型色方牌 → 文件名 → 字节弱化），三态
+  （`uploading`/`ready`/`error`）共用骨架只换状态位，避免宽度跳变；`error` 态红边 + 重试钮。
+  图标与色档复用 `FileCard.tsx` 导出的 `FILE_ICONS`/`FILE_TONES`/`FILE_TONE_BG`（与文件卡同族）。
+  **两个实测坑**：① 图标底不能用 `--accent`——五套配色里 accent 与背景同色系，`rose-light`
+  亮底上灰牌直接溶进白底消失；必须用「类型色 12% 淡底」。② 字节数**不能用 `font-mono`**：
+  9.5px 等宽字距散成「4 . 0  K B」，改 sans + `tabular-nums`。另：`dark:` 变体在本项目**是死的**
+  （`@custom-variant dark (&:is(.dark *))` 但从不给 `<html>` 加 `.dark`，配色走 `data-theme`），
+  别用 `dark:` 做亮暗分档。
 
 ## 约定与坑
 

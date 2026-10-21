@@ -3,6 +3,7 @@ import { Sparkles } from "lucide-react"
 import { api } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import { ProposalsPane } from "@/components/settings/ProposalsPane"
+import { KbIterationRulesButton } from "@/components/settings/KbIterationRules"
 
 // 变更提案（工作区顶级入口，2026-10-14）：packs 级提案审批——知识库文档与技能的
 // 新建/改写/删除（含技能删除进回收站），应用前自动备份 + 引用联动。提案全局共享；
@@ -46,6 +47,7 @@ export function ProposalsView({ pid }: { pid?: string }) {
           Agent 提出的知识库/技能变更在此审批；应用前自动备份、删除进回收站
         </span>
         <span className="min-w-0 flex-1" />
+        <KbIterationRulesButton pid={pid} />
         {pid && enabled !== null && (
           <button
             type="button"

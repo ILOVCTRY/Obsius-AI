@@ -5,7 +5,7 @@ import {
 import { createPortal } from "react-dom"
 import {
   AlertTriangle, Bot, Check, ChevronDown, CircleSlash, Clock3, Cpu, Gauge, Globe,
-  Loader2, Paperclip, Plug, Plus, RefreshCw, Send, Sparkles, Square, Trash2,
+  Loader2, Plug, Plus, RefreshCw, Send, Sparkles, Square, Trash2,
   Wrench, X, Zap,
 } from "lucide-react"
 import { api, ApiError } from "@/lib/api"
@@ -18,6 +18,7 @@ import { MarkdownView } from "@/components/settings/MarkdownView"
 import { WorkbenchContextRail } from "@/components/workbench/WorkbenchContextRail"
 import { ActivityGroup } from "@/components/chat/ActivityGroup"
 import { ApprovalCard } from "@/components/chat/ApprovalCard"
+import { AttachmentChipRow } from "@/components/chat/AttachmentChip"
 import { CandidateFlagCard } from "@/components/chat/CandidateFlagCard"
 import { FileCardList } from "@/components/chat/FileCard"
 import { ChatStats } from "@/components/chat/ChatStats"
@@ -97,6 +98,10 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
   // 现置 stopping 让按钮立刻变「停止中…」并禁用，直到 running 转 false。
   const [stopping, setStopping] = useState(false)
   const [pendingIn, setPendingIn] = useState<string | null>(null)
+  // 已投递但还没被读到的人类插话（chat-hit，2026-10-21）：主控正在跑，
+  // 消息进了通知箱等它自己读。展示成一条淡提示，让用户知道「收下了」而不是
+  // 「没发出去」——此前这里会 409 报错，用户以为功能坏了。
+  const [hitQueued, setHitQueued] = useState<string | null>(null)
   const [assets, setAssets] = useState<Asset[]>([])
   const [err, setErr] = useState<string | null>(null)
   const [panel, setPanel] = useState<PanelTab>(null)
@@ -412,6 +417,9 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
   // 只补 chat_messages 结果行、没补 done 事件）在 Map 里永久驻留，被当成本轮正在跑
   // 的工具（用户实测：中断前的 list_symbols 重启后仍显示「运行中」）。改按事件流
   // 最后一条判定 + 已落库结果行交叉排除孤儿。
+  // 2026-10-20：**找不到 start 时不能直接判「没有工具在跑」**——窗口里可能压根没有
+  // 这条 start（流式增量挤占窗口，见 useEvents 的 DELTA_KEEP）。此时退到持久化
+  // 消息判据：本轮仍有 assistant(tool_calls) 未落结果行 = 确实有工具在跑。
   const liveToolStart = useMemo(() => {
     type LiveTool = { tool_call_id?: string; phase?: string; name?: string; args_head?: string }
     const answered = new Set<string>()
@@ -428,6 +436,8 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
       // 带上 start 事件时刻 → 工具行显示「已运行 Ns」（逐秒刷新，2026-10-13）
       return { ...p, created_at: e.created_at }
     }
+    // 窗口内没有任何本线程的 chat.tool：不编造实时行（消息判据只决定「有没有」，
+    // 无法给出可靠的起始时刻，交给时间线上的持久化行去计时）。
     return null
   }, [events, tid, messages])
   // 传输层 524 重试进度：provider 通过 chat.retry 事件实时上报，避免长时间
@@ -469,6 +479,20 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
     m.role === "assistant" && (m.tool_calls ?? []).some((tc) =>
       !messages.some((x) => x.role === "tool" && x.tool_use_id === tc.id))), [messages])
   const running = thread?.status === "running"
+  // 插话提示的自动清理：本轮结束（running 转 false）就该消失——那时它要么已被
+  // 读到、要么随轮末一起收尾。另外后端读到时会发 chat.notice 事件，看到就清。
+  useEffect(() => {
+    if (!running) { setHitQueued(null); return }
+    for (let i = events.length - 1; i >= 0; i--) {
+      const e = events[i]
+      if (e.kind === "chat.hit") continue
+      if (e.kind === "chat.notice") {
+        const p = e.payload as { thread_id?: string }
+        if (p?.thread_id === tid) { setHitQueued(null); return }
+      }
+      break
+    }
+  }, [running, events, tid])
 
   // 上下文用量（K9-C / ct-8）：分母=后端下发的真实硬窗口（缺省回落 256K）；
   // 软上限=有效工作窗口（支持 1M≠在 1M 最好），超此会触发压缩，作为警戒线。
@@ -586,7 +610,22 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
                                              webSearchDraft)
         id = t.id; setTid(id)
       }
-      await api.chatSend(id, body, refs, readyIds)
+      const r = await api.chatSend(id, body, refs, readyIds)
+      // 插话（chat-hit，2026-10-21）：本轮仍在跑时后端不再 409，而是把这条消息
+      // 投进该线程的通知箱，由正在跑的那一轮自己读进去。**call_expert 不受影响**
+      // ——已派出的专家照旧跑完，结果以「[后台并发结果]」补达。
+      // 此时不能清 pendingIn（乐观行会让用户以为起了新一轮），也不该清空输入
+      // 草稿以外的东西：消息确实被收下了，只是还没被读到。
+      if (r?.status === "queued") {
+        // 清掉乐观行：这条消息**没有**起新轮，主控仍在跑（时间线由事件流驱动，
+        // 插话本身会以 chat.hit 事件出现在流里）。
+        setPendingIn(null)
+        setHitQueued(body)
+        setRefsDraft({ skills: [], mcps: [] })
+        const sentQ = new Set(pendingFiles.filter((f) => f.status === "ready").map((f) => f.key))
+        setPendingFiles((fs) => fs.filter((f) => !sentQ.has(f.key)))
+        return
+      }
       setRefsDraft({ skills: [], mcps: [] })
       const sent = new Set(pendingFiles.filter((f) => f.status === "ready").map((f) => f.key))
       setPendingFiles((fs) => fs.filter((f) => !sent.has(f.key)))
@@ -803,12 +842,10 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
                   <ActivityGroup key={it.id} steps={it.steps} live={running}
                     failedCount={it.steps.filter((s) => s.failed).length}
                     className="wb-anim">
-                    {it.rows.map((r) => {
+                    {it.rows.map((r, idx) => {
                       if (r.kind === "thinking") return <ThinkingBlock key={r.id} content={r.content} />
                       // start 事件时刻：后端串行执行同批 tool_calls，只有真正轮到的那个才有
-                      // start 事件（2026-10-14 修「同批第二个工具恒显静态运行中」）。拿不到
-                      // start 而本轮仍在跑 = 排在队里 → 退到调用发起时刻计「排队中 Ns」；
-                      // 本轮已停且无 start（孤儿行）维持原「运行中」，不编造时刻。
+                      // start 事件（2026-10-14 修「同批第二个工具恒显静态运行中」）。
                       const started = liveTools.startAtById.get(r.id)
                         ?? liveTools.legacyStarts.find((p) => p.name === r.name
                           && p.args_head === JSON.stringify(r.args ?? {}).slice(0, 300))?.created_at
@@ -818,11 +855,28 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
                       const pendingBackground = (r.result ?? "").startsWith("[后台继续]")
                       const rowDone = !pendingBackground
                         && (r.done || liveTools.byId.get(r.id)?.phase === "done")
-                      const queued = !started && !rowDone && running
+                      // 「排队」判据（2026-10-20 修「真在跑却显示排队中」）：
+                      // **不能靠「窗口里有没有 start 事件」**——events 窗口只有
+                      // HYDRATE_LIMIT=300 条，而流式 chat.thinking.delta 每条带累计
+                      // 全文、实测峰值 76 条/秒（两个子代理同时思考），start 事件
+                      // 几十秒就被挤出窗口 → startAtById 查不到 → 所有在跑的工具
+                      // 全被误判成「排队中」（用户实测：call_expert 已在跑，却显示
+                      // 「排队中 76s」）。真正可靠的判据是**同组内更早的 tool 行是否
+                      // 仍未收尾**：后端串行执行同批 tool_calls，只有前面都收尾了才
+                      // 轮到后面那个；前面没有未完成的 = 当前就是在跑的那个。
+                      const blockedByEarlier = it.rows
+                        .slice(0, idx).some((p) => p.kind === "tool" && !p.done)
+                      const queued = !started && !rowDone && running && blockedByEarlier
+                      // 计时起点：有 start 用 start；在跑但 start 已滑出窗口 → 退到
+                      // 调用发起时刻（r.at）照样计时，别退化成静态「运行中」；本轮
+                      // 已停且无 start（孤儿行）不给时刻，不编造。
+                      const startedAt = started
+                        ?? (rowDone ? undefined : (running ? r.at : undefined))
                       return <ToolBlock key={r.id} name={r.name} args={r.args}
                         result={r.result}
-                        startedAt={started ?? (queued ? r.at : undefined)}
+                        startedAt={startedAt}
                         queued={queued}
+                        running={running}
                         done={rowDone}
                         live={liveTools.byId.get(r.id)
                           ?? liveTools.legacy.find((p) => p.name === r.name
@@ -1067,38 +1121,35 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
               </button>
               <span className="wb-composer-status">
                 {(running || !!pendingIn || sending)
-                  ? <><span className="wb-dot is-running" />正在执行 · 可停止</>
+                  ? <><span className="wb-dot is-running" />正在执行 · 可插话</>
                   : <><span className="wb-dot" />待命</>}
               </span>
             </div>
-            {pendingFiles.length > 0 && (
-              <div className="mb-1.5 flex flex-wrap items-center gap-1.5">
-                {pendingFiles.map((f) => (
-                  <span key={f.key}
-                    className={cn("inline-flex max-w-64 items-center gap-1 rounded-md border px-2 py-1 text-xs",
-                      f.status === "error" && "border-destructive/50 text-destructive",
-                      f.status === "uploading" && "opacity-60")}
-                    title={f.status === "error" ? "上传失败，点「重试」再传" : `${f.name}（${fmtBytes(f.size)}）`}>
-                    <Paperclip className="size-3 shrink-0" />
-                    <span className="min-w-0 truncate">{f.name}</span>
-                    <span className="shrink-0 text-[10px] text-muted-foreground">{fmtBytes(f.size)}</span>
-                    {f.status === "uploading" && <span className="shrink-0 text-[10px]">上传中…</span>}
-                    {f.status === "error" && (
-                      <button type="button" className="shrink-0 underline" onClick={() => retryFile(f.key)}>重试</button>
-                    )}
-                    <button type="button" className="shrink-0 text-muted-foreground hover:text-foreground"
-                            onClick={() => removeFile(f.key)} title="移除附件">
-                      <X className="size-3" />
-                    </button>
-                  </span>
-                ))}
+            {/* 插话已投递（chat-hit）：主控正在等专家返回，消息进了通知箱，
+                它会在下一个可读点自己读进去。明确写「专家不受影响」，否则用户
+                会以为这句话会打断正在跑的 call_expert。 */}
+            {hitQueued && running && (
+              <div className="mb-2 rounded-md border border-border/60 bg-muted/40 px-2 py-1 text-[10.5px] text-muted-foreground">
+                💬 插话已投递，主控读到后按它调整（已派出的专家继续跑，结果会补达）
               </div>
+            )}
+            {pendingFiles.length > 0 && (
+              <AttachmentChipRow
+                className="mb-2 px-0.5"
+                items={pendingFiles.map((f) => ({
+                  key: f.key, name: f.name, size: f.size, status: f.status,
+                }))}
+                onRemove={removeFile}
+                onRetry={retryFile}
+              />
             )}
             <textarea
               ref={inputRef}
               rows={2}
               value={input}
-              placeholder={running ? "当前线程执行中，可点「停止」中止本轮…" : "描述测试意图，回车发送（Shift+回车 换行，/ 唤出命令，可粘贴或拖入附件）"}
+              placeholder={running
+                ? "主控执行中：输入可插话（补充信息/纠偏），回车发送——不会打断已派出的专家…"
+                : "描述测试意图，回车发送（Shift+回车 换行，/ 唤出命令，可粘贴或拖入附件）"}
               onChange={(e) => onInputChange(e.target.value)}
               onPaste={(e) => {
                 const files = e.clipboardData?.files
@@ -1347,13 +1398,6 @@ function fmtTokens(n: number): string {
   return n >= 1024 ? `${(n / 1024).toFixed(1)}K` : String(n)
 }
 
-/** 字节 → 人类可读（附件 chip 用；与 LiveRoom 同款）。 */
-function fmtBytes(n: number): string {
-  if (n < 1024) return `${n} B`
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
-  return `${(n / 1024 / 1024).toFixed(1)} MB`
-}
-
 function fmtTime(iso: string): string {
   try {
     const d = new Date(iso.endsWith("Z") || iso.includes("T") ? iso : iso.replace(" ", "T") + "Z")
@@ -1561,13 +1605,15 @@ function TodoCard({ todo }: { todo: { id: string; title: string; status: string 
 
 // 工具明细行（会话流改造 2026-10-03）：折在 ActivityGroup 展开态里的一行，
 // 点开看参数/结果原文（Tailwind 工具类，不再用 .wb-tool 卡片样式）。
-function ToolBlock({ name, args, argsHead, result, done, live, startedAt, queued }: {
+function ToolBlock({ name, args, argsHead, result, done, live, startedAt, queued, running }: {
   name: string; args?: Record<string, unknown>; argsHead?: string
   result?: string; done: boolean
   live?: { ok?: boolean; duration_s?: number; result_head?: string } | null
   startedAt?: string
   /** 已发起但尚未轮到执行（同批串行排队）——计时改口径为「排队中」，见 GroupRow.at 注释 */
   queued?: boolean
+  /** 本轮是否仍在跑：区分「运行中」与「已中断」孤儿行（无计时起点时用） */
+  running?: boolean
 }) {
   const [open, setOpen] = useState(false)
   // 运行中逐秒刷新「已运行 Ns」（2026-10-13）：替代静态「运行中」，长工具（MCP 全量
@@ -1601,7 +1647,10 @@ function ToolBlock({ name, args, argsHead, result, done, live, startedAt, queued
         </span>
         {!done && <span className={cn("shrink-0 font-mono text-[9px]",
           queued ? "text-muted-foreground" : "text-primary")}>
-          {startedAt ? `${queued ? "排队中" : "已运行"} ${elapsed}s` : "运行中"}
+          {/* 三种态各自说真话：有起点=在计时（排队/已运行）；无起点但在跑=「运行中」；
+              无起点且本轮已停=孤儿行（被中断，没落结果也没 start），**不冒充在跑**。 */}
+          {startedAt ? `${queued ? "排队中" : "已运行"} ${elapsed}s`
+            : running ? "运行中" : "已中断"}
         </span>}
         {done && live && <span className="shrink-0 font-mono text-[9px] text-muted-foreground/60">{live.duration_s ?? "?"}s</span>}
         {done && <ChevronDown size={12} className={cn("shrink-0 text-muted-foreground transition-transform", open && "rotate-180")} />}

@@ -2,7 +2,7 @@
 
 _8 条 web payload_
 
-### CSRF基础攻击  `csrf-basic`
+## CSRF基础攻击  `csrf-basic`
 _跨站请求伪造基础攻击技术_
 子类：**基础攻击** · tags: `csrf` `cross-site` `request` `forgery`
 
@@ -315,10 +315,10 @@ Access-Control-Allow-Origin: [任意Origin]
 - ` Access-Control-Allow-Origin: null
 Access-Control-Allow-Credentials: true
 
-# Access-Control-Allow-Origin: *
+## Access-Control-Allow-Origin: *
 允许任意源
 
-# 反射Origin
+## 反射Origin
 Access-Control-Allow-Origin: [任意Origin]` — 参数与载荷内容 _value_
 
 
@@ -544,7 +544,7 @@ X-HTTP-Method-Override: PUT
 - ` 使用_method参数
 POST /action?_method=PUT&token=xxx
 
-# 使用X-HTTP-Method-Override
+## 使用X-HTTP-Method-Override
 X-HTTP-Method-Override: PUT` — 参数与载荷内容 _value_
 
 **JSON格式**
@@ -563,7 +563,7 @@ Content-Type: application/json
 - `delete` — SQL关键字 _keyword_
 - `"}
 
-# 可能绕过Token验证` — SQL表达式 _value_
+## 可能绕过Token验证` — SQL表达式 _value_
 
 
 **概述：** CSRF Token绕过是最常见的CSRF防护绕过方式，通过分析Token生成算法、利用实现缺陷或结合其他漏洞(如XSS)来获取或预测有效的Token值。
@@ -672,7 +672,7 @@ Referer: http://target.com
 - ` 使用iframe嵌入目标
 <iframe src="http://target.com" referrerpolicy="no-referrer">
 
-# sandbox属性
+## sandbox属性
 <iframe sandbox="allow-scripts" src="...">` — 参数与载荷内容 _value_
 
 **Flash/SWF**
@@ -684,7 +684,7 @@ Referer: http://target.com
 **语法解析：**
 - `#` — 命令/载荷起始 _command_
 - ` Flash可以控制Referer
-# 编译SWF发送自定义Referer` — 参数与载荷内容 _value_
+## 编译SWF发送自定义Referer` — 参数与载荷内容 _value_
 
 
 **概述：** Referer验证是CSRF防御的补充手段，但由于Referer头可被操纵或省略，基于Referer的防护通常不够可靠。多种技术可绕过不严格的Referer验证逻辑。
@@ -791,8 +791,8 @@ req.requestHeaders.push(
 **语法解析：**
 - `#` — 命令/载荷起始 _command_
 - ` Flash可以绕过CORS预检
-# 直接发送POST请求
-# 携带Cookie` — 参数与载荷内容 _value_
+## 直接发送POST请求
+## 携带Cookie` — 参数与载荷内容 _value_
 
 
 **概述：** Flash CSRF利用Adobe Flash的跨域请求能力发送自定义Content-Type的HTTP请求，虽然Flash已于2020年末停止支持，但了解此技术对理解CSRF攻击演变仍有价值。

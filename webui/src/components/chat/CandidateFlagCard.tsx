@@ -14,8 +14,14 @@ import type { ChallengeFlag } from "@/lib/types"
  *  1. **flag 完整显示 + 独立复制钮**：人类要的是「复制这串」，不是「点徽章试试看」。
  *     徽章式点复制（`Blackboard.FlagBadge`）在对话流里不好发现——那里没有台账
  *     表格的上下文提示。
- *  2. **确认按钮写明后果**：确认 = 题目判为解出 + **中止本项目所有在跑的轮次**
- *     （`app._abort_project_chat_turns`）。不写清楚，用户会以为是「标一下」。
+ *  2. **确认按钮写明后果**：确认 = 题目判为解出 + **通知这道题所有在跑的轮次
+ *     （含子 agent）尽快收工**（`app._notify_project_chat_turns` →
+ *     `core/chat/inbox.py`）。
+ *     注意用词：是「通知收工」不是「中止」——轮次会在下一个步边界读到这条
+ *     事实、写完手上的结论再停，不会被掐在半个工具调用里。写成「中止」会让
+ *     用户以为结论会丢。
+ *     范围是**这道题**不是整个项目：同一项目里并行跑的另一道题不受影响
+ *     （按 pid 全量投递会让别题的 worker 停掉自己正在做的事）。
  *  3. **标记为错误要填理由**：理由写进台账后，同一串再提交会被 `is_rejected`
  *     拦下（`ctf_submit_flag` 直接拒收）。不填理由等于让模型反复提交同一串。
  */
@@ -118,8 +124,9 @@ function OneFlag({ flag, onDecide, busy }: {
 
       <p className="mt-2 flex items-start gap-1.5 rounded border border-(--status-approval)/40 bg-(--status-approval)/10 p-2 text-[11px] text-(--status-approval)">
         <ShieldAlert size={13} className="mt-0.5 shrink-0" />
-        确认 = 该题判为解出，并<b className="mx-0.5">中止本项目所有在跑的轮次</b>
-        （含仍在探索的其他方向）。候选不计解出，所以这一步只能由你来做。
+        确认 = 该题判为解出，并<b className="mx-0.5">通知这道题所有在跑的轮次（含子 agent）尽快收工</b>
+        （含仍在探索的其他方向；它们会先把手上的结论写回再停）。之后调度层不再为
+        这道题派新方向。候选不计解出，所以这一步只能由你来做。
       </p>
 
       <div className="mt-2 flex items-center justify-end gap-2">

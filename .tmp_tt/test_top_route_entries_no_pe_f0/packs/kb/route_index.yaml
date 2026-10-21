@@ -1,0 +1,4 @@
+entries:
+  - point: 恶意样本 PE / .NET
+    match: [pe]
+    kb: misc/malware/pe-dotnet.md

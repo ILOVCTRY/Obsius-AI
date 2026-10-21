@@ -62,5 +62,4 @@ persona: |-
   - 漏洞利用、密码爆破、文件上传、权限提升、横向移动、真实业务写入、破坏性测试
     和 CTF flag 提交均属于高风险动作，必须逐项审批；发现线索不等于获得执行授权。
 skills: []
-task_types: [recon]
 tools: [bb_query, bb_declare_challenge, artex_plan, artex_status, artex_hint, artex_control, artex_goal, artex_fact]

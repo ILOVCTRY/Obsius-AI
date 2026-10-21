@@ -14,7 +14,7 @@ mode: self-contained
 
 > 分层纪律：本技能只做**题型判定 → 开专题**。攻击细节与可运行代码在 crypto
 > 英文参考资料（每篇一个技术族），用 `kb_open(module=…)` 按表开单篇，禁止通读。
-> 拿不准题型先翻 `crypto/README.md` 的总索引。
+> 拿不准题型先翻 `crypto/知识库.md` 的总索引。
 
 ## 0. 先看题面给了什么
 
@@ -30,20 +30,20 @@ mode: self-contained
 
 | 题面特征 | kb_open 模块（crypto/） |
 |---|---|
-| RSA：小 e 开方、共模、Wiener、Pollard p-1、Håstad 广播、Franklin-Reiter、Fermat | `crypto/非对称加密/rsa-attacks.md` 前半 |
-| RSA：dp/dq 部分泄露、多素数、批 GCD、CRT 故障注入、低指数签名伪造、Manger | `crypto/非对称加密/rsa-attacks.md` Part 2 |
-| ECC：小群/无效曲线/异常曲线 Smart、ECDSA nonce 复用、Pohlig-Hellman | `crypto/非对称加密/ecc-attacks.md` |
-| DH：平凡生成元、平滑阶、小群 confinement、Logjam | `crypto/非对称加密/dh-attacks.md` |
-| 分组：ECB 泄露/逐字节、CBC padding oracle、CBC bit-flip、Bleichenbacher(ROBOT) | `crypto/对称加密/modern-ciphers.md` 前半 |
-| 分组进阶：Blum-Goldwasser、长度扩展、压缩预言、ECB cut-and-paste、Rabin LSB | `crypto/对称加密/modern-ciphers.md` Part 2/3 |
-| AEAD：AES-GCM nonce 复用、ChaCha20-Poly1305、key-committing 分割格攻击 | `crypto/对称加密/modern-ciphers.md` Part 4 |
-| 流密码：LFSR（Berlekamp-Massey/相关攻击）、RC4 偏置 | `crypto/对称加密/stream-ciphers.md` |
-| PRNG：MT19937 预测、LCG、时间种子、V8 Math.random、randcrack | `crypto/随机数/prng.md`、`crypto/随机数/prng-attacks.md` |
-| 古典：维吉尼亚/凯撒/埃特巴什/XOR 多字节频率分析/书密码/OTP 复用 | `crypto/古典密码/classic-ciphers.md` |
-| 格：LLL/BKZ/Babai、HNP、截短 LCG、LWE/Ring-LWE、NTRU、背包、Coppersmith | `crypto/格与后量子/lattice-and-lwe.md`、`crypto/高阶专题/advanced-math.md` |
-| ZKP / 秘密分享 / 异或协议 / 杂项代数结构（Paillier 等） | `crypto/高阶专题/zkp-and-advanced.md`、`crypto/高阶专题/exotic-crypto.md` |
-| 后量子识别（Kyber/ML-DSA/Falcon/NTT） | `crypto/格与后量子/post-quantum.md` |
-| 历史密码机（Lorenz 等） | `crypto/古典密码/historical.md` |
+| RSA：小 e 开方、共模、Wiener、Pollard p-1、Håstad 广播、Franklin-Reiter、Fermat | `crypto/非对称加密/RSA 攻击判据手册.md` 前半 |
+| RSA：dp/dq 部分泄露、多素数、批 GCD、CRT 故障注入、低指数签名伪造、Manger | `crypto/非对称加密/RSA 攻击判据手册.md` Part 2 |
+| ECC：小群/无效曲线/异常曲线 Smart、ECDSA nonce 复用、Pohlig-Hellman | `crypto/非对称加密/椭圆曲线攻击.md` |
+| DH：平凡生成元、平滑阶、小群 confinement、Logjam | `crypto/非对称加密/有限域 DH 攻击.md` |
+| 分组：ECB 泄露/逐字节、CBC padding oracle、CBC bit-flip、Bleichenbacher(ROBOT) | `crypto/对称加密/分组密码、MAC 与 AEAD 攻击.md` 前半 |
+| 分组进阶：Blum-Goldwasser、长度扩展、压缩预言、ECB cut-and-paste、Rabin LSB | `crypto/对称加密/分组密码、MAC 与 AEAD 攻击.md` Part 2/3 |
+| AEAD：AES-GCM nonce 复用、ChaCha20-Poly1305、key-committing 分割格攻击 | `crypto/对称加密/分组密码、MAC 与 AEAD 攻击.md` Part 4 |
+| 流密码：LFSR（Berlekamp-Massey/相关攻击）、RC4 偏置 | `crypto/对称加密/流密码攻击.md` |
+| PRNG：MT19937 预测、LCG、时间种子、V8 Math.random、randcrack | `crypto/随机数/伪随机数生成器与密钥恢复.md`、`crypto/随机数/PRNG 攻击（CTF 手法）.md` |
+| 古典：维吉尼亚/凯撒/埃特巴什/XOR 多字节频率分析/书密码/OTP 复用 | `crypto/古典密码/古典密码与结构化 XOR 攻击.md` |
+| 格：LLL/BKZ/Babai、HNP、截短 LCG、LWE/Ring-LWE、NTRU、背包、Coppersmith | `crypto/格与后量子/格与 LWE 攻击.md`、`crypto/高阶专题/高阶数学攻击.md` |
+| ZKP / 秘密分享 / 异或协议 / 杂项代数结构（Paillier 等） | `crypto/高阶专题/零知识证明与高阶密码攻击.md`、`crypto/高阶专题/非常规代数结构与密码体制.md` |
+| 后量子识别（Kyber/ML-DSA/Falcon/NTT） | `crypto/格与后量子/后量子识别与 LWE 策略选择.md` |
+| 历史密码机（Lorenz 等） | `crypto/古典密码/历史密码机.md` |
 
 ## 2. 纪律
 

@@ -23,7 +23,10 @@
   状态冲突。
 - 同一 `flag_id` 只唤醒一次（事件记账 `chat.ctf_flag_wake`，重启后仍有效）。
 - 人工确认（`decide_flag` 的 accepted）**不**走这里——那是
-  `_abort_project_chat_turns` 的地盘，语义是「停」，不是「说一句」。
+  `_notify_project_chat_turns` 的地盘：向**该项目**在跑的轮次投递一条
+  「题解出了，尽快收工」通知（`NoticeInbox`），而不是开一轮新对话去解释候选。
+  两者语义不同：那个是「告诉正在跑的那一轮事实变了」，这个是「唤醒空闲主控
+  说一段话」。
 - 非 AI 提交（`judged_by != "ai"`）不唤醒——人工录入的 flag 不需要 AI 再解释。
 """
 

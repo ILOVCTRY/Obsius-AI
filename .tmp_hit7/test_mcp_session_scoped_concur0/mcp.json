@@ -1,0 +1,1 @@
+{"servers": [{"name": "playwright", "url": "", "transport": "stdio", "command": "no-such-bin-pw", "args": [], "enabled": true, "domains": ["pentest"]}]}

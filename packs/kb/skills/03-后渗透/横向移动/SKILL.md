@@ -16,13 +16,13 @@ mode: self-contained
 
 | 阶段 | kb_open 模块 |
 |---|---|
-| 凭据收集（横向的弹药） | `web/后渗透/intranet-postexp/10-credentials.md` |
-| 横向移动打法总纲 | `web/后渗透/intranet-postexp/11-lateral.md` |
-| 域内信息/域攻面 | `web/后渗透/intranet-postexp/14-domain.md` |
-| Exchange / 邮件面 | `web/后渗透/intranet-postexp/18-exchange.md` |
-| ADCS 误配横向 | `web/后渗透/intranet-postexp/19-adcs.md` |
-| SharePoint 面 | `web/后渗透/intranet-postexp/20-sharepoint.md` |
-| 隧道打通新网段 | `web/后渗透/intranet-postexp/15-tunneling.md` |
+| 凭据收集（横向的弹药） | `web/后渗透/intranet-postexp/10-内网、后渗透 — 凭证窃取 payload 库.md` |
+| 横向移动打法总纲 | `web/后渗透/intranet-postexp/11-内网、后渗透 — 横向移动 payload 库.md` |
+| 域内信息/域攻面 | `web/后渗透/intranet-postexp/14-内网、后渗透 — 域渗透攻击 payload 库.md` |
+| Exchange / 邮件面 | `web/后渗透/intranet-postexp/18-内网、后渗透 — Exchange 攻击 payload 库.md` |
+| ADCS 误配横向 | `web/后渗透/intranet-postexp/19-内网、后渗透 — ADCS 攻击 payload 库.md` |
+| SharePoint 面 | `web/后渗透/intranet-postexp/20-内网、后渗透 — SharePoint 攻击 payload 库.md` |
+| 隧道打通新网段 | `web/后渗透/intranet-postexp/15-内网、后渗透 — 隧道代理 payload 库.md` |
 
 ## 纪律
 

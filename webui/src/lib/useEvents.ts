@@ -30,6 +30,29 @@ const PAGE = 50
 const HYDRATE_LIMIT = 300
 const CACHE_LIMIT = 2000
 
+// 流式增量是「累计全文」的一次性快照，**只有最后一条有用**（前端取最后一条覆盖
+// 上屏，终稿到达后整批由后端 prune_chat_thread_deltas 删除）。但它们与业务事件
+// 抢同一个窗口：实测两个子代理同时思考时 chat.thinking.delta 峰值 76 条/秒，
+// 300 条的窗口只够装约 4 秒 → 几十秒前的 chat.tool start 被挤出窗口，工作台
+// 把「正在跑」的工具误判成「排队中」（2026-10-20 用户实测）。
+// 故对增量类事件单独设保留上限：给业务事件（chat.tool / chat.message / 各类
+// 审计）腾出窗口深度，增量的实时性完全不受影响（只留最新若干条足够）。
+const DELTA_KINDS = new Set(["chat.delta", "chat.thinking.delta"])
+const DELTA_KEEP = 80
+
+/** 只保留最新的 DELTA_KEEP 条流式增量，其余原样保留。已是压缩态则原样返回。 */
+function compactDeltas(events: BBEvent[]): BBEvent[] {
+  let n = 0
+  for (const e of events) if (DELTA_KINDS.has(e.kind)) n++
+  if (n <= DELTA_KEEP) return events
+  const keep = new Set<number>()
+  let kept = 0
+  for (let i = events.length - 1; i >= 0 && kept < DELTA_KEEP; i--) {
+    if (DELTA_KINDS.has(events[i].kind)) { keep.add(i); kept++ }
+  }
+  return events.filter((e, i) => !DELTA_KINDS.has(e.kind) || keep.has(i))
+}
+
 const cache = new Map<string, { events: BBEvent[]; loadedAll: boolean }>()
 
 // 两个升序数组按 id 归并去重（append 与 prepend 共用）
@@ -55,9 +78,13 @@ function writeCache(key: string, incoming: BBEvent[], loadedAll?: boolean): BBEv
     events = events.slice(-CACHE_LIMIT)
     all = false // 头部被裁：内存不再覆盖全部历史，上翻交回网络分页重取
   }
+  // 增量类只留最新若干条（见 DELTA_KEEP 注释）：它们与业务事件抢窗口深度，
+  // 而只有最后一条会被渲染。压缩不改变顺序，也不动任何业务事件。
+  events = compactDeltas(events)
   cache.set(key, { events, loadedAll: all })
   return events
 }
+
 
 export function useEvents(
   pid: string | null, sessionId?: string | null,
@@ -132,7 +159,9 @@ export function useEvents(
       setEvents((prev) => {
         const last = prev.length ? prev[prev.length - 1].id : 0
         const fresh = batch.filter((e) => e.id > last)
-        return fresh.length ? [...prev, ...fresh] : prev
+        // 展示窗口同样压增量（见 DELTA_KEEP）：本轮长跑时窗口会一直 append，
+        // 不压则数千条累计全文快照堆在内存里，且把业务事件挤到数组头部之外。
+        return fresh.length ? compactDeltas([...prev, ...fresh]) : prev
       })
     }
 

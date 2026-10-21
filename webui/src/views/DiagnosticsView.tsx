@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import type { BBEvent, ChatMessage, DiagFailure, DiagLlmDump,
   DiagRedlineTest, DiagRequestDetail, DiagRequestMeta, DiagSession,
-  DiagSystemPrompt, LlmProvider } from "@/lib/types"
+  DiagSkillUsage, DiagSystemPrompt, LlmProvider } from "@/lib/types"
 
 /** 诊断（diagnostics-log，2026-10-14）：会话消息审计 + 工具/MCP 失败日志。
  *  左会话清单（chat 对话线程 / agent 执行会话），右侧会话消息流；
@@ -26,7 +26,7 @@ export function DiagnosticsView({ pid }: { pid?: string | null }) {
   const [chatMsgs, setChatMsgs] = useState<ChatMessage[] | null>(null)
   const [agentEvents, setAgentEvents] = useState<BBEvent[] | null>(null)
   const [loadingMsgs, setLoadingMsgs] = useState(false)
-  const [tab, setTab] = useState<"sessions" | "failures">("sessions")
+  const [tab, setTab] = useState<"sessions" | "failures" | "skills">("sessions")
   // 请求体留痕开关（进程级）：进页面读一次，点击切换
   const [dump, setDump] = useState<DiagLlmDump | null>(null)
   const [dumpBusy, setDumpBusy] = useState(false)
@@ -104,6 +104,10 @@ export function DiagnosticsView({ pid }: { pid?: string | null }) {
                   className="h-7 px-2.5 text-xs" onClick={() => setTab("failures")}>
             失败日志
           </Button>
+          <Button size="sm" variant={tab === "skills" ? "secondary" : "ghost"}
+                  className="h-7 px-2.5 text-xs" onClick={() => setTab("skills")}>
+            技能使用
+          </Button>
         </div>
         <span className="mx-1 h-4 w-px bg-border" />
         <Button size="sm" variant={dump?.enabled ? "secondary" : "ghost"}
@@ -128,13 +132,15 @@ export function DiagnosticsView({ pid }: { pid?: string | null }) {
           search={search} onSearch={setSearch}
           sel={sel} onSelect={setSel} dumpEnabled={!!dump?.enabled}
           chatMsgs={chatMsgs} agentEvents={agentEvents} loadingMsgs={loadingMsgs} />
-      ) : (
+      ) : tab === "failures" ? (
         <FailuresTab pid={pid}
           onOpenSession={(f) => {
             const hit = sessions.find((s) =>
               s.id === String(f.payload?.thread_id || f.session_id || ""))
             if (hit) { setSel(hit); setTab("sessions") }
           }} />
+      ) : (
+        <SkillUsageTab pid={pid} />
       )}
     </div>
   )
@@ -929,6 +935,131 @@ function FailuresTab({ pid, onOpenSession }: {
           )
         })}
       </ScrollArea>
+    </div>
+  )
+}
+
+// ---------- 技能使用页签（diagnostics-skills，2026-10-21） ----------
+//
+// 回答「Agent 到底有没有用技能和知识库」。三个数最要紧：
+//   - 注入次数：技能进了 system 提示几次
+//   - 打开次数：正文真被 skill_open 几次（真使用）
+//   - 打开率 = 打开/注入。**注入很多但打开率 0 的技能**是最该处理的：
+//     要么 description 不吸引模型，要么专家 yaml 白名单配错了。
+// kb 零命中率单独列出：那是「问了但库里没有」，直接对应知识缺口。
+
+function SkillUsageTab({ pid }: { pid: string }) {
+  const [data, setData] = useState<DiagSkillUsage | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  const load = () => {
+    setLoading(true)
+    setErr(null)
+    api.diagSkills(pid)
+      .then(setData)
+      .catch((e) => setErr(String(e)))
+      .finally(() => setLoading(false))
+  }
+  useEffect(load, [pid])
+
+  if (err) {
+    return <div className="p-4 text-[11px] text-(--status-error)">{err}</div>
+  }
+  if (!data) {
+    return <div className="p-4 text-[11px] text-muted-foreground">加载中…</div>
+  }
+  const t = data.totals
+  const dead = data.skills.filter((s) => (s.injected ?? 0) > 0 && (s.opened ?? 0) === 0)
+
+  const Stat = ({ label, value, hint, warn }: {
+    label: string; value: string | number; hint?: string; warn?: boolean
+  }) => (
+    <div className={cn("rounded border px-3 py-2", warn && "border-(--status-approval)/60")}>
+      <div className="text-[10px] text-muted-foreground">{label}</div>
+      <b className={cn("text-lg", warn && "text-(--status-approval)")}>{value}</b>
+      {hint && <div className="mt-0.5 text-[10px] text-muted-foreground">{hint}</div>}
+    </div>
+  )
+
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto p-4">
+      <div className="mb-3 flex items-center gap-2">
+        <span className="text-[11px] text-muted-foreground">
+          统计基于本项目事件表（扫描 {data.events_scanned} 条）
+        </span>
+        <span className="flex-1" />
+        <Button size="sm" variant="ghost" className="h-6 px-2 text-[11px]"
+                disabled={loading} onClick={load}>
+          {loading ? "刷新中…" : "刷新"}
+        </Button>
+      </div>
+
+      <div className="mb-4 grid max-w-3xl grid-cols-2 gap-2 md:grid-cols-4">
+        <Stat label="技能注入" value={t.skill_injected}
+              hint={`${t.distinct_skills_opened} 个技能被打开过`} />
+        <Stat label="skill_open" value={t.skill_open}
+              warn={t.skill_injected > 0 && t.skill_open === 0}
+              hint={t.skill_injected > 0 && t.skill_open === 0
+                ? "注入了但从未打开" : undefined} />
+        <Stat label="kb_search" value={t.kb_search} hint={`kb_open ${t.kb_open} 次`} />
+        <Stat label="检索零命中" value={t.kb_search_zero}
+              warn={(t.kb_zero_rate ?? 0) >= 0.5}
+              hint={t.kb_zero_rate === null ? "无检索记录"
+                : `占全部检索 ${(t.kb_zero_rate * 100).toFixed(0)}%`} />
+      </div>
+
+      {dead.length > 0 && (
+        <div className="mb-3 max-w-3xl rounded border border-(--status-approval)/60 p-2.5">
+          <p className="text-[11px] font-semibold text-(--status-approval)">
+            {dead.length} 个技能注入过但从未被打开
+          </p>
+          <p className="mt-0.5 text-[10px] text-muted-foreground">
+            技能进了系统提示，模型一次都没 skill_open 读正文。可能是 description
+            不够吸引、与任务不匹配，或专家 yaml 白名单配多了。
+          </p>
+          <p className="mt-1 font-mono text-[10px] text-muted-foreground">
+            {dead.map((s) => s.name).join("、")}
+          </p>
+        </div>
+      )}
+
+      <table className="w-full max-w-3xl text-[11px]">
+        <thead className="border-b text-left text-muted-foreground">
+          <tr>
+            <th className="py-1 font-medium">技能</th>
+            <th className="w-20 py-1 text-right font-medium">注入</th>
+            <th className="w-20 py-1 text-right font-medium">打开</th>
+            <th className="w-24 py-1 text-right font-medium">打开率</th>
+          </tr>
+        </thead>
+        <tbody>
+          {data.skills.map((s) => (
+            <tr key={s.name} className="border-b border-border/40">
+              <td className="py-1">{s.name}</td>
+              <td className="py-1 text-right font-mono text-muted-foreground">{s.injected}</td>
+              <td className={cn("py-1 text-right font-mono",
+                s.opened > 0 ? "text-foreground" : "text-muted-foreground/60")}>
+                {s.opened}
+              </td>
+              <td className="py-1 text-right font-mono">
+                {s.opened_rate === null ? "—"
+                  : <span className={cn(s.opened_rate === 0 && "text-(--status-approval)")}>
+                      {(s.opened_rate * 100).toFixed(0)}%
+                    </span>}
+              </td>
+            </tr>
+          ))}
+          {data.skills.length === 0 && (
+            <tr>
+              <td colSpan={4} className="py-3 text-muted-foreground">
+                暂无技能使用记录。技能注入事件自 2026-10-21 起在对话链上报，
+                更早的会话没有该数据。
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
     </div>
   )
 }

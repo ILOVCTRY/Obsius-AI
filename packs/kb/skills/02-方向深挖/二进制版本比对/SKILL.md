@@ -21,11 +21,11 @@ mode: self-contained
 
 | 场景/特征 | 手册 |
 |---|---|
-| 想知道怎么比、prompt 模板、五步工作流 | `binary/逆向工程/sym-diff.md`（原理+模板+平台 MCP 工具对接+锚点策略） |
-| 要选 LLM / 估算成本 / 大函数处理 | `binary/逆向工程/sym-diff.md`（批量建议与 LLM 选型段） |
-| 迁移结果怎么落地 | `binary/逆向工程/sym-diff.md`（Step 4：先 bb_upsert_func 落 func_kb，再 rename batch / set_comments 写回 IDA） |
-| 典型案例（ntoskrnl 缺 PDB / 应用更新迁移） | `binary/逆向工程/sym-diff.md`（场景段） |
-| Go 程序源码级恢复（非符号迁移） | `binary/逆向工程/cases/go-tls-proxy-source-recovery.md`（GoReSym 管线） |
+| 想知道怎么比、prompt 模板、五步工作流 | `binary/逆向工程/跨版本符号迁移（LLM 辅助 Binary Diff）.md`（原理+模板+平台 MCP 工具对接+锚点策略） |
+| 要选 LLM / 估算成本 / 大函数处理 | `binary/逆向工程/跨版本符号迁移（LLM 辅助 Binary Diff）.md`（批量建议与 LLM 选型段） |
+| 迁移结果怎么落地 | `binary/逆向工程/跨版本符号迁移（LLM 辅助 Binary Diff）.md`（Step 4：先 bb_upsert_func 落 func_kb，再 rename batch / set_comments 写回 IDA） |
+| 典型案例（ntoskrnl 缺 PDB / 应用更新迁移） | `binary/逆向工程/跨版本符号迁移（LLM 辅助 Binary Diff）.md`（场景段） |
+| Go 程序源码级恢复（非符号迁移） | `binary/逆向工程/cases/案例：Go TLS 分片代理 lumine 全量源码重建.md`（GoReSym 管线） |
 
 ## 红线与收尾
 

@@ -29,30 +29,30 @@ API 面 `Web接口攻击手法`、客户端面 `Web客户端手法`（均已挂�
 
 | 目标特征（features） | 方法论手册（`kb_open` 单篇） | 弹药（`web/实战打法/` 下） |
 |---|---|---|
-| has_user_system（有注册/登录） | `web/漏洞分类/越权/越权漏洞（IDOR-权限绕过）.md` + `web/漏洞分类/认证绕过/认证绕过（登录-会话-密码重置-2FA）.md`（验证码见 `web/漏洞分类/验证码识别/图形验证码 OCR 破解（ddddocr）.md`，弱比较见 `web/漏洞分类/类型混淆/类型混淆（Type Juggling）测试.md`） | `web/实战打法/arbitrary-x-authz.md` |
-| has_search / has_filter（查询/列表过滤） | `web/漏洞分类/SQL注入/注入类漏洞（SQL注入-命令注入-SSTI）.md` | `web/实战打法/sqli.md` |
-| has_upload（文件上传/导入/附件） | `web/漏洞分类/文件上传/文件上传漏洞.md` | `web/实战打法/file-upload/00-index.md` |
-| has_pay（支付/优惠券/积分） | `web/漏洞分类/业务逻辑/逻辑漏洞.md` + `web/漏洞分类/条件竞争/竞态条件.md` | `web/实战打法/logic-flaws/00-index.md` |
-| has_graphql | `web/漏洞分类/GraphQL/GraphQL 安全.md` | `web/实战打法/graphql.md` |
-| has_oauth / JWT / SAML | `web/漏洞分类/JWT/OAuth-JWT-SAML 安全.md` | `web/实战打法/oauth-saml-jwt/00-index.md` |
-| has_websocket | `web/漏洞分类/WebSocket/WebSocket 安全.md` | `web/实战打法/api-rest/13-websocket.md` |
-| returns_401/403 | `web/漏洞分类/401与403绕过/401-403 状态码绕过测试.md`（分清登录页 vs 业务 API，path/METHOD/头现场改） | — |
-| waf_detected | `web/漏洞分类/WAF绕过/WAF 绕过测试.md`（被拦再开，禁开场丢探针） | `web/实战打法/methodology/02-bypass-toolkit.md` |
-| 参数回显点（搜索词/昵称/UA 等进 HTML/属性/JS） | `web/漏洞分类/XSS/XSS测试.md`（CSP 拦了再开 `web/漏洞分类/CSP绕过/CSP 绕过测试.md`） | `web/实战打法/xss/00-index.md` |
-| 跳转参数（redirect/url/next/goto） | `web/漏洞分类/开放重定向/开放重定向测试.md` | — |
-| 请求出网点（webhook/URL 导入/外链头像/PDF 渲染） | `web/漏洞分类/SSRF/SSRF测试.md` | `web/实战打法/ssrf-cache-host/00-index.md` |
-| 文件下载/预览/包含点（download/file/path 参数） | `web/漏洞分类/路径穿越/路径穿越-LFI.md` | `web/实战打法/path-traversal/00-index.md` |
-| XML/SOAP 接口（xml 请求体/wsdl） | `web/漏洞分类/XXE/XXE测试.md` | `web/实战打法/rce/15-xxe.md` |
-| Java 栈特征（jsp/struts/序列化串/JNDI 报错） | `web/漏洞分类/反序列化/反序列化测试.md` + `web/漏洞分类/JNDI注入/JNDI 注入测试.md` | `web/实战打法/rce/12-deserialization.md` |
-| 模板/表达式可配置点（自定义模板/邮件签名） | `web/漏洞分类/表达式注入/EL 表达式注入测试.md`（SSTI 弹药见下格） | `web/实战打法/rce/14-ssti.md` |
-| 报错栈/.git/.env/备份/SCM 路径 | `web/漏洞分类/信息泄露/信息泄露测试.md` + `web/漏洞分类/SCM配置泄露/不安全的 SCM 配置泄露测试.md` | `web/实战打法/info-disclosure.md` |
+| has_user_system（有注册/登录） | `web/漏洞分类/越权/越权漏洞（IDOR、权限绕过）测试手册.md` + `web/漏洞分类/认证绕过/authbypass-authentication-flaws.md`（验证码见 `web/漏洞分类/验证码识别/图形验证码 OCR 破解（ddddocr）— 解锁登录爆破链路.md`，弱比较见 `web/漏洞分类/类型混淆/PHP 类型混淆（松散比较）全手法.md`） | `web/实战打法/任意 X 子授权——比 IDOR 更狠的权限维度漏洞.md` |
+| has_search / has_filter（查询/列表过滤） | `web/漏洞分类/SQL注入/注入类漏洞测试手册（SQL注入、命令注入、SSTI）.md` | `web/实战打法/SQL 注入.md` |
+| has_upload（文件上传/导入/附件） | `web/漏洞分类/文件上传/文件上传漏洞测试手册.md` | `web/实战打法/file-upload/00-文件上传(任意写入、Webshell)— 决策索引.md` |
+| has_pay（支付/优惠券/积分） | `web/漏洞分类/业务逻辑/逻辑漏洞测试手册.md` + `web/漏洞分类/条件竞争/竞态条件测试.md` | `web/实战打法/logic-flaws/00-业务逻辑、越权、验证码、支付、CSRF、点击劫持 — 决策索引.md` |
+| has_graphql | `web/漏洞分类/GraphQL/GraphQL 安全测试.md` | `web/实战打法/GraphQL.md` |
+| has_oauth / JWT / SAML | `web/漏洞分类/JWT/OAuth、JWT、SAML 认证安全测试.md` | `web/实战打法/oauth-saml-jwt/00-OAuth、OIDC、SAML、JWT — 决策索引.md` |
+| has_websocket | `web/漏洞分类/WebSocket/WebSocket 安全测试手册.md` | `web/实战打法/api-rest/13-WebSocket 安全 payload 库.md` |
+| returns_401/403 | `web/漏洞分类/401与403绕过/401-403-bypass（禁开磨登录 HTML）.md`（分清登录页 vs 业务 API，path/METHOD/头现场改） | — |
+| waf_detected | `web/漏洞分类/WAF绕过/WAF 绕过.md`（被拦再开，禁开场丢探针） | `web/实战打法/methodology/02-通用绕过工具箱.md` |
+| 参数回显点（搜索词/昵称/UA 等进 HTML/属性/JS） | `web/漏洞分类/XSS/XSS 测试手册.md`（CSP 拦了再开 `web/漏洞分类/CSP绕过/csp-bypass-test（几乎不交）.md`） | `web/实战打法/xss/00-XSS — 决策索引.md` |
+| 跳转参数（redirect/url/next/goto） | `web/漏洞分类/开放重定向/开放重定向全手法（按校验方式选绕过）.md` | — |
+| 请求出网点（webhook/URL 导入/外链头像/PDF 渲染） | `web/漏洞分类/SSRF/SSRF 测试手册.md` | `web/实战打法/ssrf-cache-host/00-SSRF、Host Header、缓存投毒 — 决策索引.md` |
+| 文件下载/预览/包含点（download/file/path 参数） | `web/漏洞分类/路径穿越/路径穿越、LFI 测试.md` | `web/实战打法/path-traversal/00-路径遍历、LFI、RFI — 决策索引.md` |
+| XML/SOAP 接口（xml 请求体/wsdl） | `web/漏洞分类/XXE/XXE（XML 外部实体注入）全手法.md` | `web/实战打法/rce/15-RCE — XXE 实体注入 payload 库.md` |
+| Java 栈特征（jsp/struts/序列化串/JNDI 报错） | `web/漏洞分类/反序列化/反序列化测试（deserialization）.md` + `web/漏洞分类/JNDI注入/JNDI 注入测试.md` | `web/实战打法/rce/12-RCE — 通用反序列化 payload 库.md` |
+| 模板/表达式可配置点（自定义模板/邮件签名） | `web/漏洞分类/表达式注入/EL 表达式注入测试.md`（SSTI 弹药见下格） | `web/实战打法/rce/14-RCE — SSTI 模板注入 payload 库.md` |
+| 报错栈/.git/.env/备份/SCM 路径 | `web/漏洞分类/信息泄露/信息泄露测试手册.md` + `web/漏洞分类/SCM配置泄露/不安全的 SCM 配置泄露测试.md` | `web/实战打法/信息泄露、敏感文件、备份.md` |
 | 前端加密参数/厚 JS（sign/token 前端生成） | `web/漏洞分类/JS逆向/JS 逆向配合接口挖掘指南.md` | — |
-| 邮件功能（注册/找回密码/邀请） | `web/漏洞分类/邮件头注入/邮件头注入测试.md` + `web/漏洞分类/Host头注入/Host 头注入与密码重置毒化.md`（重置投毒） | — |
-| 缓存层特征（CDN/X-Cache/Age 头） | `web/漏洞分类/缓存投毒/缓存投毒测试.md` | `web/实战打法/ssrf-cache-host/12-cache.md` |
-| 导出报表（CSV/Excel） | `web/漏洞分类/CSV公式注入/CSV 公式注入测试.md` | — |
-| AI 功能面（对话窗/文档问答/Agent 工具） | `web/漏洞分类/大模型安全/LLM 安全测试（禁开越狱教材）.md` | — |
-| swagger/kong/actuator 暴露 | `web/漏洞分类/API网关/API 网关安全.md` | — |
-| API 面厚（REST 批量接口/多端点） | 转交 `Web接口攻击手法`（走私/Host 头/HPP/邮件头路由表） | `web/实战打法/api-rest/00-index.md` |
+| 邮件功能（注册/找回密码/邀请） | `web/漏洞分类/邮件头注入/email-header-injection-test（几乎不交）.md` + `web/漏洞分类/Host头注入/Host 头注入与路由滥用.md`（重置投毒） | — |
+| 缓存层特征（CDN/X-Cache/Age 头） | `web/漏洞分类/缓存投毒/缓存投毒与缓存欺骗测试.md` | `web/实战打法/ssrf-cache-host/12-缓存投毒、缓存欺骗、CDN 绕过 payload 库.md` |
+| 导出报表（CSV/Excel） | `web/漏洞分类/CSV公式注入/csv-formula-injection-test（几乎不交）.md` | — |
+| AI 功能面（对话窗/文档问答/Agent 工具） | `web/漏洞分类/大模型安全/llm-security-test（禁开越狱教材）.md` | — |
+| swagger/kong/actuator 暴露 | `web/漏洞分类/API网关/API 网关安全测试手册.md` | — |
+| API 面厚（REST 批量接口/多端点） | 转交 `Web接口攻击手法`（走私/Host 头/HPP/邮件头路由表） | `web/实战打法/api-rest/00-REST、GraphQL、WebSocket API 安全 — 决策索引.md` |
 
 ### 补充特征（易漏，逐项过一遍）
 
@@ -62,25 +62,25 @@ API 面 `Web接口攻击手法`、客户端面 `Web客户端手法`（均已挂�
 | 特征 / 探测点 | 模块 | 说明 |
 |---|---|---|
 | 反向代理/负载均衡/CDN 后面 | `web/漏洞分类/HTTP请求走私/HTTP 请求走私测试.md` | CL/TE 混淆、TE 头变体；前后端解析不一致才成立 |
-| 支持 HTTP/2 | `web/漏洞分类/HTTP2攻击/HTTP2 攻击测试.md` | H2.CL/H2.TE 降级走私、伪头注入 |
-| 有状态变更操作（改密/转账/领券/下单） | `web/漏洞分类/跨站请求伪造/CSRF.md` | 缺 token / token 可预测 / SameSite 未设 |
-| 跨域资源共享（`Access-Control-*` 头） | `web/漏洞分类/跨域配置错误/CORS 技术资料（SRC 禁用）.md` | 反射 Origin、`null` 源、子域信任过宽 |
-| 前端框架/富交互（React/Vue + 用户输入进对象） | `web/漏洞分类/原型链污染/原型链污染（Prototype Pollution）测试.md` | 原型链污染 → 常与 XSS/RCE 链式组合 |
-| 参数重复提交/数组参数 | `web/漏洞分类/HTTP参数污染/HTTP 参数污染（HPP）测试.md` | 前后端取第一个/最后一个不一致 → 绕过校验 |
-| 用户输入进响应头（Location/Set-Cookie/自定义头） | `web/漏洞分类/CRLF注入/CRLF 注入测试.md` | CRLF 注入 → 响应拆分 |
-| 富文本/HTML 白名单过滤 | `web/漏洞分类/悬垂标记注入/悬空标记（Dangling Markup）测试.md` | 无脚本也能外带数据 |
-| 可嵌入页面（无 X-Frame-Options） | `web/漏洞分类/点击劫持/点击劫持测试.md` | 点击劫持；常与 CSRF 组合 |
-| XSLT/XML 转换点 | `web/漏洞分类/XSLT注入/XSLT 注入测试.md` | 与 XXE 不同：这是 XSLT 引擎的代码执行 |
-| 子域枚举（CNAME 指向第三方） | `web/漏洞分类/子域接管/子域接管测试.md` | 悬空 CNAME → 接管子域 |
-| 依赖安装/包名可控（内网 registry、包名混淆） | `web/漏洞分类/依赖混淆/依赖混淆测试.md` | 依赖混淆投毒 |
-| 出网受限但可发 DNS | `web/漏洞分类/DNS外带/DNSLog OOB 外带回连.md` | OOB 外带通道（盲注/XXE/SSRF 无回显时） |
-| DNS 重绑定可用 | `web/漏洞分类/DNS重绑定/DNS 重绑定测试.md` | 绕过 SSRF 的 IP 白名单 |
+| 支持 HTTP/2 | `web/漏洞分类/HTTP2攻击/http2-attacks-test（几乎不交）.md` | H2.CL/H2.TE 降级走私、伪头注入 |
+| 有状态变更操作（改密/转账/领券/下单） | `web/漏洞分类/跨站请求伪造/CSRF 测试.md` | 缺 token / token 可预测 / SameSite 未设 |
+| 跨域资源共享（`Access-Control-*` 头） | `web/漏洞分类/跨域配置错误/cors（仅技术资料 · SRC 禁用）.md` | 反射 Origin、`null` 源、子域信任过宽 |
+| 前端框架/富交互（React/Vue + 用户输入进对象） | `web/漏洞分类/原型链污染/原型链污染测试.md` | 原型链污染 → 常与 XSS/RCE 链式组合 |
+| 参数重复提交/数组参数 | `web/漏洞分类/HTTP参数污染/hpp-test（几乎不交）.md` | 前后端取第一个/最后一个不一致 → 绕过校验 |
+| 用户输入进响应头（Location/Set-Cookie/自定义头） | `web/漏洞分类/CRLF注入/crlf-injection-test（几乎不交）.md` | CRLF 注入 → 响应拆分 |
+| 富文本/HTML 白名单过滤 | `web/漏洞分类/悬垂标记注入/dangling-markup-test（几乎不交）.md` | 无脚本也能外带数据 |
+| 可嵌入页面（无 X-Frame-Options） | `web/漏洞分类/点击劫持/clickjacking-test（缺头不写）.md` | 点击劫持；常与 CSRF 组合 |
+| XSLT/XML 转换点 | `web/漏洞分类/XSLT注入/xslt-injection-test（几乎不交）.md` | 与 XXE 不同：这是 XSLT 引擎的代码执行 |
+| 子域枚举（CNAME 指向第三方） | `web/漏洞分类/子域接管/子域接管全手法（按记录类型分）.md` | 悬空 CNAME → 接管子域 |
+| 依赖安装/包名可控（内网 registry、包名混淆） | `web/漏洞分类/依赖混淆/dependency-confusion-test（几乎不交）.md` | 依赖混淆投毒 |
+| 出网受限但可发 DNS | `web/漏洞分类/DNS外带/DNSLog OOB 外带回连（默认方法 · 不询问）.md` | OOB 外带通道（盲注/XXE/SSRF 无回显时） |
+| DNS 重绑定可用 | `web/漏洞分类/DNS重绑定/dns-rebinding-test（几乎不交）.md` | 绕过 SSRF 的 IP 白名单 |
 | 认证体系本身（登录/会话/多因素） | `web/漏洞分类/认证与会话/` 三篇：`auth-and-access.md` / `auth-jwt.md` / `auth-infra.md` | 不止"绕过登录"，还包括会话固定、JWT 算法混淆、认证基础设施 |
 | 通用注入面（非 SQL 的注入） | `web/漏洞分类/注入类/` 多篇：`server-side.md` / `server-side-exec.md` / `server-side-advanced.md` / `server-side-deser.md` | 命令/SSTI/表达式/反序列化总入口 |
-| AI Agent 工具调用 | `web/漏洞分类/AI代理工具执行/对话口工具真执行（agent-tool-exec）.md` | 工具参数注入、越权调用 |
-| 云 IDE / 在线开发环境 | `web/漏洞分类/云IDE远程执行链/云 IDE-AI 编程平台弱口令→RCE→凭证链.md` | 云 IDE 到 RCE 的链路 |
-| 权限模型存在缺口（角色切换/审批流） | `web/漏洞分类/控制缺失审计/控制缺失型审计（端点-权限矩阵与认证旁路）.md` | 控制措施缺失类问题 |
-| 有源码/可读代码 | `web/漏洞分类/源码审计/源码白盒审计方法论（覆盖率矩阵与三策略）.md` + `web/漏洞分类/污点分析/污点分析与数据流追踪（source→sink）.md` | 白盒审计入口，污点分析 |
+| AI Agent 工具调用 | `web/漏洞分类/AI代理工具执行/对话口工具真执行.md` | 工具参数注入、越权调用 |
+| 云 IDE / 在线开发环境 | `web/漏洞分类/云IDE远程执行链/云 IDE、Codex 系 AI 编程平台：弱口令→Root RCE→凭证链.md` | 云 IDE 到 RCE 的链路 |
+| 权限模型存在缺口（角色切换/审批流） | `web/漏洞分类/控制缺失审计/控制缺失型审计手册（端点-权限矩阵与认证旁路）.md` | 控制措施缺失类问题 |
+| 有源码/可读代码 | `web/漏洞分类/源码审计/源码白盒审计方法论（覆盖率矩阵与三策略）.md` + `web/漏洞分类/污点分析/污点分析与数据流追踪手册（source→sink）.md` | 白盒审计入口，污点分析 |
 
 **注**：`seatable` / `期刊采编-e-tiller` / `ghost-bits-cast` 是特定产品或特定漏洞的专题，
 不属于通用打点特征，遇到对应产品时直接 `kb_open` 该目录即可，不列进上表。
@@ -112,7 +112,7 @@ API 面 `Web接口攻击手法`、客户端面 `Web客户端手法`（均已挂�
 
 - 发现 → findings（无证据 = unverified）；POC → artifacts（kind=poc）。
   跨资产指纹的洞可参考快照沉淀规范（kb_open
-  `web/PoC与模板/poc/README.md`），但**只读参考**——POC 一律落黑板 artifact，
+  `web/PoC与模板/poc/指纹 PoC 库.md`），但**只读参考**——POC 一律落黑板 artifact，
   不写进 技能目录 references/目录；
 - 越界/发现他人资产有价值线索 → 发现即上报协议（DESIGN.md §6.3），不私自跨目标。
 

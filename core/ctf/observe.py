@@ -185,7 +185,19 @@ _NOT_USER = frozenset((
     # 账号字段名本身（`user=root` 的 root 是账号，不是 `user:pass` 对）
     "user", "username", "login", "account", "uid", "owner", "realm", "domain",
     "hostname", "value", "flag", "database", "port", "path", "url", "type",
+    # 日志级别前缀（2026-10-20）：`Warning: _curses.error: setupterm ...` 曾被
+    # 抽成「凭据 Warning:_curses.error」，回执里凭空多一条假的账号口令线索，
+    # 还会被后续弹药管线拿去撞登录。级别词后面跟的是**消息**，不是账号。
+    "warning", "warn", "error", "err", "info", "debug", "trace", "notice",
+    "fatal", "critical", "crit", "alert", "emerg", "emergency", "severe",
+    "deprecationwarning", "userwarning", "runtimewarning", "futurewarning",
+    "note", "hint", "tip", "todo", "fixme", "xxx",
 ))
+
+# 值不是口令的形态（2026-10-20）：Python 的 `模块.子模块:` 错误前缀
+# （`_curses.error:`、`pwnlib.exception:`）看着像 `key: value`，实际是
+# 异常类名。真实口令几乎不会长成「小写点分标识符+冒号」。
+_NOT_SECRET_RX = re.compile(r"^[A-Za-z_][\w.]*\.[A-Za-z_]\w*:$")
 
 # 凭据语境键名（`password: admin:Pass` 里 password 是字段名，值是凭据本体）
 _CRED_KEYS = frozenset((
@@ -310,6 +322,9 @@ def parse_credentials(text: str, *, limit: int = 30) -> list[dict]:
                 continue
             key, secret = m.group(1), m.group(2)
             if secret.startswith("//"):  # scheme 尾部残留
+                continue
+            # `Warning: _curses.error:` —— 值是异常类名而非口令（2026-10-20）
+            if _NOT_SECRET_RX.match(secret):
                 continue
             klow = key.lower()
             restored = _try_b64_secret(secret)

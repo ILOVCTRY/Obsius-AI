@@ -22,12 +22,12 @@ native loader + .NET payload 混合体 → loader 走 二进制逆向手法，du
 
 | 场景/特征 | 手册 |
 |---|---|
-| 拿到 exe 不知道是不是 .NET / 哪种混淆 | `binary/dotnet逆向/obfuscators.md`（总决策表 + de4dot --detect） |
-| de4dot 失败 / anti-tamper / necrobit | `binary/dotnet逆向/obfuscators.md`（退路顺序：dump → dnlib → 动态优先） |
-| 完整工作流 / IL patch vs C# 重编译 / async 状态机 | `binary/dotnet逆向/common-workflow.md` |
-| 异常驱动控制流 / 提取配置与 C2 / 密钥 | `binary/dotnet逆向/common-workflow.md`（动态调试 + 配置提取段） |
-| Sharp* 红队工具结构 / 改特征 / 工具安装矩阵 | `binary/dotnet逆向/sharp-tools.md` |
-| Linux/macOS 上没有 dnSpyEx 怎么办 | `binary/dotnet逆向/sharp-tools.md`（CLI 矩阵：ilspycmd + dnlib） |
+| 拿到 exe 不知道是不是 .NET / 哪种混淆 | `binary/dotnet逆向/.NET 混淆器识别与脱壳（de4dot、dnSpyEx、dnlib）.md`（总决策表 + de4dot --detect） |
+| de4dot 失败 / anti-tamper / necrobit | `binary/dotnet逆向/.NET 混淆器识别与脱壳（de4dot、dnSpyEx、dnlib）.md`（退路顺序：dump → dnlib → 动态优先） |
+| 完整工作流 / IL patch vs C# 重编译 / async 状态机 | `binary/dotnet逆向/.NET 逆向通用工作流（六阶段 + IL patch）.md` |
+| 异常驱动控制流 / 提取配置与 C2 / 密钥 | `binary/dotnet逆向/.NET 逆向通用工作流（六阶段 + IL patch）.md`（动态调试 + 配置提取段） |
+| Sharp* 红队工具结构 / 改特征 / 工具安装矩阵 | `binary/dotnet逆向/红队 Sharp 工具逆向 & .NET 工具链安装矩阵.md` |
+| Linux/macOS 上没有 dnSpyEx 怎么办 | `binary/dotnet逆向/红队 Sharp 工具逆向 & .NET 工具链安装矩阵.md`（CLI 矩阵：ilspycmd + dnlib） |
 
 ## 红线与收尾
 

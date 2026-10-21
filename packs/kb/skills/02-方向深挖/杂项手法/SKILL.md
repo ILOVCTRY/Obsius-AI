@@ -29,15 +29,15 @@ mode: self-contained
 
 | 方向 | 判据 | 全部子方向 | kb_open |
 |---|---|---|---|
-| **pyjail** | 给了受限 Python 源码 + 连接脚本 | 内置函数过滤绕过 / 对象链回溯（`().__class__.__mro__`）/ 编码与字符串拼接 / 审计钩子绕 / 导入劫持 / `__builtins__` 恢复 / 沙箱模块绕过 | `misc/沙箱逃逸/pyjails.md` |
-| **bashjail** | 受限 shell、命令白名单 | 命令拼接 / 通配符展开 / 变量替换 / 重定向写文件 / 环境变量注入 / `$()` 与反引号 / 编码执行 | `misc/沙箱逃逸/bashjails.md` |
-| **编码链** | 一串可疑字符、多层嵌套 | 单层识别（base64/base32/hex/url/rot13）/ 多层剥壳 / 自定义码表 / 二进制位操作 / 异或 / 压缩嵌套 | `misc/编码解码/encodings.md`、`encodings-advanced.md` |
-| **游戏 / VM / wasm** | 游戏存档、自制 VM、wasm 字节码 | 存档格式解析 / VM 指令集还原 / 字节码反编译 / 内存改值 | `misc/游戏与虚拟机/games-and-vms.md` |
-| **LLM 提示注入** | 有 LLM 服务、聊天机器人 | 直接注入 / 越狱 / 上下文污染 / 工具调用劫持 / 系统提示泄露 | `misc/AI安全/llm-attacks.md` |
-| **对抗样本** | 模型文件、扰动图 | 对抗扰动 / 成员推理 / 模型抽取 | `misc/AI安全/adversarial-ml.md`、`model-attacks.md` |
-| **DNS 隧道** | 有 DNS 交互 | 子域编码 / TXT 记录外带 / 时序编码 | `misc/协议异常/dns.md` |
-| **无线 SDR** | IQ 文件、`.wav` 射频录制 | 调制识别 / 解调 / 协议解析 | `misc/赛事专题/题目知识/ctf-misc/rf-sdr.md` |
-| **Linux 提权杂项** | CTF 向本地提权 | SUID / 定时任务 / 内核漏洞 / 环境变量 | `misc/系统杂项/linux-privesc.md` |
+| **pyjail** | 给了受限 Python 源码 + 连接脚本 | 内置函数过滤绕过 / 对象链回溯（`().__class__.__mro__`）/ 编码与字符串拼接 / 审计钩子绕 / 导入劫持 / `__builtins__` 恢复 / 沙箱模块绕过 | `misc/沙箱逃逸/Python 沙箱逃逸.md` |
+| **bashjail** | 受限 shell、命令白名单 | 命令拼接 / 通配符展开 / 变量替换 / 重定向写文件 / 环境变量注入 / `$()` 与反引号 / 编码执行 | `misc/沙箱逃逸/Bash 沙箱与受限 shell 逃逸.md` |
+| **编码链** | 一串可疑字符、多层嵌套 | 单层识别（base64/base32/hex/url/rot13）/ 多层剥壳 / 自定义码表 / 二进制位操作 / 异或 / 压缩嵌套 | `misc/编码解码/编码与二维码.md`、`encodings-advanced.md` |
+| **游戏 / VM / wasm** | 游戏存档、自制 VM、wasm 字节码 | 存档格式解析 / VM 指令集还原 / 字节码反编译 / 内存改值 | `misc/游戏与虚拟机/游戏、虚拟机与约束求解.md` |
+| **LLM 提示注入** | 有 LLM 服务、聊天机器人 | 直接注入 / 越狱 / 上下文污染 / 工具调用劫持 / 系统提示泄露 | `misc/AI安全/LLM 攻击（提示词与工具层面）.md` |
+| **对抗样本** | 模型文件、扰动图 | 对抗扰动 / 成员推理 / 模型抽取 | `misc/AI安全/对抗机器学习与后门分析.md`、`model-attacks.md` |
+| **DNS 隧道** | 有 DNS 交互 | 子域编码 / TXT 记录外带 / 时序编码 | `misc/协议异常/协议异常与 DNS 利用.md` |
+| **无线 SDR** | IQ 文件、`.wav` 射频录制 | 调制识别 / 解调 / 协议解析 | `misc/赛事专题/题目知识/ctf-misc/CTF Misc - RF、SDR、IQ Signal Processing.md` |
+| **Linux 提权杂项** | CTF 向本地提权 | SUID / 定时任务 / 内核漏洞 / 环境变量 | `misc/系统杂项/Linux 提权与服务滥用.md` |
 
 ## 2. 判据速查
 
@@ -53,4 +53,4 @@ mode: self-contained
 - 先穷举「信息在哪一侧」：服务器回显、附件元数据、协议交互，别急着写利用。
 - pyjail 按「过滤了什么」反查，逐条试可用原语并记录。
 - 需要 pip 装库先落 scratch requirements，docker 内执行。
-- 收尾 writeup 写法见 `misc/赛事专题/WP撰写/index.md`。
+- 收尾 writeup 写法见 `misc/赛事专题/WP撰写/CTF Write-up Generator.md`。

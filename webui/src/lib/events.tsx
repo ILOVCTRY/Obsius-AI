@@ -172,6 +172,11 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
       : { label: "✅ flag 已确认", className: "text-(--viz-success)", defaultOpen: true }
   if (kind === "chat.ctf_flag_wake")
     return { label: "🔔 唤醒主控确认 flag", className: "text-(--status-approval)", defaultOpen: false }
+  // 外部通知投递（chat-inbox，2026-10-20）：人工确认 flag 后向在跑轮次投一句
+  // 「题解出了，尽快收工」。轮次在下一个步边界读到它并自己收尾——不是中止，
+  // 所以这里用中性提示色，不要用错误色（那会让人以为出事了）。
+  if (kind === "chat.notice")
+    return { label: "📨 外部通知（收工提示）", className: "text-(--status-approval)", defaultOpen: true }
   return { label: kind, className: "text-muted-foreground", defaultOpen: false }
 }
 

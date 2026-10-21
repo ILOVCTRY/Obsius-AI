@@ -160,23 +160,123 @@ def signals_of(bb, project_id: str, *, since_event_id: int = 0,
 
 def should_trigger(sig: dict) -> tuple[bool, str]:
     """规则判据：命中任一即值得沉淀。返回 (bool, 触发原因)。"""
-    if sig.get("repeat_failures", 0) >= _MIN_REPEAT_FAILURES:
-        return True, f"同一工具重复失败 {sig['repeat_failures']} 次（试错多）"
-    if sig.get("new_web_vulns", 0) > 0:
-        return True, f"本轮产出 {sig['new_web_vulns']} 条新 Web 漏洞发现"
-    if sig.get("tool_failures", 0) >= _MIN_TOTAL_FAILURES:
-        return True, f"本轮工具失败 {sig['tool_failures']} 次（任务较难）"
-    if sig.get("kb_refs", 0) > 0 and sig.get("tool_failures", 0) >= 2:
-        return True, "引用过知识库文档却仍反复失败（文档可能有误/缺失）"
-    # 命中质量（2026-10-19）：搜了但零命中 = 知识缺口的最直接证据。
-    # 阈值取 1：单次零命中已足够说明「用户问了、库里没有」，值得补文档；
-    # 而「工具失败」可能是权限/网络问题，与本条语义不同，不能互相替代。
-    if sig.get("kb_search_zero", 0) >= _MIN_KB_ZERO_HITS:
-        return True, (f"知识库检索 {sig['kb_search_zero']} 次零命中"
-                      f"（共 {sig.get('kb_search_total', 0)} 次）——存在知识缺口")
-    if sig.get("actions", 0) >= _MIN_ACTIONS_HARD:
-        return True, f"本轮执行动作 {sig['actions']} 步（任务较难）"
+    for rule in TRIGGER_RULES:
+        if rule["hit"](sig):
+            return True, rule["reason"](sig)
     return False, ""
+
+
+# ---- 规则表（判定与展示同源，2026-10-20） ----
+#
+# 前端「变更提案」页要告诉人类「什么情况下 Agent 才会提提案」。此前这些判据只
+# 存在于 should_trigger 的 if 链里，页面上一个字也看不到，人类只能靠猜。
+#
+# 这里把每条规则提成数据：``hit`` 判命中、``reason`` 出人话、``detail`` 给页面
+# 展示阈值。**should_trigger 直接遍历本表**——展示与判定是同一份数据，改阈值
+# 不可能出现「页面写着 2 次、实际按 3 次判」的分叉（历史上提示文案与判定逻辑
+# 分头维护，已经分叉过）。
+#
+# 顺序敏感（首个命中即返回）：先报「同一工具反复失败」这种最具体的信号，再报
+# 汇总型（失败总数/步数），人类看到的原因才最贴证据。
+
+TRIGGER_RULES: tuple[dict[str, Any], ...] = (
+    {
+        "key": "repeat_failures",
+        "label": "同一工具反复失败",
+        "detail": f"同一工具/命令失败 ≥ {_MIN_REPEAT_FAILURES} 次（试错多，说明打法或文档有问题）",
+        "hit": lambda s: s.get("repeat_failures", 0) >= _MIN_REPEAT_FAILURES,
+        "reason": lambda s: f"同一工具重复失败 {s['repeat_failures']} 次（试错多）",
+    },
+    {
+        "key": "new_web_vulns",
+        "label": "产出新的 Web 漏洞",
+        "detail": "本轮新增 Web 类漏洞发现 ≥ 1 条（补漏洞手册/技巧）",
+        "hit": lambda s: s.get("new_web_vulns", 0) > 0,
+        "reason": lambda s: f"本轮产出 {s['new_web_vulns']} 条新 Web 漏洞发现",
+    },
+    {
+        "key": "tool_failures",
+        "label": "工具失败偏多",
+        "detail": f"本轮工具失败 ≥ {_MIN_TOTAL_FAILURES} 次（任务较难）",
+        "hit": lambda s: s.get("tool_failures", 0) >= _MIN_TOTAL_FAILURES,
+        "reason": lambda s: f"本轮工具失败 {s['tool_failures']} 次（任务较难）",
+    },
+    {
+        "key": "kb_refs_with_failures",
+        "label": "查了文档仍失败",
+        "detail": "引用过知识库/技能文档，且本轮工具失败 ≥ 2 次（文档可能有误或缺失）",
+        "hit": lambda s: s.get("kb_refs", 0) > 0 and s.get("tool_failures", 0) >= 2,
+        "reason": lambda s: "引用过知识库文档却仍反复失败（文档可能有误/缺失）",
+    },
+    {
+        "key": "kb_search_zero",
+        "label": "检索零命中",
+        "detail": (f"知识库检索零命中 ≥ {_MIN_KB_ZERO_HITS} 次"
+                   "（问了但库里没有 = 知识缺口，最直接的补文档证据）"),
+        "hit": lambda s: s.get("kb_search_zero", 0) >= _MIN_KB_ZERO_HITS,
+        "reason": lambda s: (f"知识库检索 {s['kb_search_zero']} 次零命中"
+                             f"（共 {s.get('kb_search_total', 0)} 次）——存在知识缺口"),
+    },
+    {
+        "key": "actions",
+        "label": "执行步数偏高",
+        "detail": f"本轮执行动作 ≥ {_MIN_ACTIONS_HARD} 步（任务较难）",
+        "hit": lambda s: s.get("actions", 0) >= _MIN_ACTIONS_HARD,
+        "reason": lambda s: f"本轮执行动作 {s['actions']} 步（任务较难）",
+    },
+)
+
+
+def trigger_rules() -> list[dict[str, str]]:
+    """规则表的人话描述（API 直出给「变更提案」页；不含 lambda，可 JSON 序列化）。"""
+    return [{"key": r["key"], "label": r["label"], "detail": r["detail"]}
+            for r in TRIGGER_RULES]
+
+
+def rules_doc() -> dict:
+    """触发规则的完整说明（页面展示用）：开关语义 + 两条触发通道 + 各条阈值。
+
+    ``enabled`` 由调用方按项目 config 传入；其余为静态口径。**本函数不读磁盘**，
+    保证前端一次请求即可渲染（不因读不到项目而空白）。
+    """
+    return {
+        "switch": {
+            "key": "config.kb_iteration.enabled",
+            "label": "知识库迭代",
+            "scope": "项目级（每个项目独立开关，默认关闭）",
+            "off_meaning": "关闭时 Agent 不生成任何提案：不下发 propose_pack_edit 工具、"
+                           "系统提示不注入沉淀纪律、轮末不做规则判定",
+        },
+        "channels": [
+            {
+                "key": "round_end",
+                "label": "轮末自动判定",
+                "detail": "主控每轮正常收尾时，按下方规则信号判定本轮是否值得沉淀；"
+                          "命中才调一次轻量 LLM 生成提案。只看主控线程（其轮次涵盖"
+                          "本轮全部子专家工作），后台执行不阻塞会话。",
+            },
+            {
+                "key": "agent_tool",
+                "label": "Agent 主动沉淀",
+                "detail": "主控与子专家可主动调用 propose_pack_edit 提提案，需满足四种"
+                          "情形之一：文档内容有误 / 文档缺失 / 手法已本轮验证有效 / "
+                          "产出新 Web 漏洞。同样受项目开关门禁。",
+            },
+            {
+                "key": "session_review",
+                "label": "会话复盘（手动）",
+                "detail": "在直播间对某个会话发起「复盘沉淀」，由 planner LLM 基于该"
+                          "会话证据生成提案。此通道不受项目开关限制，是人工主动"
+                          "触发的补沉淀手段。",
+            },
+        ],
+        "rules": trigger_rules(),
+        "limits": {
+            "per_session_proposals": 3,
+            "note": "每会话最多 3 条 pending 提案，防凑数；LLM 单次最多产出 5 条。",
+        },
+        "landing": "所有提案一律落 pending，全部人工审批；批准前不改任何文件。",
+    }
 
 
 # ---- LLM 复盘 → 提案（best-effort） ----

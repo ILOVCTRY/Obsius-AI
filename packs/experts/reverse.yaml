@@ -6,4 +6,3 @@ skills: [二进制逆向手法, 附件分诊, 二进制利用手法, 安卓逆�
 knowledge: [binary]
 tools: [run_cmd, read_file, view_image, search_files, unpack_attachment, bb_add_asset, bb_asset_status, bb_add_finding, bb_update_finding, bb_add_artifact, bb_query, kb_search, kb_open, route_lookup, skill_open, decompile, disasm, list_symbols, strings_search, func_xrefs, bb_upsert_func, declare_intent, close_intent, reopen_intent, bb_delete_intent]
 mcp_servers: [ida, x64dbg]
-task_types: [reverse, solve, verify]

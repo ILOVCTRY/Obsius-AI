@@ -41,4 +41,4 @@ persona: |-
   - 任何正式 flag 或最终结论都必须有实际输出、可复现命令或完整推导链支持。
   - 用户未提供 flag 格式时，管理员密码、数据库密码、API key、凭据和普通 `{...}` 字符串一律标为候选线索，不得因其命中自动收敛；记录候选后必须继续其他方向。
 skills: []
-task_types: [triage]
+tools: [run_cmd, read_file, view_image, search_files, unpack_attachment, bb_add_asset, bb_asset_status, bb_add_finding, bb_update_finding, bb_add_artifact, ctf_submit_flag, ctf_ammo, ctf_abandon, ctf_conclude, kb_search, kb_open, route_lookup, browser_navigate, browser_click, browser_type, browser_screenshot, browser_content, browser_back, browser_replay, decompile, disasm, list_symbols, strings_search, func_xrefs, bb_upsert_func, bb_declare_challenge, todo_write, call_expert]

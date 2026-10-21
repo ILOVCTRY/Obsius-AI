@@ -44,8 +44,8 @@ mode: self-contained
 | `.py/.sage/.txt` 里是大整数 / `.pem/.pub` | crypto | crypto 包：密码学手法 |
 | `.pcap/.raw/.dd/.evtx/.vmem`、看不到内容的图片音视频 | forensics | forensics 包：取证与隐写 |
 | `.apk/.wasm/.pyc` | reverse（先） | 二进制逆向手法 |
-| `.safetensors/.pt/.pth/.onnx`、prompt/LoRA 字眼 | ai-ml | misc 包（kb_open `misc/AI安全/index.md`） |
-| 编码套娃/jail/受限 shell/信号/游戏/小众语言 | misc | misc 包（kb_open `misc/README.md`） |
+| `.safetensors/.pt/.pth/.onnx`、prompt/LoRA 字眼 | ai-ml | misc 包（kb_open `misc/AI安全/AI、ML 题总入口.md`） |
+| 编码套娃/jail/受限 shell/信号/游戏/小众语言 | misc | misc 包（kb_open `misc/知识库.md`） |
 | 只有"找谁/在哪/什么时间"线索 | osint | forensics 包：取证与隐写 的 OSINT 段 |
 | 混淆脚本/C2 流量/疑似恶意 PE | malware | binary 包：二进制利用手法 §1（**默认恶意，只静态**） |
 
@@ -72,7 +72,7 @@ nc 行为：长输入崩溃→pwn；出数学题→crypto；受限 shell/eval→
    `<center>404 Not Found</center>`），而不是应用框架的报错——说明没有应用层
 
 判定成立 → **停止**注入/上传/目录爆破投入，转
-`kb_open(module="web/实战打法/前端JS逆向-混淆还原.md")`，按「抓全 JS → grep `_0x`/`atob`
+`kb_open(module="web/实战打法/前端 JS 逆向与混淆还原.md")`，按「抓全 JS → grep `_0x`/`atob`
 定位混淆 → 复现解密」走。flag 通常在 obfuscator.io 字符串数组 + RC4/XOR 里。
 
 判据不成立（有动态端点/有 API/有登录态）→ 照常走 `web 包：外网打点入口`。
@@ -83,8 +83,27 @@ CTF 题常跨类：Web 题的 JWT 伪造要 crypto；pcap 里可能裹着待重�
 逆向先于 pwn（先还原漏洞函数再利用）；取证恢复出文件后可能是隐写或加密。
 一条路 20 分钟无进展，重新走一遍 Step 2，带着新观察换类，不要硬刚。
 
+### Step 3.5：卡住先查判据库（比换类更省轮次）
+
+换类之前先确认**不是自己漏了前置条件**。判据库是从 1027 篇赛事 WP 抽出来的
+「现象 → 判据 → 打法」速查，按**你观察到的现象**索引，不按题目类型：
+
+`kb_open(module="web/赛事专题/判据库/判据库总索引.md")`
+
+最常用的三张表：
+
+- **按现象路由**：源码里出现 `==`/`unserialize`/`include`、Cookie 是 JWT、
+  参数是 `rO0AB`、给了 `n`/`e`/`hint`、出现 `0x9E3779B9`、给了内存镜像 —— 对号入座。
+- **按「卡在哪」路由**：有执行但无回显、有注入但 payload 不生效、链构造出来打不通、
+  分解不出来、格出来的向量没意义、偏移全错 —— 这些是「手法没错但漏了前提」，
+  换类也解决不了，必须查判据。
+- **各篇「纪律」节**：写的是「什么时候这条判据不成立」，比正向手法更省时间。
+
+判据库只给选路与失效条件，具体命令与代码仍在主库
+（`web/漏洞分类/`、`binary/漏洞利用/` 等）。判据指路，主库给实现。
+
 ## Step 4：收尾
 
 解出后按 `misc/misc` 包 writeup 方法论产出可复现 writeup：
-`kb_open(module="misc/赛事专题/WP撰写/index.md")`——精简、可复现、队友照做能验证。
+`kb_open(module="misc/赛事专题/WP撰写/CTF Write-up Generator.md")`——精简、可复现、队友照做能验证。
 多个 flag 候选时做全库唯一性核对，报出来源文件/路径，不取疑似干扰串。

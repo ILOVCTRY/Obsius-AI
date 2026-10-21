@@ -1,0 +1,1 @@
+{"servers": [{"name": "fir-proxy", "transport": "stdio", "command": "python", "args": ["-c", "import sys; [sys.exit(0) for _ in sys.stdin]"], "enabled": true, "domains": ["pentest"]}]}

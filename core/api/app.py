@@ -247,17 +247,32 @@ class ExpertSaveIn(BaseModel):
     三态：缺键/null = 不限制（不落键），[] = 明确一个都不启用（落 `key: []`），
     非空 = 白名单。knowledge（kb 方向）沿用两态：null 或 [] 都表示不限方向，
     因此空列表不落键。variants={track: {field: value}} 序列化为
-    variant_<track>_<field> 平铺键。"""
+    variant_<track>_<field> 平铺键。
+
+    ``task_types`` 已退役（2026-10-21）：任务认领机制 2026-10-06 退役后，
+    该字段在运行时**零消费**（`ToolDispatcher.allowed_task_types` 只赋值不读、
+    `expert_skills`/路由均不看）。此处保留字段仅为**兼容旧客户端的请求体**
+    （收到即忽略、不落键），全字段覆写时该键自然被清掉——这是刻意行为。
+
+    ``protected`` 不在表单里（设置页只读展示「受保护」标签），因此**必须原样
+    回传**：漏传等于每次保存都把 ``protected: true`` 抹掉，`_generalist` 从
+    「拒删」退化成普通专家（2026-10-21 实测：UI 保存一次后 DELETE 返 200）。
+    这类「表单未暴露字段」一律要加进 `_dump_expert_yaml` 并显式带值，
+    否则全字段覆写就是静默的数据丢失。
+    """
     name: str | None = None
     description: str | None = None
     persona: str | None = None
     tracks: list[str] | None = None
     skills: list[str] | None = None
     knowledge: list[str] | None = None
+    # 退役字段：接受但忽略（见类 docstring），不再校验、不再序列化。
     task_types: list[str] | None = None
     tools: list[str] | None = None
     mcp_servers: list[str] | None = None
     max_steps: int | None = None
+    # 受保护标记（仅 _generalist）。缺省 None = 不落键；True = 拒删。
+    protected: bool | None = None
     variants: dict[str, dict[str, Any]] | None = None
 
 
@@ -1430,14 +1445,41 @@ class JobRegistry:
         self._jobs: dict[str, dict] = {}
         self._lock = threading.Lock()
 
+    @staticmethod
+    def _record(job_id: str, kind: str, meta: dict | None) -> dict:
+        return {"id": job_id, "kind": kind, "status": "running",
+                "result": None, "error": None, "submitted_at": time.time(),
+                "meta": meta or {}}
+
     def submit(self, kind: str, fn: Callable[[], Any], *, meta: dict | None = None,
                on_done: Callable[[dict], Any] | None = None) -> str:
         job_id = uuid.uuid4().hex[:12]
         with self._lock:
-            self._jobs[job_id] = {"id": job_id, "kind": kind, "status": "running",
-                                  "result": None, "error": None, "submitted_at": time.time(),
-                                  "meta": meta or {}}
+            self._jobs[job_id] = self._record(job_id, kind, meta)
+        self._spawn(job_id, fn, on_done)
+        return job_id
 
+    def submit_unique(self, kind: str, fn: Callable[[], Any], *,
+                      meta: dict | None = None,
+                      on_done: Callable[[dict], Any] | None = None
+                      ) -> tuple[str, bool]:
+        """幂等提交：同 kind 已有 running Job → 复用其 id，不重复起线程。
+
+        返回 ``(job_id, created)``。页面卸载重建（切页回来）、连点、多窗口都会
+        重复 POST 同一个动作；抓取类 Job 重入会并发打同一批源、重复入池打分。
+        查重与登记在同一把锁内完成，避免两个请求同时看不到对方而各起一份。
+        """
+        with self._lock:
+            for j in self._jobs.values():
+                if j["status"] == "running" and j["kind"] == kind:
+                    return j["id"], False
+            job_id = uuid.uuid4().hex[:12]
+            self._jobs[job_id] = self._record(job_id, kind, meta)
+        self._spawn(job_id, fn, on_done)
+        return job_id, True
+
+    def _spawn(self, job_id: str, fn: Callable[[], Any],
+               on_done: Callable[[dict], Any] | None) -> None:
         def runner():
             try:
                 result = fn()
@@ -1883,7 +1925,12 @@ def create_app(
     # 项目级受控环境恢复器缓存（pid -> EnvironmentRecovery）：跨会话/子专家共享，
     # 使同一环境故障在项目内只尝试一次白名单恢复（去重计数在实例内）。
     app.state.environment_recovery: dict[str, Any] = {}
-    app.state.packs_root = packs_root
+    # packs_root 必须**在构造时绝对化**：默认值 "packs" 是相对路径，而进程 cwd
+    # 会在运行期变化（测试里 `monkeypatch.chdir(tmp_path)`、用户从别的目录启动）。
+    # 不绝对化时，`list_packs` 会去读 `<新 cwd>/packs` → 轨道清单变空
+    # （症状：`非法场景轨: ctf（合法: []）`、专家全池消失），且要等到下一次
+    # 相对路径解析才暴露，极难归因。锚定在「创建时的 cwd」= 调用方语义。
+    app.state.packs_root = str(Path(packs_root).resolve())
     app.state.llm_store = ProviderStore(providers_config)
     # 请求体留痕（diagnostics-request-body，2026-10-17）：把 LLM 层转储回调接到
     # 诊断存储（按项目/会话写 JSONL，开关在 config/llm_dump.json，默认关）。
@@ -4720,17 +4767,21 @@ def create_app(
         rejected 立刻从 solved 派生里扣除（状态是派生值，自动生效），并进
         「已拒绝」清单——同串再提交会被 `ctf_submit_flag` 直接拦下。
 
-        **确认即停**（challenge-confirm-stops，2026-10-20，用户裁决）：
-        `accepted` 是**强证据**——人看过、点了确认。此刻题目已经解出，还在
-        跑的 Worker 全是重复劳动（用户实测：确认之后调度层照样把剩下的方向
-        派完，白烧十几分钟）。所以这里在落库后**直接把该项目下所有线程的中止
-        事件置位**，让正在跑的轮次在下一个步边界停下。
+        **确认 = 通知收工，不是掐断**（challenge-confirm-notice，2026-10-20，
+        用户裁决推翻原「确认即停」）：
+        `accepted` 是**强证据**——人看过、点了确认，题目已经解出。但此前实现是
+        `_abort_project_chat_turns()`，即**直接置位中止事件**，后果是：
+        - 正在跑的轮次被掐在半个工具调用里，`_persist_stopped` 只落一句「已按
+          人类要求停止」——模型**没有任何机会写回**手上已识别的结论（解题路径、
+          还没登记的证据），这些观察随轮次一起蒸发；
+        - 用户看到的是「一堆线程突然红了」，而不是「主控说：这题解出了，我收工」。
 
-        为什么置位**整个项目**而不只是本题线程：一个 Worker 线程的
-        `challenge_asset_id` 可能为空（它是主控 spawn 的子线程，题目归属靠
-        祖先链解析），逐线程回溯容易漏；而「这道题已经解出」在单题项目里
-        等价于「不用再跑了」，多题并发项目里多停几轮的成本远低于漏停。
-        已被题目闸（`challenge_gate`）拦下的题本来也派不出新工。
+        现在改为**投递一条通知**（`core/chat/inbox.py`），模型在下一个步边界读到
+        「这题已拿到正确 flag，尽快收尾」，自己决定：停派新方向、把手上的东西
+        写回、给一句总结。**语义从「外部强制终止」变成「外部告知事实」**——终止
+        权仍归模型，因为它比外部更清楚自己此刻在哪个方向、拿到了什么。
+
+        `rejected` 不投递（题目还没解出，该继续跑）。
         """
         from core.blackboard.challenge_flags import decide_flag
         pid = _pid_of_asset(asset_id)
@@ -4741,43 +4792,141 @@ def create_app(
         except ValueError as e:
             raise HTTPException(422, str(e)) from e
         if str(body.verdict or "") == "accepted":
-            _abort_project_chat_turns(pid, reason="人工已确认 flag，题目视为解出")
+            _notify_project_chat_turns(
+                pid, asset_id=asset_id, flag_row=row,
+                reason="人工已确认 flag")
         return row
 
-    def _abort_project_chat_turns(pid: str, *, reason: str = "") -> int:
-        """置位该项目下所有在跑线程的中止事件，返回置位个数。
+    def _solved_notice(proj, challenge_id: str, flag_row: dict, *,
+                       is_controller: bool) -> str:
+        """拼「这题已解出，尽快收工」通知正文。
 
-        **只置位、不等待**：ChatTurn 在步间/流式帧/工具分发点轮询
-        `abort_event`，会在下一个边界自己收尾并落「已停止」说明。这里等它
-        退出会让 HTTP 请求挂住（子专家可能卡在不可中断工具里），所以是
-        fire-and-forget。线程不在本进程 running 集合时跳过——那些是僵尸行，
-        由 `_chat_running_reconcile` 兜底。
+        **文案必须按角色分叉**（2026-10-20 修正）：原文案是写给主控的
+        （「不要再 ctf_dispatch / call_expert」），可这条通知现在也会投给
+        **子专家与 ARTEX Worker**——它们手上根本没有这两个工具。让一个 worker
+        去「停止 ctf_dispatch」等于给它一条无法执行、也无法自检的指令，模型只能
+        猜，常见结果是它继续把手上那步跑完（用户看到的「还在跑」）。
+
+        worker 该做的是**停探索、写回、收尾**：它正在跑的那条方向已经不需要
+        再深挖了，手上的中间结论才是要保住的东西。
+        """
+        name = challenge_id
+        try:
+            asset = proj.bb.get_asset(challenge_id) or {}
+            name = str(asset.get("value") or asset.get("name") or challenge_id)
+        except Exception:  # noqa: BLE001
+            pass
+        token = str((flag_row or {}).get("flag") or "").strip()
+        head = [
+            "〔人工确认〕这道题已经拿到正确 flag，**不用再探索了**。",
+            "",
+            f"- 题目：{name}",
+            f"- 已确认 flag：`{token}`",
+            "",
+        ]
+        if is_controller:
+            return "\n".join(head + [
+                "**这一轮请尽快收尾**，按下面顺序做完就停：",
+                "1. 立刻**停止派新方向**（不要再 ctf_dispatch / call_expert）；",
+                "2. 把手上已识别的结论写回（已解出的路径、验证过的证据、未登记的"
+                "发现）——这些是复盘材料，别让它们随轮次消失；",
+                "3. 用一句话说明「本题已解出，收工」。",
+                "",
+                "已经在跑的方向不必等它们跑完，也不要为了「收齐」再等一轮。",
+            ])
+        return "\n".join(head + [
+            "**你正在跑的方向不必再做完了**——人工已经确认答案，继续深挖是重复"
+            "劳动。按下面顺序做完就停：",
+            "1. **不要再启动新的探测/扫描/脚本**，把当前这一步收个尾就够"
+            "（正在跑的长命令可以不等它结束）；",
+            "2. 把**手上已有的中间结论写回**（已走通的路径、验证过的证据、"
+            "还没登记成 finding 的发现）——这些是复盘材料，别让它们随轮次消失；",
+            "3. 用一句话说明「本题已解出，我的方向到此为止」并结束。",
+            "",
+            "不需要为了「做完整」再补一轮，也不要重新验证已经确认的 flag。",
+        ])
+
+    def _notify_project_chat_turns(pid: str, text: str | None = None, *,
+                                   asset_id: str | None = None,
+                                   flag_row: dict | None = None,
+                                   reason: str = "") -> int:
+        """给**该项目、该题目**下所有在跑轮次投递一条通知，返回投递个数。
+
+        **投递而非中止**（2026-10-20 用户裁决）：中止会让模型被掐在半个工具
+        调用里、来不及写回；投递让它在下一个步边界读到事实并自己收尾。
+
+        **存活判据是「通知箱还在」，不是 `app.state.chat_running`**
+        （2026-10-20 修正，用户实测「点了确认，其它子 agent 还在跑」）：
+        `chat_running` 只由 `_chat_launch_turn` 登记**顶层轮次**；`call_expert`
+        spawn 的子专家（`runtime._tool_call_expert`）与 ARTEX Worker
+        （`artex_worker.make_worker`）都不经过它，DB 里 status=running 但集合里
+        没有 → 旧实现 `if tid in running` 把它们**全部静默丢弃**，于是「通知所有
+        在跑轮次」实际只通知到主控自己。
+
+        现在改查 `core.chat.inbox` 的进程级登记表：`ChatTurn` 构造即登记、
+        `run()` 收尾即释放，所以「有箱」精确等于「这一轮正持有它」。
+
+        **范围按 (pid, 题目) 双重限定**：只按 pid 限是不够的——同一 CTF 项目里
+        可以有多道题并行，A 题确认后把「这题已解出」投给 B 题的 worker，它们会
+        停掉自己在做的**另一道题**（与跨项目误投同一种失败，只是粒度更细）。
+        题目归属走 `chat_store.resolve_challenge_asset_id`（子线程沿
+        parent_thread_id 继承，与调度层同口径）。
+
+        ``text`` 为空时按 ``asset_id``/``flag_row`` 现拼（并按收件人角色分叉）。
         """
         from core.chat import store as chat_store
-        running = _chat_running_set()
-        if not running:
+        from core.chat.inbox import box_of, live_thread_ids
+        from core.chat.runtime import CONTROLLER_IDS
+        live = live_thread_ids()
+        if not live:
             return 0
-        # 直接查本项目线程表：chat_threads 属于各项目自己的黑板库。
         try:
+            proj = _project(pid)
             rows = proj.bb.conn.execute(
-                "SELECT id FROM chat_threads WHERE status='running'").fetchall()
-            tids = [str(r["id"]) for r in rows]
-        except Exception:  # noqa: BLE001 —— 查不到就退回全量 running
-            tids = list(running)
+                "SELECT id, agent_id FROM chat_threads WHERE status='running'"
+            ).fetchall()
+        except Exception:  # noqa: BLE001 —— 查不到就退回「本项目名下」的 running
+            log.exception("通知投递：查询在跑线程失败 pid=%s", pid)
+            return 0
         hit = 0
-        for tid in tids:
-            if tid not in running:
-                continue
+        for r in rows:
+            tid = str(r["id"])
+            if tid not in live:
+                continue        # 进程里没有这一轮（僵尸行交给对账兜底）
+            # 题目范围：通知只对「同一道题」有意义。
+            if asset_id:
+                try:
+                    own = chat_store.resolve_challenge_asset_id(proj.bb, tid)
+                except Exception:  # noqa: BLE001
+                    own = ""
+                # 解析不出归属（未绑定题目的通用会话）也收——它可能在帮这道题
+                # 做事却没有显式绑定；宁可多通知一条，也不要让它在已解出后空跑。
+                if own and own != asset_id:
+                    continue
             try:
-                ev = _chat_abort_event(tid, create=True)
-                if ev is not None and not ev.is_set():
-                    ev.set()
+                body = text
+                if not body:
+                    body = _solved_notice(
+                        proj, asset_id or "", flag_row or {},
+                        is_controller=str(r["agent_id"] or "") in CONTROLLER_IDS)
+                box = box_of(tid)
+                if box is not None and box.post(body):
                     hit += 1
-            except Exception:  # noqa: BLE001 —— 单个线程置位失败不影响其余
-                log.exception("置位中止事件失败 tid=%s", tid)
+            except Exception:  # noqa: BLE001 —— 单个线程投递失败不影响其余
+                log.exception("投递通知失败 tid=%s", tid)
         if hit:
-            log.info("人工确认 flag 后中止 %d 个在跑轮次（%s）", hit, reason)
+            log.info("已向 %d 个在跑轮次投递通知（%s）", hit, reason)
         return hit
+
+    def _chat_notice_inbox(tid: str, *, create: bool = False):
+        """每线程一个通知箱（兼容旧调用点；实现在 `core.chat.inbox`）。
+
+        登记表已挪到模块级（见 `core/chat/inbox.py` 的说明），这样 spawn 的
+        子专家与 ARTEX Worker 也能取到同一个箱。本函数保留只是为了不改动
+        既有调用点，语义与模块函数一一对应。
+        """
+        from core.chat.inbox import box_for, box_of
+        return box_for(tid) if create else box_of(tid)
 
     @app.post("/api/challenges/{asset_id}/abandon")
     def abandon_challenge(asset_id: str, body: ChallengeAbandonIn):
@@ -6964,7 +7113,6 @@ def create_app(
             out.append({"role": name, "name": e.get("name") or name,
                         "description": e.get("description"),
                         "persona": e.get("persona"),
-                        "task_types": e.get("task_types"),
                         "tools": e.get("tools"),
                         "max_steps": e.get("max_steps")})
         return out
@@ -8959,7 +9107,6 @@ def create_app(
                         "description": e.get("description"),
                         "persona": e.get("persona"),
                         "skills": e.get("skills"),
-                        "task_types": e.get("task_types"),
                         "tools": e.get("tools"),
                         "max_steps": e.get("max_steps"),
                         "file": name})
@@ -9035,7 +9182,6 @@ def create_app(
                 "tracks": raw.get("tracks"),
                 "skills": raw.get("skills"),
                 "knowledge": raw.get("knowledge"),
-                "task_types": raw.get("task_types"),
                 "tools": tools_view,
                 # 控制器：可勾选候选全集（含无 REGISTRY 条目的专属工具）。
                 # 非控制器为 None —— UI 直接用 AGENT_TOOLS 即可。
@@ -9053,8 +9199,10 @@ def create_app(
     def _validate_expert_body(body: ExpertSaveIn) -> None:
         """写端点前置校验（宁严勿松，doctor 同口径前移）：tracks 合法轨、
         variants 轨名/字段名、max_steps 正整数、skills 注册表存在
-        （doctor expert-skill-missing）、task_types 越各轨注册表并集
-        （doctor expert-tasktype-unregistered）。"""
+        （doctor expert-skill-missing）、knowledge 方向存在。
+
+        task_types 不再校验（2026-10-21 退役）：字段已无运行时消费，校验只会
+        让旧客户端提交历史值时报 422；它会被序列化端直接忽略。"""
         valid_tracks = {t["name"] for t in list_packs(app.state.packs_root, "track")}
         bad = sorted(set(body.tracks or []) - valid_tracks)
         if bad:
@@ -9078,13 +9226,6 @@ def create_app(
             unknown = sorted({d for d in body.knowledge if d.strip() not in dirs})
             if unknown:
                 raise HTTPException(422, f"未知知识库方向: {unknown}（合法: {sorted(dirs)}）")
-        if body.task_types:
-            known: set[str] = set()
-            for t in valid_tracks:
-                known |= set(load_task_types(app.state.packs_root, t))
-            unknown = sorted(set(body.task_types) - known)
-            if unknown:
-                raise HTTPException(422, f"未注册任务类型: {unknown}（各轨注册表并集: {sorted(known)}）")
 
     def _dump_expert_yaml(body: ExpertSaveIn) -> str:
         """专家 yaml 序列化（平铺约定：key: value、内联列表 [a, b]、空值不落键
@@ -9121,8 +9262,13 @@ def create_app(
             lines.append(f"{key}: {s}")
         lines: list[str] = []
         for key in ("name", "description", "tracks", "persona", "skills",
-                    "knowledge", "task_types", "tools", "mcp_servers", "max_steps"):
+                    "knowledge", "tools", "mcp_servers", "max_steps"):
             _emit(key, getattr(body, key), lines)
+        # protected 只落 `true`（缺省/False 不落键）。解析端 _parse_inline_value
+        # 把 "false" 读成字符串 "false"（真值为 True），落 false 会反转语义；
+        # 而「取消受保护」没有入口，不落键才是正确表达。
+        if body.protected:
+            lines.append("protected: true")
         for vt in sorted(body.variants or {}):
             for field in sorted(body.variants[vt] or {}):
                 _emit(f"variant_{vt}_{field}", body.variants[vt][field], lines)
@@ -9176,14 +9322,22 @@ def create_app(
 
     @app.put("/api/experts/{expert_id}")
     def update_expert(expert_id: str, body: ExpertSaveIn):
-        """全字段覆写（表单即最终态）。_generalist 可编辑不可删。"""
+        """全字段覆写（表单即最终态）。_generalist 可编辑不可删。
+
+        ``protected`` 是**文件属性而非表单字段**：请求体没带时继承原值，不能被
+        全字段覆写静默抹掉（2026-10-21 实测：UI 保存一次后 `_generalist` 的
+        `protected: true` 消失，DELETE 从 409 变 200，兜底专家可被删）。"""
         path = _experts_base() / f"{expert_id}.yaml"
         _validate_expert_body(body)
         with pack_write_lock():
             if not path.is_file():
                 raise HTTPException(404, f"专家不存在: {expert_id}")
             _pack_history_backup(path)
-            path.write_text(_dump_expert_yaml(body), encoding="utf-8")
+            payload = body
+            if body.protected is None:
+                kept = bool(_parse_expert_yaml(path).get("protected"))
+                payload = body.model_copy(update={"protected": kept})
+            path.write_text(_dump_expert_yaml(payload), encoding="utf-8")
         return {"status": "ok", "id": expert_id, "file": f"experts/{expert_id}.yaml"}
 
     @app.delete("/api/experts/{expert_id}")
@@ -9725,6 +9879,26 @@ def create_app(
             raise HTTPException(422, f"非法状态过滤: {status}")
         return proposals_mod.list_proposals(app.state.packs_root, status)
 
+    # 注意：必须注册在 /api/proposals/{pid} 之前，否则被路径参数路由吃掉
+    # （与 /api/skills/vocab 同一坑）。
+    @app.get("/api/proposals/rules")
+    def proposal_rules(pid: str | None = None):
+        """知识库迭代的触发规则（「变更提案」页展示用）。
+
+        规则表与判定逻辑同源（core/skills/kbiteration.TRIGGER_RULES），页面看到的
+        阈值就是实际生效的阈值。`pid` 给出时附带该项目当前的开关状态。
+        """
+        from core.skills import kbiteration
+        doc = kbiteration.rules_doc()
+        doc["enabled"] = None
+        if pid:
+            try:
+                proj = _project(pid)
+                doc["enabled"] = kbiteration.is_enabled(proj.meta.get("config"))
+            except HTTPException:
+                doc["enabled"] = None
+        return doc
+
     @app.get("/api/proposals/{pid}")
     def proposal_detail(pid: str):
         try:
@@ -10157,6 +10331,67 @@ def create_app(
                               author=author, limit=limit)
         return {"failures": rows}
 
+    @app.get("/api/projects/{pid}/diagnostics/skills")
+    def diag_skill_usage(pid: str, limit: int = 200):
+        """技能与知识库使用统计（skill-usage，2026-10-21）。
+
+        回答一个此前只能靠翻日志猜的问题：**Agent 到底有没有用技能和知识库**。
+
+        数据源（本项目事件表）：
+        - `skill.routed`：本轮注入了哪些技能（ChatTurn 侧 2026-10-21 才开始上报，
+          更早的项目数据只有 loop.py 任务链的）；
+        - `skill.open`：技能正文真被打开（真使用）；
+        - `kb.search` / `kb.open`：知识库检索/读取次数，`kb.search` 的 hits 用于
+          算零命中率（零命中 = 知识缺口，接 kbiteration 的触发信号）。
+
+        「注入但从未打开」的技能是最该关注的：要么描述不吸引模型，要么专家
+        yaml 白名单配错了。
+        """
+        proj = _project(pid)
+        rows = proj.bb.recent_events(pid, limit=max(1, min(limit * 20, 20000)))
+        injected: dict[str, int] = {}
+        opened: dict[str, int] = {}
+        kb_search = kb_open = kb_zero = 0
+        for e in rows:
+            kind = e.get("kind")
+            payload = e.get("payload") or {}
+            if kind == "skill.routed":
+                for n in (payload.get("injected") or []):
+                    injected[str(n)] = injected.get(str(n), 0) + 1
+            elif kind == "skill.open":
+                n = str(payload.get("name") or "")
+                if n:
+                    opened[n] = opened.get(n, 0) + 1
+            elif kind == "kb.search":
+                kb_search += 1
+                try:
+                    if int(payload.get("hits") or 0) == 0:
+                        kb_zero += 1
+                except (TypeError, ValueError):
+                    pass
+            elif kind == "kb.open":
+                kb_open += 1
+        names = sorted(set(injected) | set(opened))
+        skills = [{"name": n, "injected": injected.get(n, 0),
+                   "opened": opened.get(n, 0),
+                   "opened_rate": (round(opened.get(n, 0) / injected[n], 3)
+                                   if injected.get(n) else None)}
+                  for n in names]
+        skills.sort(key=lambda s: (-(s["opened"] or 0), -(s["injected"] or 0), s["name"]))
+        return {
+            "skills": skills,
+            "totals": {
+                "skill_open": sum(opened.values()),
+                "skill_injected": sum(injected.values()),
+                "distinct_skills_opened": len(opened),
+                "kb_search": kb_search,
+                "kb_open": kb_open,
+                "kb_search_zero": kb_zero,
+                "kb_zero_rate": round(kb_zero / kb_search, 3) if kb_search else None,
+            },
+            "events_scanned": len(rows),
+        }
+
     @app.get("/api/projects/{pid}/diagnostics/system-prompt")
     def diag_system_prompt(pid: str, session_id: str):
         """会话系统提示词快照（diagnostics-system-prompt，2026-10-16）。
@@ -10359,7 +10594,15 @@ def create_app(
     @app.post("/api/chat/threads/{tid}/messages", status_code=202)
     def chat_send(tid: str, body: ChatMessageIn):
         """发消息即起跑一轮（后台线程）；流式经 chat.delta/chat.tool/chat.message
-        事件（GET /api/projects/{pid}/events 或项目 WS）。同线程并发发送 409。"""
+        事件（GET /api/projects/{pid}/events 或项目 WS）。
+
+        **本轮仍在跑时不再 409，改为「插话」**（chat-hit，2026-10-21）：消息投进
+        该线程的通知箱，由正在跑的那一轮在下一个可读点（步边界，或等专家返回的
+        等待循环）自己读进去。这样人不必等主控整轮跑完、也不必点停止——
+        而 call_expert 派出的专家**一个都不打断**，照旧跑完并把结果补达。
+
+        返回 `status="queued"` 让前端能明确区分「起了新轮」与「插进了当前轮」。
+        """
         # 附件随发（2026-10-08）：text 与附件至少一项；附件 id 严格校验（422 不静默丢）。
         pid = _pid_of_chat(tid)
         proj = _project(pid)
@@ -10367,8 +10610,57 @@ def create_app(
         text = body.text.strip()
         if not text and not att_refs:
             raise HTTPException(422, "消息不能为空")
+        # 本轮在跑 → 插话（不打断 call_expert）。判据用「有箱」而不是
+        # `chat_running`：后者只登记顶层轮次，而箱是「这一轮正持有它」的精确信号
+        # （见 core/chat/inbox.py）。线程 status 兜底覆盖「箱刚释放、状态还没落」的窗口。
+        from core.chat import inbox as chat_inbox
+        from core.chat import store as chat_store
+        thread = chat_store.get_thread(proj.bb, tid)
+        if thread is None:
+            raise HTTPException(404, f"线程不存在: {tid}")
+        busy = (tid in chat_inbox.live_thread_ids()
+                or thread.get("status") == "running")
+        if busy:
+            note = _hit_note_text(text, att_refs)
+            # `post` 返回 False = 箱刚被释放（轮次恰好在这一瞬收尾）。此时不能
+            # 当成插话（没人会读了），也不能丢消息——直接往下走正常起轮。
+            if chat_inbox.post(tid, note):
+                proj.bb.append_event(
+                    pid, "chat.hit",
+                    {"thread_id": tid, "text": text[:1500],
+                     "attachments": [a.get("id") for a in att_refs]},
+                    session_id=None, author="human")
+                return {"status": "queued", "thread_id": tid}
         _chat_launch_turn(pid, tid, text, refs=body.refs, attachments=att_refs)
         return {"status": "running", "thread_id": tid}
+
+    def _hit_note_text(text: str, att_refs: list[dict]) -> str:
+        """把人类插话渲染成注入用的文本（含附件路径，口径同 `_attachment_lines`）。
+
+        **必须标明「这是人中途插话、不是新任务」**：主控正在等专家返回，若把它
+        当成新一轮指令，很可能直接放弃手上方向重开一套——而用户的本意通常是
+        「补充信息 / 纠偏 / 加一句」，不是「推倒重来」。同时明确「专家仍在跑」，
+        否则主控会以为 call_expert 已经白等了。
+        """
+        parts = ["## 人类中途插话（本轮仍在执行，专家仍在后台跑）",
+                 "",
+                 "这是人在你等待专家返回期间发来的补充，**不是新任务**。"
+                 "读完按它调整你接下来的判断：需要改方向的改，只是补充信息的"
+                 "就继续原计划。**不要因为这条消息就重启已派出的方向**——"
+                 "那些专家还在跑，结果会以「[后台并发结果]」补达。",
+                 ""]
+        if text:
+            parts.append(text)
+        for a in att_refs:
+            name = a.get("name") or "附件"
+            size = a.get("size") or 0
+            # 路径必须渲染成 `/workspace/<相对路径>`（2026-10-17 既有口径）：
+            # 所有读工具的基准都是 scratch，裸相对路径 `artifacts/attachments/x`
+            # 谁都读不到。插话附件同理，别让模型拿到读不了的路径。
+            rel = str(a.get("path") or "").replace("\\", "/").lstrip("/")
+            shown = f"/workspace/{rel}" if rel else ""
+            parts.append(f"- 📎 {shown}（{name}，{size} B）")
+        return "\n".join(parts)
 
     def _chat_launch_turn(pid: str, tid: str, text: str, *,
                           refs: dict | None = None,
@@ -10493,6 +10785,14 @@ def create_app(
                 events = getattr(app.state, "chat_abort_events", None)
                 if events is not None:
                     events.pop(tid, None)
+                # 通知箱由 `ChatTurn.run()` 的 finally 释放（见 `_release_notice_box`）。
+                # 这里再兜一次：构造期抛错（run 未进入）时箱没人释放，登记表会
+                # 留着一条「死线程仍在跑」的记录，让后续通知投进黑洞。
+                try:
+                    from core.chat.inbox import drop_box
+                    drop_box(tid)
+                except Exception:  # noqa: BLE001 —— 兜底释放失败不影响收尾
+                    log.exception("通知箱兜底释放失败 thread=%s", tid)
 
         worker = threading.Thread(target=_run, name=f"chat-{tid[-12:]}",
                                   daemon=True)
@@ -10593,7 +10893,11 @@ def create_app(
                 intel_config.load_feeds(app.state.intel_dir),
                 llm=_intel_classifier(), getter=app.state.intel_getter)
 
-        return {"job_id": app.state.jobs.submit("intel-refresh", _run)}
+        # 幂等（2026-10-20）：切页回来 IntelView 会重建，自动补跑 effect 在简报
+        # 落库前看到 today=None 会再 POST 一次；同一批源并发抓两遍纯浪费。
+        # 复用进行中的 Job id，前端照常轮询到真实结果。
+        job_id, _created = app.state.jobs.submit_unique("intel-refresh", _run)
+        return {"job_id": job_id}
 
     @app.get("/api/intel/briefs")
     def intel_briefs():

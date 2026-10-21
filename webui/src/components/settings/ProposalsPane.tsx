@@ -151,6 +151,10 @@ export function ProposalsPane({ onPendingChange }: { onPendingChange?: (n: numbe
               <p className="p-3 text-[11px] leading-relaxed text-muted-foreground">
                 无{filter === "pending" ? "待审批" : ""}提案。<br />
                 Agent 执行任务中沉淀的文档变更、直播间「复盘沉淀」由 planner LLM 生成的提案都进这里。
+                <br />
+                <span className="text-muted-foreground/70">
+                  不知道什么情况下会产生提案？点右上角「触发规则」看当前生效的判据。
+                </span>
               </p>
             )}
           </div>

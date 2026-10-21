@@ -1447,6 +1447,10 @@ class ChatTurn:
     intent_free = False
     web_search = False
     _worker_kill_reason = ""
+    # 外部通知箱的类级兜底（chat-inbox）：`object.__new__` 轻量构造的壳没有
+    # `__init__`，`_take_notices`/`_release_notice_box` 读这两个属性不该抛。
+    notice_inbox = None
+    _owns_notice_box = False
     # 任务级 deadline 夹逼（artex-taskclock）：类级默认 0 = 不限，行为与引入前
     # 完全一致；`object.__new__` 轻量构造也不会 AttributeError。
     task_deadline_at = 0.0
@@ -1475,7 +1479,8 @@ class ChatTurn:
                  worker_control: Callable[[], dict[str, Any]] | None = None,
                  artex_engine_provider: Callable[[], Any] | None = None,
                  artex_planner_llm=None,
-                 recovery=None):
+                 recovery=None,
+                 notice_inbox=None):
         self.bb = bb
         self.llm = llm
         self.project_id = project_id
@@ -1486,6 +1491,32 @@ class ChatTurn:
         self.mcp_bridge = mcp_bridge
         self.expert_names = expert_names or []
         self.abort_event = abort_event or threading.Event()
+        # 外部投递箱（chat-inbox，2026-10-20）：给**正在跑**的这一轮从外面塞话。
+        # 与 abort_event 语义相反——abort 是「立刻停，别干了」，本箱是「情况变了，
+        # 你自己决定怎么收尾」（例：人工确认 flag 后让主控尽快收工，而不是被掐断
+        # 在半个工具调用里）。
+        #
+        # **默认自己申请一个**（2026-10-20 修正，用户实测「点了确认子 agent 还在
+        # 跑」）：此前只有 `app._chat_launch_turn` 传箱，而 `ChatTurn` 有三个构造
+        # 点——spawn 的子专家（`_tool_call_expert`）与 ARTEX Worker
+        # （`artex_worker.make_worker`）都不传，于是它们的 `_take_notices()` 恒返回
+        # 空：**子 agent 从来收不到任何通知**。改成构造即登记，三处自动接上，且
+        # 「有箱 = 这一轮在跑」成为比 `app.state.chat_running`（只登记顶层轮次）
+        # 更准的存活判据。
+        #
+        # 显式传 None 仍可关掉（`_owns_notice_box` 随之 False，用于测试/独立调用）。
+        _created_box = False
+        if notice_inbox is None:
+            try:
+                from core.chat.inbox import box_for as _box_for
+                notice_inbox = _box_for(thread_id)
+                _created_box = notice_inbox is not None
+            except Exception:  # noqa: BLE001 —— 通知通道故障不阻断轮次
+                log.exception("外部通知箱登记失败 thread=%s", thread_id)
+                notice_inbox = None
+        self.notice_inbox = notice_inbox
+        # 只释放**自己登记**的箱（外部传入的归外部管，代删会把对端的箱一起摘掉）。
+        self._owns_notice_box = _created_box
         self.owner_tags = owner_tags or []
         self.rule_profiles = rule_profiles
         self.artifacts_dir = artifacts_dir
@@ -1607,6 +1638,8 @@ class ChatTurn:
         # 收尾阶段标志（artex-wrapup）：撞预算后进入 settlement 时为 True——
         # 工具面/白名单被裁成「只能写回」，_dispatch 另有一道硬闸。
         self._wrapup_active = False
+        # 技能先行提醒状态（skill-first nudge，2026-10-21）：见 _reset_skill_nudge。
+        self._reset_skill_nudge()
         self._dispatcher = self._build_dispatcher()
 
     @property
@@ -1617,6 +1650,48 @@ class ChatTurn:
         语义兜底：spawn 深度恒为 1，子线程一律不可再委派。"""
         return bool(self.thread.get("parent_thread_id")
                     and self.thread.get("spawned_task"))
+
+    def _take_notices(self) -> list[str]:
+        """取走外部投递的通知（无箱 → 空）。取走即清，同一句不会注入两遍。"""
+        inbox = getattr(self, "notice_inbox", None)
+        if inbox is None:
+            return []
+        try:
+            return inbox.drain()
+        except Exception:  # noqa: BLE001 —— 通知通道故障不阻断轮次
+            log.exception("外部通知读取失败 thread=%s", self.thread_id)
+            return []
+
+    def _has_hit_note(self) -> bool:
+        """箱里是否有**人类插话**（只探不取，投递方用同一把锁）。
+
+        与 `_take_notices` 的区别：本方法在「等待专家返回」的循环里被高频调用
+        （每 0.3s 一次），**绝不能取走**——取走就等于把话吃了，主控还没读到。
+        真正取走仍由步边界的 `_take_notices()` 完成，这里只回答「有没有」。
+        """
+        inbox = getattr(self, "notice_inbox", None)
+        if inbox is None:
+            return False
+        try:
+            return inbox.pending() > 0
+        except Exception:  # noqa: BLE001 —— 探活失败按「没有」处理，不阻断等待
+            return False
+
+    def _release_notice_box(self) -> None:
+        """释放本实例登记的通知箱（轮次收尾调用，幂等）。
+
+        **必须在收尾释放**：登记表里「有箱」等价于「这一轮还在跑」，`_notify_*`
+        据此判定投递范围。不释放的话，一个已结束的线程会永远被当成活轮次——
+        通知投进去没人读，下一轮若沿用同一 tid 还会被这条旧通知污染。
+        """
+        if not getattr(self, "_owns_notice_box", False):
+            return
+        self._owns_notice_box = False
+        try:
+            from core.chat.inbox import drop_box
+            drop_box(self.thread_id)
+        except Exception:  # noqa: BLE001 —— 释放失败不影响轮次结果
+            log.exception("外部通知箱释放失败 thread=%s", self.thread_id)
 
     def _aborted(self) -> bool:
         if self.abort_event.is_set():
@@ -2055,7 +2130,9 @@ class ChatTurn:
             "- **收尾三选一，按实际结果**：① 解出了 → "
             "`close_intent(outcome=\"finding\", finding_ids=[flag 留痕那条 finding])`"
             "（ctf_submit_flag 的候选线索回执里给了 finding id；正式 flag 也会落一条"
-            " flag-capture 留痕）；② 这条路不通但题还能解 → "
+            " flag-capture 留痕）——CTF 轨**不校验** vuln/intel 类别，题目级并入可能让"
+            "该 id 实际是 category=vuln 的条目，照样传即可，别改 outcome=\"vuln\""
+            "（flag 不是漏洞）；② 这条路不通但题还能解 → "
             "`close_intent(outcome=\"dead_end\", dead_reason=…)`，只写清卡点即可，"
             "**不必**去凑 `event:`/`http:` 证据引用；③ 整道题放弃 → "
             "`ctf_abandon(reason=…)`。\n"
@@ -2164,6 +2241,19 @@ class ChatTurn:
         if sess is None:
             return ("[错误] ctf_dispatch 不可用：本线程没有装配 CTF 调度器"
                     "（只有 ctf-controller 主控可用）")
+        # 已解出闸（challenge-confirm-notice，2026-10-20 修正）：
+        #
+        # 「人工确认 → 投递通知 → 模型自己收尾」是**软**路径，依赖模型读懂那条
+        # 通知。但派方向是**代码判据**的地盘，不该让「模型有没有听话」成为唯一
+        # 防线：实测人工确认后主控照样派完剩下方向（用户截图：确认已落账，界面
+        # 上仍在跑 `curl -sL -o libc-2.23.so`），白烧十几分钟。
+        #
+        # 所以这里加一道**硬**闸：台账已 solved 就直接拒，并指回收尾动作。
+        # 判据取台账派生值（`challenge_state`），与前端徽标、覆盖度同源——
+        # 不看 LLM 自述，也不看本会话里记过什么。
+        blocked = self._solved_challenge_block()
+        if blocked:
+            return blocked
         dirs = args.get("directions")
         if not isinstance(dirs, list) or not dirs:
             return "[错误] ctf_dispatch 失败：directions 必须是非空数组"
@@ -2190,6 +2280,42 @@ class ChatTurn:
         head = (f"[代码调度] 准派 {len(plan.granted)} 个，拦下 "
                 f"{len(plan.rejected)} 个。\n")
         return head + plan.render()
+
+    def _solved_challenge_block(self) -> str:
+        """本题台账已 solved → 返回拒派文案；否则返回空串。
+
+        **为什么需要它**（2026-10-20 用户实测）：人工确认 flag 后只投递了一条
+        通知，而通知是给模型读的软约束。实测主控忽略它、继续把剩下方向派完
+        （界面截图：确认已落账，仍在 `curl -sL -o libc-2.23.so`），白烧预算。
+        「派不派方向」本来就在代码判据手里（`ctf_dispatch` 的准入、`allowed()`
+        的越权校验），已解出这件事必须同样由代码兜住。
+
+        判据取台账派生值（`challenge_state`），**不看本会话记过什么**：人工确认
+        发生在任意时刻、甚至上一轮，会话内状态不该是唯一真值来源。
+        """
+        # 只有 CTF 轨才有题目归属（`challenge_asset_id` 是 CTF 专用位）。非 CTF
+        # 轨道直接放行——这道闸挂在 `call_expert` 热路径上，不该让渗透/红队每次
+        # 派活都多付一次 DB 查询。
+        if getattr(self, "track", "") != "ctf":
+            return ""
+        try:
+            from core.blackboard.challenge_flags import challenge_state
+            from core.chat import store as chat_store
+            cid = chat_store.resolve_challenge_asset_id(self.bb, self.thread_id)
+            if not cid:
+                return ""
+            st = challenge_state(self.bb, self.project_id, cid)
+            if not st.get("solved"):
+                return ""
+            return ("[代码调度] 本题**已解出**（台账已确认 "
+                    f"{st.get('accepted')}/{st.get('quota')} 条 flag），不再派新方向。\n"
+                    "现在只做三件事：① 把手上已识别的结论写回；② 不要再派 "
+                    "call_expert；③ 用一句话说明「本题已解出，收工」。\n"
+                    "若你判断这条确认是错的（flag 不对），让人工在台账里撤销，"
+                    "不要在这里重派方向。")
+        except Exception:  # noqa: BLE001 —— 判据故障不该锁死主控
+            log.exception("已解出闸检查失败 thread=%s", self.thread_id)
+            return ""
 
     def _tool_ctf_review(self, args: dict) -> str:
         """`ctf_review`：代码侧 verdict 表 + 互斥表。"""
@@ -3396,6 +3522,12 @@ class ChatTurn:
         # 判级同样有据；role 传 agent_id，role-rules 文件存在时自动叠加
         parts = [rules_preamble,
                  f"# 角色：{expert.get('name', self.agent_id)}\n{expert.get('persona') or expert.get('description') or ''}"]
+        # 技能清单**紧跟角色、先于工作方式**（skill-first，2026-10-21）：见
+        # _skill_block() 的注释——原先放在提示最末尾，模型读到它时行为已被前面
+        # 的纪律段定型，实测几乎不 skill_open。
+        sk_block = self._skill_block()
+        if sk_block:
+            parts.append(sk_block)
         if self.is_orchestrator:
             if self.is_aggressive:
                 fctx = self._workspace_files_context()
@@ -3528,30 +3660,79 @@ class ChatTurn:
         vctx = self._vision_context()
         if vctx:
             parts.append(vctx)
-        # 技能全量描述（K8 同款渐进披露层1：name+description，正文 skill_open）。
-        # 激进主控及其 worker 明确禁用技能，不能因专家配置缺省而回退全量。
+        # 技能清单**已前移到「工作方式」之前**（skill-first，2026-10-21），
+        # 见 _skill_block()。这里不再追加。
+        return "\n\n".join(parts)
+
+    # ---------- 技能清单注入（skill-first，2026-10-21） ----------
+
+    def _skill_block(self) -> str:
+        """本轮可用技能清单 + **动手前必读硬规则**。
+
+        为什么独立成方法并前移（2026-10-21 用户实测问题）：技能清单原先追加在
+        system 提示的**最末尾**（实测 4707 字里的第 4488 字，即倒数 5%）。而这份
+        提示前面全是「场景红线 → 角色 → 工作方式 → 委派上下文（一堆资产 id /
+        维度清单）→ 沉淀纪律 → CTF 上下文」——模型读到技能清单时行为模式已经被
+        前面的「plan→execute」定型了，于是 `run_cmd` 连失败 24 次也不回头查。
+        实测该项目全生命周期只有 1 次 skill_open、2 次 kb_search。
+
+        两处修正：
+        1. **位置**：紧跟角色之后、工作方式之前（首尾强、中间弱，模型对开头段
+           的遵循度显著高于末尾）。
+        2. **措辞**：从「需要方法细节时」（软条件，模型永远觉得自己不需要）改成
+           可判定的硬规则——「命中当前介质/题型的技能，第一步必须 skill_open，
+           不要先跑命令再回头找方法」。
+
+        同时上报 `skill.routed`（ChatTurn 侧此前完全没发，导致诊断页「路由零命中」
+        统计恒为空、直播间也看不到技能路由）。payload 与 `loop.py::skill_context_for`
+        同口径（injected + count），另带 source=chat 区分链路。
+        """
+        if SkillRegistry is None or self.is_aggressive or self.probe_mode or self.is_worker:
+            return ""
         try:
-            if SkillRegistry is not None and not (self.is_aggressive or self.probe_mode or self.is_worker):
-                reg = SkillRegistry(self.packs_root)
-                reg.load()
-                # None=全量，[]/空集合=明确不加载；保留三态语义。
-                role_skills = expert.get("skills") if "skills" in expert else None
-                enabled = [s for s in reg.all()
-                           if s.enabled and (role_skills is None or s.name in role_skills)]
-                if enabled:
-                    # 消歧（2026-10-01）：技能名与专家名曾同屏混淆（模型把
-                    # 资产侦察手法 当专家名传给 call_expert），标题显式标注边界。
-                    parts.append("## 可用技能清单（skill_open(\"<name>\") 打开全量正文；"
-                                 "下列是【技能名】，不是专家——"
-                                 + ("本线程无 call_expert，派活走 artex_plan"
-                                    if self.is_artex else
-                                    "委派专家请用 call_expert 并填专家 id")
-                                 + "）\n"
-                                 + "\n".join(f"- {s.name}：{s.description or ''}"
-                                             for s in enabled))
+            expert = load_expert(self.packs_root, self.agent_id, self.track)
+        except Exception:  # noqa: BLE001 —— 专家读取失败时按全量（与 _system_prompt 同口径）
+            expert = {}
+        try:
+            reg = SkillRegistry(self.packs_root)
+            reg.load()
+            # None=全量，[]/空集合=明确不加载；保留三态语义。
+            role_skills = expert.get("skills") if "skills" in expert else None
+            enabled = [s for s in reg.all()
+                       if s.enabled and (role_skills is None or s.name in role_skills)]
         except Exception:  # noqa: BLE001 —— 技能清单失败不阻断对话
             log.exception("chat 技能清单加载失败 thread=%s", self.thread_id)
-        return "\n\n".join(parts)
+            return ""
+        if not enabled:
+            return ""
+        # 审计事件（best-effort：统计失败不能拖垮提示构建）
+        try:
+            self.bb.append_event(
+                self.project_id, "skill.routed",
+                {"name": None, "injected": [s.name for s in enabled],
+                 "count": len(enabled), "source": "chat",
+                 "agent_id": self.agent_id, "task_id": None},
+                session_id=self.thread_id, author=self.agent_id)
+        except Exception:  # noqa: BLE001
+            log.exception("skill.routed 事件失败 thread=%s", self.thread_id)
+        names = [s.name for s in enabled]
+        lines = "\n".join(f"- {s.name}：{s.description or ''}" for s in enabled)
+        # 派活指引按线程类型分叉（沿用原有消歧文案：技能名 vs 专家名）
+        dispatch_hint = ("本线程无 call_expert，派活走 artex_plan"
+                         if self.is_artex else
+                         "委派专家请用 call_expert 并填专家 id")
+        return (
+            "## 技能清单与打开时机（动手前必读）\n"
+            f"下列是【技能名】，不是专家——{dispatch_hint}。\n"
+            f"{lines}\n\n"
+            "**硬规则**：\n"
+            "1. 收到任务先看上面的清单，判断有没有命中你手上这种介质/题型的技能；\n"
+            f"   命中就先 skill_open(\"<技能名>\") 读正文，**再**开始 run_cmd / 写脚本。\n"
+            "   不要先跑一堆命令、卡住了才回头找方法。\n"
+            "2. 技能正文给打法纪律与判据；具体命令、payload、字段格式不够用时，\n"
+            "   用 kb_search 检索知识库、kb_open 读正文——**不要凭记忆拼命令和参数**。\n"
+            "3. 已知测试点名称时，route_lookup 可直接定位到对应模块。\n"
+        )
 
     # ---------- 消息装载与落库 ----------
 
@@ -3960,6 +4141,10 @@ class ChatTurn:
                                      error=info)
             self._emit("chat.error", {"thread_id": self.thread_id, **info})
             raise
+        finally:
+            # 通知箱释放必须在**所有**出口执行（正常/删除/中止/异常）：登记表里
+            # 「有箱」是投递方的存活判据，漏释放 = 死线程永久被当活轮次。
+            self._release_notice_box()
 
     def _web_search_on(self) -> bool:
         """线程级「联网搜索」开关**实时读**（每步从 chat_threads 行读，不缓存）。
@@ -4020,6 +4205,8 @@ class ChatTurn:
             return self._loop_turn(user_text)
 
     def _loop_turn(self, user_text: str) -> str:
+        # 每轮复位技能提醒状态（用户新提一轮 = 新任务，上一轮读过技能不代表这轮读过）
+        self._reset_skill_nudge()
         system = self._system_prompt()
         # 系统提示快照（diagnostics-system-prompt，2026-10-16）：诊断页「查看系统
         # 提示词」的数据源。每轮覆盖式 UPSERT，best-effort（异常只 log 不阻断）。
@@ -4065,6 +4252,23 @@ class ChatTurn:
             if self._aborted():  # 步间中止：不落新 LLM 调用
                 final = self._persist_stopped()
                 break
+            # 外部通知（chat-inbox，2026-10-20）：在**步边界**取一次，作为 user
+            # 消息并入上下文，让模型自己决定怎么收尾。
+            #
+            # 为什么不直接 abort：人工确认 flag 后要让主控「尽快收工并总结」，
+            # 而不是被掐在半个工具调用里——`_persist_stopped` 只落一句「已按人类
+            # 要求停止」，模型没有任何机会写回手上已识别的结论。这里给的是
+            # 「情况变了」，收尾动作仍由模型完成（它知道自己在哪个方向、拿到什么）。
+            #
+            # 只在步边界取（不在流式帧里）：注入必须落在两次 LLM 请求之间，
+            # 中途改 messages 会让当前这次请求的半截响应失去对应上下文。
+            for _notice in self._take_notices():
+                # **必须走 `_inject_nudge`，不能裸 append**：步边界上 messages
+                # 尾部通常是 user（tool_result 块），再 append 一条 user 就是连续
+                # 两条 user——Anthropic 严格角色交替会直接 400 拒收（本仓既有坑，
+                # 见 `_inject_nudge` 的注释）。
+                _inject_nudge(messages, _notice)
+                self._emit("chat.notice", {"text": _notice[:1500]})
             # 墙钟预算耗尽（artex-taskclock）：与步数预算并列的第二个收尾触发点。
             # 上游 harness 的 MaxDuration 同款——到点**自己**停并进收尾，而不是
             # 等 Engine 从外面 future.cancel()：硬砍时 Worker 连一句总结都来不及
@@ -4457,9 +4661,14 @@ class ChatTurn:
                 if tool_result_blocks:
                     messages.append({"role": "user",
                                      "content": tool_result_blocks})
-                if self.is_first_return_controller:
+                if self.is_first_return_controller or probe_pending:
                     # 先返先触发：把窗口内后台完成的并发结果并进下一轮 LLM
                     # 请求（skip=本批已作为正式 tool_result 交回的 id，防双落盘）
+                    #
+                    # `or probe_pending`（2026-10-21）：人类插话也能让主控提前
+                    # 返回，此时非 first_return 主控同样有专家在后台跑。它们补了
+                    # `_PROBE_PENDING` 占位，真实结果必须靠这里补达——否则占位
+                    # 永远停在「仍在后台执行」，主控再也看不到真实结论。
                     self._drain_probe_overflow(
                         messages, skip_ids=set(parallel_results))
                 if step_nudges:
@@ -4552,7 +4761,9 @@ class ChatTurn:
                     # tested_clean（那会撞门禁）。按实际结果给三条路。
                     nudge = ("你还有未收尾的意图：" + ", ".join(open_ids)
                              + "。按实际情况选一个收尾——① 已解出："
-                             "close_intent(outcome=\"finding\", finding_ids=[flag 留痕发现])；"
+                             "close_intent(outcome=\"finding\", finding_ids=[flag 留痕发现])"
+                             "（CTF 轨不校验 vuln/intel 类别，题目级并入可能让该 id 实际是 "
+                             "category=vuln，照样传即可、别改 outcome=vuln）；"
                              "② 这条路不通但题还能解：close_intent(outcome=\"dead_end\", "
                              "dead_reason=卡点)（**不必**凑 evidence_refs）；"
                              "③ 整道题放弃：ctf_abandon(reason=...)。"
@@ -4760,7 +4971,87 @@ class ChatTurn:
             task_id=self.artex_task_id,
             thread_id=self.thread_id)
 
+    # ---------- 技能先行提醒（skill-first nudge，2026-10-21） ----------
+
+    #: 触发提醒的「实质动作」工具组（执行 + 文件）。知识组（skill_open/kb_*/
+    #: route_lookup）本身就是查阅动作，不提醒。
+    _SKILL_NUDGE_GROUPS = ("执行", "文件")
+
+    def _reset_skill_nudge(self) -> None:
+        """每轮复位提醒状态（**实例属性**，不能写类属性——类属性会在所有线程
+        实例间共享，A 线程 skill_open 过会让 B 线程永远收不到提醒）。"""
+        self._skill_nudge_sent = False
+        self._skill_opened_round = set()
+
+    def _skill_first_nudge(self, name: str) -> str:
+        """本轮首次实质动作且还没读过技能 → 返回一句提醒（否则空串）。
+
+        **软闸语义**：不阻断、不重试，只是把提醒并进这次 tool_result 尾部。
+        只提醒一次（`_skill_nudge_sent`），之后模型照不照做都不再啰嗦——重复
+        提醒会把上下文变成噪声，反而降低工具结果的可见度。
+
+        为什么不硬拒：分诊/取证类任务有时确实不需要技能（`file` 一把就有结论），
+        硬拒会误伤并白烧一轮。B2 的定位是「让模型在最相关的一屏里看到这句话」。
+        """
+        if getattr(self, "_skill_nudge_sent", False):
+            return ""
+        if name in ("skill_open", "kb_search", "kb_open", "route_lookup"):
+            return ""          # 查阅动作本身：不提醒
+        if self._skill_opened_round:
+            return ""          # 本轮已读过技能：不提醒
+        try:
+            from core.agent.tool_registry import agent_tool_group
+            if agent_tool_group(name) not in self._SKILL_NUDGE_GROUPS:
+                return ""
+        except Exception:  # noqa: BLE001 —— 分组查不到就不提醒（保守）
+            return ""
+        # 只有真配了技能的线程才提醒（激进主控/probe 无技能面）
+        block = self._skill_block_names()
+        if not block:
+            return ""
+        self._skill_nudge_sent = True
+        return (f"\n\n---\n[提示] 你还没打开过技能手册就动手了。本线程可用技能："
+                f"{'、'.join(block)}。\n"
+                "若上面这份清单里有覆盖当前介质/题型的技能，建议先 "
+                "skill_open 读正文再继续；具体命令/payload 不确定时用 kb_search "
+                "查知识库。已经明确知道怎么做可以忽略本条。")
+
+    def _skill_block_names(self) -> list[str]:
+        """本线程技能名清单（供提醒用；与 _skill_block 同口径，失败返空）。"""
+        if SkillRegistry is None or self.is_aggressive or self.probe_mode or self.is_worker:
+            return []
+        try:
+            expert = load_expert(self.packs_root, self.agent_id, self.track)
+            reg = SkillRegistry(self.packs_root)
+            reg.load()
+            role_skills = expert.get("skills") if "skills" in expert else None
+            return [s.name for s in reg.all()
+                    if s.enabled and (role_skills is None or s.name in role_skills)]
+        except Exception:  # noqa: BLE001
+            return []
+
     def _dispatch(self, tc) -> tuple[bool, str]:
+        """技能先行提醒包装器（skill-first nudge，2026-10-21）。
+
+        **为什么包一层而不是改内部 4 处 return**：`_dispatch` 内部有 4 条返回
+        路径（ctf_* 分支 / artex 分支 / trace 分支 / dispatcher 分支）加异常
+        兜底，逐处追加提醒既易漏又难维护。这里统一在出口处补一次。
+
+        提醒只追加到**成功**结果尾部（失败文本本身已带 [错误]，再拼提醒会干扰
+        模型对错误的判读）。`skill_open` 成功即记入本轮已读集合，后续不再提醒。
+        """
+        ok, result = self._dispatch_inner(tc)
+        name = getattr(tc, "name", "") or ""
+        if name == "skill_open" and ok:
+            self._skill_opened_round.add(str((tc.arguments or {}).get("name") or ""))
+            return ok, result
+        if ok:
+            nudge = self._skill_first_nudge(name)
+            if nudge:
+                result = f"{result}{nudge}"
+        return ok, result
+
+    def _dispatch_inner(self, tc) -> tuple[bool, str]:
         """工具分发：返回 (ok, 结果文本)。失败文案统一以「[错误]」前缀，
         是持久化消息与前端渲染共用的单点失败判定约定。
 
@@ -5063,6 +5354,7 @@ class ChatTurn:
             # 所有专家子轮自然收尾——长工具（浏览器/MCP ≤60s/大扫描）能拖很久，主控
             # 线程卡在这里无法回到步边界判中止。改为限时等待 + 轮询中止，置位即跳出。
             pending_set = set(pending)
+            hit_broke = False
             while pending_set:
                 if self._aborted():
                     break
@@ -5070,6 +5362,20 @@ class ChatTurn:
                 for future in done:
                     call_id, result = future.result()
                     results[call_id] = result
+                # 人类插话（chat-hit，2026-10-21）：主控在等 call_expert 返回时是
+                # **整段阻塞**的——通知原本只在步边界取，这段等待里一次都读不到，
+                # 于是「主控在等专家」的几分钟内，人发什么都进不来（用户实测：
+                # 只能干等或点停止）。这里在等待循环里也探一次：有插话就**提前
+                # 返回**，把已收结果交回主控，剩下的专家转后台继续跑（复用
+                # first_return 的 overflow 通道，结果不丢）。
+                #
+                # **不打断 call_expert**：专家线程一个都没被取消，`shutdown(
+                # wait=False)` 照旧让它们跑完；只是主控不再干等，先回去读人的话。
+                if not done and self._has_hit_note():
+                    log.info("人类插话：主控提前结束等待，专家转后台 thread=%s",
+                             self.thread_id)
+                    hit_broke = True
+                    break
                 if first_return and done:
                     # 先返先触发：首批结果到手即止。timeout=0 非阻塞再捞一轮
                     # （窗口内刚好收尾的一并交回，减少主控空跑 round-trip），
@@ -5079,9 +5385,15 @@ class ChatTurn:
                         call_id, result = future.result()
                         results[call_id] = result
                     break
-            if first_return and pending_set and not self._aborted():
+            if (first_return or hit_broke) and pending_set and not self._aborted():
                 # 断候登记必须在「再捞一轮」之后：之后完成的探针才走
                 # overflow 路径；窗口内已完成的不标记、不双落盘。
+                #
+                # hit_broke 也要登记：插话提前返回后，剩下的专家同样在后台跑，
+                # 其结果必须走 overflow 补达，否则**没有 tool_result 配对**——
+                # 主循环会为它们补 `_PROBE_PENDING` 占位（保 pairing 合法），
+                # 真实结果靠 overflow 在下一步并进上下文。不登记的话这些结果
+                # 永远没人取，主控再也看不到（比「晚到」糟得多）。
                 with self._probe_lock:
                     self._probe_abandoned.update(
                         tc.id for tc in experts if tc.id not in results)
@@ -5123,9 +5435,16 @@ class ChatTurn:
         if self.is_ctf_controller:
             lines = ["[后台并发结果] 以下并发专家已在后台跑完（其余方向仍在跑，"
                      "不必等它们）："]
-        else:
+        elif self.is_first_return_controller:
             lines = ["[后台并发结果] 以下并发专家已在后台跑完，请按先返先触发规则"
                      "处置（[命中]→立即派深挖专家；[未命中]→放弃该方向）："]
+        else:
+            # 非激进/非 ARTEX 主控走到这里只有一个原因：**人类中途插话**让它
+            # 提前结束等待（2026-10-21）。此时不能套「先返先触发」那套渗透纪律
+            # ——它本来就没启用该模式，读到的动作指令会与自己的调度方式矛盾。
+            # 只需如实告知「你之前等的那批跑完了」，判断交给模型。
+            lines = ["[后台并发结果] 你先前派出的并发专家已跑完（你当时因人类插话"
+                     "提前返回，没有继续等它们）："]
         for it in items:
             body = it.get("result") or ""
             if len(body) > _PROBE_OVERFLOW_HEAD:
@@ -5186,6 +5505,18 @@ class ChatTurn:
             return "[错误] call_expert 失败：expert 与 task 必填"
         if not self.is_orchestrator or self._is_spawned_subagent:
             return "[错误] call_expert 失败：只有主控能委派（spawn 深度=1）"
+        # 已解出闸（challenge-confirm-notice，2026-10-20 修正）：台账已 solved
+        # 时**任何**新派发都拒——包括绕过 ctf_dispatch 直调 call_expert 的路径。
+        # 与 `_tool_ctf_dispatch` 里那道闸同源（`_solved_challenge_block`）：
+        # 一处管「提方向」，一处管「真派出去」，缺任一处都能被绕过。
+        #
+        # **必须排在专家名校验之前**：这是一道「题目层面已无活可干」的结论，
+        # 与「你派的是哪个专家」无关。排在后面时，一个拼错专家名的调用会先被
+        # 「未知专家」拒掉，模型据此以为换个名字就能派——而真正的结论是
+        # 「这题不用再派了」。
+        solved_block = self._solved_challenge_block()
+        if solved_block:
+            return solved_block
         if expert in CONTROLLER_IDS:
             return ("[错误] call_expert 失败：主控类智能体不可被委派"
                     "（spawn 深度=1）；请派专家池专家")

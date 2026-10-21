@@ -3,11 +3,13 @@
 只读 packs，零 fastapi 依赖。三级结论：
 - error   绑定断裂：角色引用不存在的技能、task_type 未注册、frontmatter name 与
            目录名不一致；专家池同型断裂（expert-skill-missing /
-           expert-tasktype-unregistered / expert-track-unknown /
-           expert-generalist-missing）；场景档组队引用断裂或轨外
-           （profile-expert-missing）；阶段剧本解析失败/剧本任务类型未注册/
-           剧本角色不在池/next 指向不存在的阶段（phase-bad-yaml /
-           phase-tasktype-unregistered / phase-expert-missing / phase-next-missing）；
+           expert-track-unknown / expert-generalist-missing）；场景档组队
+           引用断裂或轨外（profile-expert-missing）；阶段剧本解析失败/
+           剧本任务类型未注册/剧本角色不在池/next 指向不存在的阶段
+           （phase-bad-yaml / phase-tasktype-unregistered /
+           phase-expert-missing / phase-next-missing）；
+           （expert-tasktype-unregistered 已随专家 task_types 字段退役移除，
+           2026-10-21——该字段零运行时消费，再校验等于给死字段做体检。）
 - warning 软问题：角色引用已禁用技能、缺 redlines / task_types.yaml、技能正文
            引用的 kb 模块失效、全局 route_index.yaml 解析失败或条目 kb 域前缀/
            模块路径失效/标签技能不存在；专家池软问题（expert-skill-disabled /
@@ -252,12 +254,8 @@ def diagnose(packs_root: str | Path,
                     rep.issues.append(Issue(
                         "warning", "expert-skill-disabled", _rel(ep, root),
                         f"专家 {ep.stem} 引用了已禁用技能: {sk_name}"))
-            for tt in expert.get("task_types") or []:
-                if tt not in registered_task_types:
-                    rep.issues.append(Issue(
-                        "error", "expert-tasktype-unregistered", _rel(ep, root),
-                        f"专家 {ep.stem} 的 task_type 未在任何轨注册表: {tt}"
-                        "（专家跨轨服务，按各轨注册表并集体检）"))
+            # 专家 task_types 体检已移除（2026-10-21 字段退役）：任务认领机制
+            # 2026-10-06 退役后该字段零运行时消费，再校验等于给死字段做体检。
         if GENERALIST not in expert_ids:
             rep.issues.append(Issue(
                 "error", "expert-generalist-missing", "experts/_generalist.yaml",
@@ -349,6 +347,45 @@ def diagnose(packs_root: str | Path,
                 "warning", "kb-structure-thin", _rel(md, root),
                 "长手册为单段长文（无任何标题分节）——建议按「适用条件/步骤/坑」"
                 "加标题结构，便于路由命中与段落级引用（K3 hints 定位）"))
+
+    # ---- kb 长手册分段索引体检（progressive-entry，2026-10-21）----
+    # 背景：`kb_open` 返回**全文**，不支持锚点定位。1000+ 行手册一开就吃掉
+    # 整个上下文（图片隐写 1159 行 ≈ 40KB）。所以「渐进式入口」必须靠
+    # `<同名>.idx.md` 分段索引 + skill 表里的 §/行号 指引。
+    # 这里只查「长手册有没有配索引」，不查索引内容是否过期（行号漂移需人工）。
+    _LONG_MANUAL_LINES = 400
+    if kb_root_dir.is_dir():
+        _missing_idx: list[tuple[int, str]] = []
+        for md in sorted(kb_root_dir.rglob("*.md")):
+            if ".history" in md.parts or "kb-trash" in md.parts \
+                    or "赛事专题" in md.parts or "载荷与字典" in md.parts \
+                    or "工具手册" in md.parts or md.name.endswith(".idx.md"):
+                continue
+            try:
+                text = md.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            nlines = text.count("\n") + 1
+            if nlines < _LONG_MANUAL_LINES:
+                continue
+            if md.with_name(md.stem + ".idx.md").is_file():
+                continue
+            _missing_idx.append((nlines, _rel(md, root)))
+        # 只报最长的 5 篇 + 一条汇总：79 篇逐条列会淹没其它 info
+        # （实测全库 79 篇，逐条刷屏 79 行，人不会读）
+        if _missing_idx:
+            _missing_idx.sort(reverse=True)
+            for nlines, rel in _missing_idx[:5]:
+                rep.issues.append(Issue(
+                    "info", "kb-long-manual-no-index", rel,
+                    f"长手册 {nlines} 行未配分段索引（同名 .idx.md）——"
+                    "kb_open 返回全文会挤占上下文；建议按 H2 节列出行范围，"
+                    "供 Agent 用 offset/limit 只读目标节"))
+            if len(_missing_idx) > 5:
+                rep.issues.append(Issue(
+                    "info", "kb-long-manual-no-index-more", "",
+                    f"另有 {len(_missing_idx) - 5} 篇长手册（≥{_LONG_MANUAL_LINES} 行）"
+                    "同样未配分段索引；完整清单见 `scripts/pack_doctor.py --list-long`"))
 
     # ---- 同义词表体检（M2 retrieval-upgrade，2026-09-23；反向校验防死组）----
     # 每个成员词对 kb 索引跑一次匹配：零命中的成员=空转词（扩展了也命不中任何

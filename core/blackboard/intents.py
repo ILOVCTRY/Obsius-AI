@@ -274,6 +274,21 @@ def close_intent(bb, project_id: str, intent_id: str, outcome: str, *,
                 raise ValueError(
                     "收尾为漏洞/有效发现时必须带 finding_ids（至少一条已登记发现）")
             want_cat = "vuln" if outcome == "vuln" else "intel"
+            # **CTF 轨不校验 category 匹配**（2026-10-21 修正，用户实测必然失败）：
+            # CTF 的「解出」由 flag 台账派生，`vuln`/`intel` 这个二分在 CTF 轨
+            # 没有消费者（台账不看 findings 类别）。而它会和 CTF 题目级并入
+            # （`add_finding` 的 challenge-dedup「一题一条」）直接打架：
+            #   ① 模型先登记栈溢出发现（默认 category=vuln）；
+            #   ② ctf_submit_flag 落 flag 留痕（category=intel）；
+            #   ③ 题目级并入把留痕并进 vuln 条目、且**不降级**（intel 不压 vuln）
+            #      → 留痕 id 实际指向 category=vuln；
+            #   ④ close_intent(outcome="finding") 要求 intel → **必拒**。
+            # 而四处引导文案全写 outcome="finding"（loop/tools/runtime），模型
+            # 照着做就撞墙；换个 outcome="vuln" 能过，但语义是错的（CTF 的 flag
+            # 不是漏洞，让模型宣称「确认漏洞」会污染链路图）。同一文案时灵时不灵
+            # （取决于该题下有没有登记过 vuln），模型只能猜——故按轨整体跳过。
+            # `false-positive` 拦截保留：误报发现仍不能拿来收尾，这是全轨口径。
+            ctf_track = (track or "").strip() == "ctf"
             for fid in fids:
                 f = bb.conn.execute(
                     "SELECT category, status FROM findings"
@@ -286,7 +301,7 @@ def close_intent(bb, project_id: str, intent_id: str, outcome: str, *,
                     raise ValueError(
                         f"不能以误报发现收尾: {fid}——误报支持的是死路收尾"
                         "（outcome=dead_end，写清 dead_reason）")
-                if f["category"] != want_cat:
+                if not ctf_track and f["category"] != want_cat:
                     raise ValueError(
                         f"收尾类别不符: {fid} category={f['category']}"
                         f"（{outcome} 收尾要求 {want_cat}——发现类别不对请换引用或另案）")

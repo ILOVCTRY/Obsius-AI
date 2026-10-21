@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { api, pollJob } from "@/lib/api"
 import type {
   IntelArticle, IntelBriefMeta, IntelLearningProfile, IntelOverview,
@@ -18,6 +18,22 @@ import { cn } from "@/lib/utils"
 const DIRECTION_LABELS: Record<string, string> = {
   web: "Web", ai: "AI 安全", vehicle: "车联网", reverse: "逆向",
   android: "Android", pwn: "PWN", forensics: "取证",
+}
+
+// 模块级（跨卸载存活）：切页时 App 用条件渲染，IntelView 会被整个卸载重建，
+// 组件内的 ref/state 全部归零。若把「在抓 / 今日已自动补跑」只放组件里，切回来
+// 时会看到 today 仍为 null（简报还没落库）而再触发一次抓取。后端 submit_unique
+// 已能复用进行中的 Job，但前端也该续上同一轮而不是重走一遍。
+let inflightFetch: Promise<boolean> | null = null
+let autoFetchedFor = "" // 已为哪一天自动补跑过（UTC 日期，与后端 overview 口径一致）
+
+async function fetchOnce(): Promise<boolean> {
+  try {
+    const { job_id } = await api.intelFetch()
+    const job = await pollJob(job_id, () => {})
+    return job.status === "done"
+  } catch { return false /* 端点失败静默，页面数据维持现状 */ }
+  finally { inflightFetch = null }
 }
 
 function ArticleRow({ a, onToggle }: {
@@ -73,7 +89,6 @@ export function IntelView() {
   const [planWeek, setPlanWeek] = useState<string>("")
   const [planBusy, setPlanBusy] = useState(false)
   const [copied, setCopied] = useState(false)
-  const autoFetched = useRef(false)
 
   const loadOverview = useCallback(() =>
     api.intelOverview().then(setOverview).catch(() => {}), [])
@@ -113,25 +128,38 @@ export function IntelView() {
   useEffect(() => { loadBrief(briefDate) }, [briefDate, loadBrief])
 
   const refresh = useCallback(async () => {
-    if (refreshing) return
+    // 已有在跑的一轮（含上一个组件实例发起的）→ 只跟随，不重复提交
+    const pending = inflightFetch ?? (inflightFetch = fetchOnce())
     setRefreshing(true)
-    try {
-      const { job_id } = await api.intelFetch()
-      await pollJob(job_id, () => {})
+    try { await pending }
+    finally {
+      setRefreshing(false)
       loadOverview(); loadBriefs(); loadArticles()
-    } catch { /* 端点失败静默，页面数据维持现状 */ }
-    finally { setRefreshing(false) }
-  }, [refreshing, loadOverview, loadBriefs, loadArticles])
+    }
+  }, [loadOverview, loadBriefs, loadArticles])
 
-  // 触发式补跑（设计定稿）：打开页时今日无简报 → 自动抓一次（仅一次，防循环）
+  // 触发式补跑（设计定稿）：打开页时今日无简报 → 自动抓一次（仅一次，防循环）。
+  // 2026-10-20：autoFetchedFor 记的是「哪一天补过」而非 bool——切页回来组件重建，
+  // 若今日抓取还没跑完（简报未落库）today 仍是 null，bool 归零就会再抓一遍。
   useEffect(() => {
-    if (autoFetched.current || !overview) return
-    autoFetched.current = true
-    if (overview.today === null) {
-      const t = setTimeout(refresh, 0)  // 延后一拍，避免 effect 内同步 setState
-      return () => clearTimeout(t)
+    if (!overview || inflightFetch) return
+    const today = new Date().toISOString().slice(0, 10)  // UTC，与 /api/intel/overview 同口径
+    if (overview.today === null && autoFetchedFor !== today) {
+      autoFetchedFor = today
+      void refresh()
     }
   }, [overview, refresh])
+
+  // 挂载时有上一实例遗留的抓取在跑 → 按钮维持「抓取中…」，结束后补一次数据刷新
+  useEffect(() => {
+    if (!inflightFetch) return
+    setRefreshing(true)
+    const pending = inflightFetch
+    void pending.finally(() => {
+      setRefreshing(false)
+      loadOverview(); loadBriefs(); loadArticles()
+    })
+  }, [loadOverview, loadBriefs, loadArticles])
 
   const toggle = (id: string, patch: { read?: boolean; starred?: boolean }) => {
     api.intelMarkArticle(id, patch)

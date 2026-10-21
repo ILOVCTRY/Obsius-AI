@@ -37,7 +37,6 @@ export function MatrixPane({ tax, track, onFocusSkill }: {
   useEffect(() => reload(), [reload])
 
   const knownNames = useMemo(() => new Set(cols.map((c) => c.name)), [cols])
-  const validTypes = new Set(Object.keys(tax?.task_types?.[track] ?? { generic: "passive" }))
 
   // 转置后悬空/禁用徽章挂角色列头（原为行尾附加列）
   const roleIssues = useMemo(() => {
@@ -120,31 +119,8 @@ export function MatrixPane({ tax, track, onFocusSkill }: {
           </div>
         </div>
 
-        {/* task_types 区 */}
-        <div className="rounded border p-2">
-          <p className="mb-1 text-[11px]">任务类型白名单（注册表：{[...validTypes].join("、")}）</p>
-          <div className="space-y-1">
-            {roles.map((r) => {
-              const tts = r.task_types
-              return (
-                <div key={r.file} className="flex items-center gap-2 text-[11px]">
-                  <span className="w-32 shrink-0 truncate font-mono" title={r.file}>{roleLabel(r)}</span>
-                  {tts == null
-                    ? <span className="text-muted-foreground">全部（task_types: null）</span>
-                    : tts.length === 0
-                      ? <span className="text-amber-300">空列表（白名单关闭：无类型可领）</span>
-                      : tts.map((t) => (
-                        <Badge key={t} variant="outline"
-                               className={cn("text-[10px]", !validTypes.has(t) && "border-red-500/50 text-red-300")}
-                               title={validTypes.has(t) ? undefined : "未在 task_types.yaml 注册，publish 会被拒"}>
-                          {t}{!validTypes.has(t) && " ✗未注册"}
-                        </Badge>
-                      ))}
-                </div>
-              )
-            })}
-          </div>
-        </div>
+        {/* task_types 区已移除（2026-10-21）：任务认领机制 2026-10-06 退役后，
+            专家 yaml 的 task_types 零运行时消费，展示它只会误导「这是有效约束」。 */}
       </div>
     </ScrollArea>
   )

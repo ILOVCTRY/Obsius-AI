@@ -120,11 +120,20 @@ tool(
                     'bridge',
                     'real',
                 ],
-                'description': '仅 sandbox/docker 有效；省略时 sandbox 默认 none、其余默认 bridge。real=真实网络，必须提供当前项目中已批准的一次性 approval_id，执行后自动消费审批。',
+                'description': (
+                    '仅 sandbox/docker 有效。省略时 sandbox 默认 none、其余默认 bridge。'
+                    '**docker 省略即 bridge＝已能出网，绝大多数题目不需要传这个参数**'
+                    '（实测容器默认 bridge 可直连外网服务与 libc.rip）。'
+                    'real 与 bridge 在 docker 下走的是同一个 docker 网络，唯一区别是 real 强制'
+                    '走一次性审批链——而平台没有 net_real 的申请入口，只能由人类在审批页手工放行，'
+                    '因此**不要为了出网去传 real**。'
+                    'none 才是断网（明确要隔离外部网络时才用）。'
+                ),
             },
             'approval_id': {
                 'type': 'string',
-                'description': 'net=real 必填；必须是当前项目中 status=approved 的一次性审批 id。',
+                'description': ('net=real 必填；必须是当前项目中 status=approved 的一次性审批 id。'
+                                '拿不到就别传 net=real——docker 下省略 net 已经是 bridge（可出网）。'),
             },
             'timeout': {
                 'type': 'number',
@@ -759,7 +768,10 @@ tool(
                     '证据对象。复现步骤 repro_steps=[{desc, type: http|python|cmd|image, code, expected, '
                     'artifact_id?, stability?, target?}]——desc/expected 必填，code 填 HTTP 原始报文/'
                     'python 脚本/bash 命令（type=image 时改填 artifact_id 指向图片、无 code），多步链按数组顺序；'
-                    '这是 verified 门禁认可的结构（旧 poc/pocs/poc_artifact_id 已 legacy，勿再新写）'
+                    '这是 verified 门禁认可的结构（旧 poc/pocs/poc_artifact_id 已 legacy，勿再新写）。'
+                    '**注意边界**：验证结论/预期vs实际 属于**顶层** verification_result，不要塞进本对象——'
+                    '本对象只放证据本体（repro_steps/pocs/relates_to 等），塞进来的键不会渲染进报告，'
+                    '也不会被门禁当成「验证结果」'
                 ),
             },
             'relates_to': {
@@ -1371,7 +1383,7 @@ tool(
     group='知识',
     flags=("plan_pre", "spill_skip", "knowledge"),
     description=(
-        '[legacy] 打开尚未迁移的全局知识库模块（packs/kb/ 区，含测试包手册与快照）：直接返回文件正文，不返回路径。'
+        '打开全局知识库模块（packs/kb/ 区，含测试包手册与快照）：直接返回文件正文，不返回路径。'
         'module 走全局形态 `<域>/<快照>/<路径>`（如 web/漏洞分类/SQL注入/注入类漏洞（SQL注入-命令注入-SSTI）.md），也认 Obsidian wikilink '
         '（[[web/漏洞分类/SQL注入/注入类漏洞（SQL注入-命令注入-SSTI）|手册]]）与反引号/引号包裹。'
         '.md/.py/.txt/.json 均按 UTF-8 文本返回（弹药脚本只是文本，执行仍走 run_cmd）。'
@@ -1398,7 +1410,7 @@ tool(
     group='知识',
     flags=("plan_pre", "knowledge"),
     description=(
-        '[legacy] 按关键词全文检索尚未迁移的全局知识库（大小写不敏感子串）：返回 '
+        '按关键词全文检索全局知识库（大小写不敏感子串）：返回 '
         '{path（即 kb_open 的 module 参数）, source, matches, snippet}。'
         '多关键词空格分隔为 AND 语义，零结果自动放宽（英文 OR；中文按词元稀有度加权覆盖）。'
         '**直接问中文自然语言即可**（如「如何测试文件上传漏洞」「jwt 算法混淆怎么打」），'
@@ -2303,7 +2315,7 @@ tool(
     'route_lookup',
     group='知识',
     flags=("plan_pre", "spill_skip", "knowledge"),
-    description='[legacy] 按关键词查询旧测试点路由索引。返回测试点 → packs/kb 模块路径；仅用于兼容未迁移资料，当前 Skill 优先使用 skill_open 打开自身目录。',
+    description='按关键词查询测试点路由索引。返回测试点 → packs/kb 模块路径；技能自身目录用 skill_open 打开，二者互补。',
     input_schema={
         'type': 'object',
         'properties': {
@@ -2462,6 +2474,8 @@ tool(
         '**未发现/测过没事也是结论**：必须用它收尾而非让意图悬挂——资产的 tested_clean 就靠 dead_end 背书。'
         '**CTF 轨例外**：dead_end 只要求 `dead_reason`（写清卡点即可），不必凑 evidence_refs——'
         'CTF 的终态判据是 flag 台账，没有 tested_clean 这个消费者。'
+        'CTF 轨的 vuln/finding **不校验 category 匹配**（flag 不是漏洞；题目级并入可能让留痕'
+        'id 实际是 category=vuln，解出时统一用 outcome="finding" 传该 id 即可）。'
         '证据不足保持 open（宁严勿松）；有新证据先 reopen_intent。'
     ),
     input_schema={

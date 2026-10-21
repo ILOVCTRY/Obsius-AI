@@ -16,13 +16,13 @@ mode: self-contained
 
 | 阶段 | kb_open 模块 |
 |---|---|
-| 提权打法总纲 | `web/后渗透/intranet-postexp/12-privesc.md` |
-| 免杀与规避（提权动作被拦时） | `web/后渗透/intranet-postexp/13-evasion.md` |
-| 权限维持（提权成功后） | `web/后渗透/intranet-postexp/17-persistence.md` |
-| 域内提权（普通域用户 → 域管面） | `web/后渗透/intranet-postexp/14-domain.md`、`web/后渗透/intranet-postexp/19-adcs.md` |
+| 提权打法总纲 | `web/后渗透/intranet-postexp/12-内网、后渗透 — 权限提升 payload 库.md` |
+| 免杀与规避（提权动作被拦时） | `web/后渗透/intranet-postexp/13-内网、后渗透 — 免杀与规避 payload 库.md` |
+| 权限维持（提权成功后） | `web/后渗透/intranet-postexp/17-内网、后渗透 — 权限维持 payload 库.md` |
+| 域内提权（普通域用户 → 域管面） | `web/后渗透/intranet-postexp/14-内网、后渗透 — 域渗透攻击 payload 库.md`、`web/后渗透/intranet-postexp/19-内网、后渗透 — ADCS 攻击 payload 库.md` |
 
 ## 纪律
 
-- 先枚举后利用：`web/后渗透/intranet-postexp/12-privesc.md` 的清单跑完再挑路径，别拿到第一个 misconfig 就梭。
-- CTF 向 Linux 提权杂项（SUID/能力位等速查）在 misc 包 `misc/系统杂项/linux-privesc.md`。
+- 先枚举后利用：`web/后渗透/intranet-postexp/12-内网、后渗透 — 权限提升 payload 库.md` 的清单跑完再挑路径，别拿到第一个 misconfig 就梭。
+- CTF 向 Linux 提权杂项（SUID/能力位等速查）在 misc 包 `misc/系统杂项/Linux 提权与服务滥用.md`。
 - 每条提权路径记证据（版本/配置/命令输出），failed 也写原因。

@@ -17,6 +17,7 @@ import type {
   Expert, ExpertBody, GatewayConfig, CapabilityInventory, OrchPersona, OwnerRule, PackRole, PhaseGoal, PhaseInfo, ProjectDetail, ProjectMeta, RatingRule,
   AgentToolsResponse,
   Proposal, ProposalOrigin, RoleInfo, RouteHit,
+  KbIterationRules,
   RoutePreviewBody, Session, SkillCreateBody, SkillDef, TrackProfile,
   SkillDetail, SkillVocab, SkillCatalog, SkillFileEntry, SessionGraph, AttackPath, IntentInfo,
   IntentGraph,
@@ -27,6 +28,7 @@ import type {
   ChatAgent, ChatThread, ChatThreadDetail, ChatMcpServer, ContextUsage,
   DiagFailures, DiagSessions, DiagSystemPrompt,
   DiagLlmDump, DiagRequestMeta, DiagRequestDetail, DiagRedlineTest,
+  DiagSkillUsage,
   Team, TeamMemberInput, TeamPreflight, TeamRun,
   SkillResource, ArtexPlanResult, ArtexTaskGraph, ArtexIntent, ArtexEngineStatus, ArtexActivityResponse,
   SamplePackage, SampleTargetAnalysis, SampleTargetAnalyzeResponse, SampleTargetRegisterResponse, SamplePackageUploadSession, SamplePackagePreview,
@@ -890,6 +892,9 @@ export const api = {
   proposals: (status?: "pending" | "approved" | "rejected") =>
     http<Proposal[]>(`/api/proposals${status ? `?status=${status}` : ""}`),
   proposal: (id: string) => http<Proposal>(`/api/proposals/${id}`),
+  /** 知识库迭代触发规则（与后端判定同源；pid 给出时附带该项目开关状态） */
+  proposalRules: (pid?: string | null) =>
+    http<KbIterationRules>(`/api/proposals/rules${pid ? `?pid=${encodeURIComponent(pid)}` : ""}`),
   applyProposal: (id: string, decidedBy: "human" | "demo-script(auto)" = "human") =>
     http<{ id: string; result: unknown }>(`/api/proposals/${id}/apply`, {
       method: "POST", body: JSON.stringify({ decided_by: decidedBy }),
@@ -1258,6 +1263,9 @@ export const api = {
     return http<DiagFailures>(
       `/api/projects/${pid}/diagnostics/failures${s ? `?${s}` : ""}`)
   },
+  // 技能/知识库使用统计（skill-usage，2026-10-21）：注入 vs 真打开、kb 零命中率。
+  diagSkills: (pid: string, limit = 200) =>
+    http<DiagSkillUsage>(`/api/projects/${pid}/diagnostics/skills?limit=${limit}`),
   // 会话系统提示词快照（v39）：该会话最近一次实际下发的完整 system 正文。
   // 无快照 → 后端 404（前端按「尚无快照」提示，不视为错误）。
   diagSystemPrompt: (pid: string, sessionId: string) =>

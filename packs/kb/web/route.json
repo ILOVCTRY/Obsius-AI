@@ -1,30 +1,33 @@
 {
   "sql注入|sqli|sql_injection": [
-    "web/漏洞分类/注入类/sql-injection.md",
-    "web/漏洞分类/SQL注入/注入类漏洞（SQL注入-命令注入-SSTI）.md"
+    "web/漏洞分类/注入类/SQL 注入全手法（按「什么被挡住」索引）.md",
+    "web/漏洞分类/SQL注入/注入类漏洞测试手册（SQL注入、命令注入、SSTI）.md"
   ],
   "认证|登录|越权|未授权|auth|jwt": [
     "web/漏洞分类/认证与会话/",
-    "web/漏洞分类/认证绕过/认证绕过（登录-会话-密码重置-2FA）.md"
+    "web/漏洞分类/认证绕过/authbypass-authentication-flaws.md",
+    "web/漏洞分类/越权/越权漏洞（IDOR、权限绕过）测试手册.md"
   ],
   "反序列化|deser|deserialization": [
-    "web/漏洞分类/注入类/server-side-deser.md",
-    "web/漏洞分类/反序列化/反序列化测试.md"
+    "web/漏洞分类/反序列化/反序列化测试（deserialization）.md",
+    "web/漏洞分类/注入类/反序列化与竞争条件.md"
   ],
   "命令执行|rce|代码执行|exec": [
-    "web/漏洞分类/注入类/server-side-exec.md"
+    "web/漏洞分类/注入类/代码执行与命令执行.md",
+    "web/实战打法/rce/11-RCE — 命令注入、通用代码执行 payload 库.md"
   ],
   "ssti|模板注入|服务端高级": [
-    "web/漏洞分类/注入类/server-side-advanced.md"
+    "web/漏洞分类/注入类/服务端高级技巧.md",
+    "web/实战打法/rce/14-RCE — SSTI 模板注入 payload 库.md"
   ],
   "服务端漏洞|web漏洞|server-side": [
-    "web/漏洞分类/注入类/"
+    "web/漏洞分类/注入类/",
+    "web/漏洞分类/注入类/服务端注入总入口.md"
   ],
   "前端|xss|原型链|prototype|客户端": [
-    "web/漏洞分类/client-side.md",
-    "web/漏洞分类/client-side-advanced.md",
-    "web/漏洞分类/node-and-prototype.md",
-    "web/漏洞分类/XSS/XSS测试.md"
+    "web/漏洞分类/XSS/XSS 测试手册.md",
+    "web/漏洞分类/客户端攻击.md",
+    "web/漏洞分类/高级客户端攻击.md"
   ],
   "信息收集|子域|指纹|侦察|recon": [
     "web/信息收集/"
@@ -34,22 +37,23 @@
     "web/实践笔记/"
   ],
   "边界入口|webvpn|统一认证|sso": [
-    "web/漏洞分类/认证绕过/认证绕过（登录-会话-密码重置-2FA）.md",
-    "web/漏洞分类/JWT/OAuth-JWT-SAML 安全.md"
+    "web/漏洞分类/认证与会话/联邦认证与身份基础设施攻击.md",
+    "web/漏洞分类/JWT/OAuth、JWT、SAML 认证安全测试.md"
   ],
   "api|接口|脚本|requests": [
-    "web/实践笔记/python-requests.md",
+    "web/实践笔记/Python 请求工具集（requests、httpx 并发爆破）.md",
     "web/实战打法/api-rest/"
   ],
   "cve|历史漏洞": [
-    "web/漏洞分类/cves.md"
+    "web/漏洞分类/"
   ],
   "web3|区块链|合约": [
-    "web/漏洞分类/web3.md"
+    "web/漏洞分类/"
   ],
   "payload|字典|fuzz": [
     "web/载荷与字典/payloader/",
-    "web/载荷与字典/dictionaries/"
+    "web/载荷与字典/dictionaries/",
+    "web/载荷与字典/Payload 速查表.md"
   ],
   "内网|横向|后渗透": [
     "web/后渗透/intranet-postexp/",

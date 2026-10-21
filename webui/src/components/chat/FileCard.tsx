@@ -16,14 +16,27 @@ import { cn } from "@/lib/utils"
 // target.relPath 原样交给它（scope 白名单=项目工作区 ∪ packs ∪ tools，越界 422）。
 // pid 缺失（如审计抽屉未绑项目）时下拉降级为只读，仅展示不报错。
 
-const ICONS: Record<FileIconKind, typeof FileIcon> = {
+/** 档位 → lucide 图标（与 FileCard 共用；附件胶囊也按文件类型取图标，不再一律 paperclip） */
+export const FILE_ICONS: Record<FileIconKind, typeof FileIcon> = {
   md: FileText, code: FileCode, json: Braces, doc: FileText,
   image: FileImage, binary: Binary, file: FileIcon,
 }
-const TONES: Record<FileIconKind, string> = {
-  md: "text-sky-400", code: "text-emerald-400", json: "text-amber-400",
-  doc: "text-muted-foreground", image: "text-fuchsia-400",
+/** 档位 → 图标色（语义色，不写死十六进制；玻璃模式下随 token 走）。
+ *  取 500 档而非 400：本应用五套配色里 `light`/`rose-light` 是亮底，
+ *  400 档在亮底上对比不足（附件胶囊实测发灰）。500 档在暗底仍清楚。 */
+export const FILE_TONES: Record<FileIconKind, string> = {
+  md: "text-sky-500", code: "text-emerald-500", json: "text-amber-500",
+  doc: "text-muted-foreground", image: "text-fuchsia-500",
   binary: "text-(--status-error)", file: "text-muted-foreground",
+}
+
+/** 档位 → 图标底座色（同类型色的低透明版，做「色彩身份」）。
+ *  单独一支的原因：`bg-accent` 在各配色里都与背景同色系，亮底上图标块会整块消失；
+ *  而默认色（muted-foreground）的档位用 accent 反而更中性，故走 fallback。 */
+export const FILE_TONE_BG: Record<FileIconKind, string> = {
+  md: "bg-sky-500/12", code: "bg-emerald-500/12", json: "bg-amber-500/14",
+  doc: "bg-foreground/7", image: "bg-fuchsia-500/12",
+  binary: "bg-(--status-error)/12", file: "bg-foreground/7",
 }
 
 type Action = "open" | "reveal" | "resolve" | "content"
@@ -31,7 +44,7 @@ type Action = "open" | "reveal" | "resolve" | "content"
 export function FileCard({ target, pid }: { target: FileTarget; pid?: string }) {
   const [busy, setBusy] = useState(false)
   const [note, setNote] = useState<string | null>(null)
-  const Icon = ICONS[target.icon] ?? FileIcon
+  const Icon = FILE_ICONS[target.icon] ?? FileIcon
 
   const run = async (action: Action) => {
     if (!pid || busy) return
@@ -57,7 +70,7 @@ export function FileCard({ target, pid }: { target: FileTarget; pid?: string }) 
 
   return (
     <div className="flex items-center gap-2.5 rounded-xl border border-border/60 bg-card/60 px-3 py-2">
-      <span className={cn("grid size-8 shrink-0 place-items-center rounded-lg bg-accent/40", TONES[target.icon])}>
+      <span className={cn("grid size-8 shrink-0 place-items-center rounded-lg bg-accent/40", FILE_TONES[target.icon])}>
         <Icon className="size-4" />
       </span>
       <div className="min-w-0 flex-1">

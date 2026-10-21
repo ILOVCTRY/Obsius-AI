@@ -174,7 +174,9 @@ STRICT_PROMPT_TAIL = """
 8. 工具调用策略：无依赖的调用在同一轮**并行发出**（如同时查多个资产或多个函数）；
    专用工具优先于 run_cmd 拼命令（查黑板走 bb_query，读取当前方法走 skill_open）；
    Skill 正文和同目录 references/scripts/examples/assets 是本任务的首选方法来源，按需读取，
-   不要凭记忆复述文件。旧 kb_search/kb_open/route_lookup 只用于兼容尚未迁移的历史资料。
+   不要凭记忆复述文件。**需要具体命令、判据、payload 时用 kb_search 检索知识库 →
+   kb_open 读正文**（技能给打法纪律，知识库给细粒度细节，二者互补）；
+   已知测试点名称时 route_lookup 可直接定位对应模块。
 9. 执行环境速查：cwd 已由服务端固定到本项目 scratch（host/wsl/docker 均是，docker
    容器内对应 /workspace/scratch）——命令一律 **用相对路径，禁止手动 cd**（尤其不要拼
    cd /mnt/...）。runtime 语义：docker=Linux 渗透工具箱（bash + nmap/sqlmap/dirsearch/
@@ -232,7 +234,9 @@ STRICT_PROMPT_INTENT_CTF = """
     **每个意图必须 close_intent 收尾，按实际结果三选一**：
     ① 解出了 → `close_intent(outcome="finding", finding_ids=[flag 留痕发现])`
        （`ctf_submit_flag` 的正式 flag 会落一条 flag-capture 留痕；候选线索回执里
-       也给了 finding id）；
+       也给了 finding id）。**CTF 轨不校验 vuln/intel 类别**：题目级并入可能让留痕
+       id 实际指向 category=vuln 的条目（intel 不压 vuln），照样传这个 id 即可，
+       **不要**为了让类别对上而改成 outcome="vuln"——flag 不是漏洞；
     ② 这条路不通但题还能解 → `close_intent(outcome="dead_end", dead_reason=…)`
        ——**只写清卡点即可，不必凑 http:/event: 证据引用**（那套引用是给渗透轨的
        tested_clean 做背书的，CTF 轨没有这个消费者，而 run_cmd 回执不含 event id）；

@@ -8,7 +8,7 @@ summary: 走私的唯一判据是「两个 HTTP 组件对同一字节流的分�
 
 # HTTP 请求走私测试
 
-缓存层相关的投毒见 [[web/漏洞分类/client-side.md|client-side.md]] §3；CRLF 注入见 [CRLF 注入测试](../CRLF注入/CRLF 注入测试.md)；H2 解析差异见 [HTTP2攻击](../HTTP2攻击/)。
+缓存层相关的投毒见 [[web/漏洞分类/客户端攻击.md|client-side.md]] §3；CRLF 注入见 [[web/漏洞分类/CRLF注入/crlf-injection-test（几乎不交）.md|CRLF 注入测试]]；H2 解析差异见 [HTTP2攻击](../HTTP2攻击/)。
 
 ## 0. 判据速查
 

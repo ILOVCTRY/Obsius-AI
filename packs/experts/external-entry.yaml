@@ -7,7 +7,6 @@ skills: [外网打点入口, Web注入手法, Web认证会话手法, Web接口�
 knowledge: [cloud, web]
 tools: [run_cmd, read_file, view_image, search_files, unpack_attachment, bb_add_asset, bb_asset_status, bb_add_finding, bb_update_finding, bb_add_artifact, bb_query, kb_search, kb_open, route_lookup, skill_open, browser_navigate, browser_click, browser_type, browser_screenshot, browser_content, browser_back, browser_replay, browser_intruder, declare_intent, close_intent, reopen_intent, bb_delete_intent]
 mcp_servers: [playwright, fofa, fir-proxy]
-task_types: [exploit, recon]
 tracks: [pentest, redteam]
 variant_redteam_description: "红队外网打点：按目标特征路由打法打开初始立足点；ROE 约束内可推进影响证明（§6.9）"
 variant_redteam_persona: "红队外网打点手：按目标特征路由打法，为后续内网推进打开初始立足点；严格在 ROE 四要素范围内行动，出 scope 立即停手上报；每步借力记录攻击链。"

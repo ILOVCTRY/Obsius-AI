@@ -39,6 +39,10 @@ _SECTION_CAP = 60
 _SUMMARY_CHARS = 90
 # 匹配提示行条数上限（宁少勿滥，误报只给路径成本极低）
 DEFAULT_HINT_CAP = 4
+# 同义词扩展段的权重系数（2026-10-21）：扩展段来自「命一词扩全组」，组成员
+# 数量远多于原查询段，同权会让泛词组压过查询里的真正技术词。见
+# match_kb_index_detailed 的 docstring（黄金集实测 0.70 → 0.78）。
+_EXTRA_SEG_WEIGHT = 0.5
 
 # 停用 2-gram：任务描述高频泛词，命中了也不代表 kb 相关
 _STOP_GRAMS = {
@@ -215,6 +219,34 @@ def _query_segments(text: str) -> list[str]:
     return segs
 
 
+def _seg_hits(seg: str, haystack: str, is_ascii: bool) -> bool:
+    """段是否命中 haystack。ASCII 段要求**词边界**（`ida` 不命中 `frida`），
+    中文 2-gram 走裸子串（中文无词边界，且索引侧 tokens 是标题/段名拼接，
+    强行加边界会漏掉「SQL注入」这类无空格连写）。
+
+    词边界按「前后不是 [a-z0-9_]」判定：tokens 是空格分隔的标题与段名拼接，
+    所以 `ida` 命中 ` ida 基础`、不命中 ` frida 基础`。
+
+    性能：先用 C 层 `in` 做快速拒绝（绝大多数段在绝大多数文档里根本不出现），
+    命中后才走 Python 循环查边界——直接上 find 循环会让 web 域 321 篇的
+    匹配从 ~15ms 涨到 ~68ms。"""
+    if not is_ascii:
+        return seg in haystack
+    if seg not in haystack:
+        return False
+    start = 0
+    while True:
+        i = haystack.find(seg, start)
+        if i < 0:
+            return False
+        before = haystack[i - 1] if i > 0 else ""
+        after = haystack[i + len(seg)] if i + len(seg) < len(haystack) else ""
+        if not (before.isascii() and (before.isalnum() or before == "_")) and \
+           not (after.isascii() and (after.isalnum() or after == "_")):
+            return True
+        start = i + 1
+
+
 def match_kb_index_detailed(index: list[KbEntry], text: str,
                             cap: int = DEFAULT_HINT_CAP,
                             extra_segments: list[str] | None = None,
@@ -225,9 +257,24 @@ def match_kb_index_detailed(index: list[KbEntry], text: str,
     （取第一个命中的，多段命中时靠前的信息密度更高）——hints 行借此把
     「去看这篇」升级为「去看这篇的哪一节」。无段落命中则记空串。
     extra_segments（M2 查询扩展）：同义词命中组展开的追加切段，与原始段
-    一同参与评分（score 按命中段计，扩展段与原始段同权）。"""
-    segs = _query_segments(text) + list(extra_segments or [])
-    if not segs:
+    一同参与评分，但**权重减半**（`_EXTRA_SEG_WEIGHT`，2026-10-21）。
+
+    为什么扩展段不能与原查询段同权：命一个词就展开整组（`越权` → idor /
+    access-control / 权限绕过 / 鉴权 …），组内成员切出的 2-gram 有十几个，
+    累加起来轻易压过查询里真正的技术词。实测（黄金集 30 条）：问
+    「graphql 接口未鉴权」时 `graphql` 只值 2 分，而扩展组把
+    `越权漏洞（IDOR…）测试手册` 顶到 12 分、GraphQL 手册跌出 top-4；
+    问「流量包找攻击痕迹」时 `镜像/数据恢复` 扩展段把磁盘取证顶掉网络取证。
+    减半后 recall@4 0.70 → 0.78，且未损失任何原查询命中（原查询段权重不变）。"""
+    # 同段去重必须按 seg 合并、取较大权重——若用 set(segs) 对 (seg, w) 元组去重，
+    # 同一段同时出现在原查询与扩展组时（如 `ida` 既是技术词又是逆向组员）
+    # 会被算两次，等于给该段凭空加分。
+    weights: dict[str, float] = {}
+    for s, w in ([(s, 1.0) for s in _query_segments(text)]
+                 + [(s, _EXTRA_SEG_WEIGHT) for s in (extra_segments or [])]):
+        if weights.get(s, 0.0) < w:
+            weights[s] = w
+    if not weights:
         return []
     scored: list[tuple[float, str, KbEntry, str]] = []
     for e in index:
@@ -235,20 +282,25 @@ def match_kb_index_detailed(index: list[KbEntry], text: str,
         section = ""
         token_l = e.tokens
         title_l = e.title.lower()
-        for seg in set(segs):
-            if seg not in token_l:
+        for seg, seg_w in weights.items():
+            is_ascii = bool(_ASCII_WORD_RE.match(seg))
+            # ASCII 技术词按**词边界**匹配，不能当裸子串：`ida` 是 `frida` 的
+            # 子串，裸子串匹配会让问「ida 反编译」时两个 Frida 文档凭空各得
+            # 4 分（×2 词权 ×2 title），把「高级工具与去混淆」挤出 top-4
+            # （黄金集 2026-10-21 实测）。中文 2-gram 无词边界概念，仍走子串。
+            if not _seg_hits(seg, token_l, is_ascii):
                 continue
             # ASCII 整词=高特异性技术词（sql/jwt/ssti…），权值 ×2；中文 2-gram
             # 天然歧义（注入/服务/系统）权值 ×1——抑制「XX 注入测试」类同质
             # 标题靠泛词平局抢位（K7 实测：SQL 注入查询曾被 crlf/csv 手册
             # 字母序压过 sqli/手册.md）。
-            w = 2.0 if _ASCII_WORD_RE.match(seg) else 1.0
+            w = (2.0 if is_ascii else 1.0) * seg_w
             score += w
-            if seg in title_l:
+            if _seg_hits(seg, title_l, is_ascii):
                 score += w
             if not section:
                 for h in e.sections:
-                    if seg in h.lower():
+                    if _seg_hits(seg, h.lower(), is_ascii):
                         section = h
                         break
         if score > 0:

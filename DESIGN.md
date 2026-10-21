@@ -289,7 +289,21 @@ worker 说「SSTI 打通了，`id` 返回 `uid=0`」——这可能是真的，�
 
 **`verdict='rejected'` 是真闸**：立刻从 solved 派生里扣除（状态自动生效，无需改任何存储），且同串再提交被 `ctf_submit_flag` 的 `is_rejected` 直接拦（连理由一起回执）——否则模型会反复提交同一串，每次白跑一遍 flagjudge + 落一条 finding。
 
-**人工确认即停（challenge-confirm-stops，2026-10-20）**：`PATCH …/flags/{fid}` 落 `accepted` 后，**置位该项目下所有在跑线程的中止事件**（fire-and-forget，不等待）——人点确认就是强证据，题目已解出，还在跑的 Worker 全是重复劳动（用户实测：确认之后调度层照样把剩下的方向派完，白烧十几分钟）。`rejected` **不**中止（题目还没解出，该继续跑）。置位整个项目而非逐线程回溯：Worker 线程的 `challenge_asset_id` 可能为空（靠祖先链解析），逐线程判容易漏，而多停几轮的成本远低于漏停。
+**人工确认 = 通知收工，不是掐断（challenge-confirm-notice，2026-10-20）**：`PATCH …/flags/{fid}` 落 `accepted` 后，向**该项目下所有在跑轮次投递一条通知**（`core/chat/inbox.py::NoticeInbox`，fire-and-forget，不等待）——人点确认就是强证据，题目已解出，还在跑的 Worker 全是重复劳动（用户实测：确认之后调度层照样把剩下的方向派完，白烧十几分钟）。`rejected` **不**投递（题目还没解出，该继续跑）。
+
+**为什么不是置位中止事件**（原 `challenge-confirm-stops` 已推翻）：`abort_event` 会让轮次被掐在半个工具调用里，`_persist_stopped` 只落一句「已按人类要求停止」——模型**没有任何机会写回**手上已识别的结论（解题路径、未登记的证据），这些观察随轮次一起蒸发，用户看到的是「一堆线程突然红了」而不是「主控说这题解出了，我收工」。改为投递后**语义从「外部强制终止」变成「外部告知事实」**：模型在下一个步边界读到「这题已拿到正确 flag，尽快收尾」，自己决定停派方向、写回结论、给一句总结。终止权仍归模型，因为它比外部更清楚自己此刻在哪个方向、拿到了什么。
+
+**投递范围必须按 pid 限定**：`chat_threads` 属于各项目自己的黑板库，通知正文讲的是「哪道题解出了」，投给别的项目的轮次就是错消息（曾误写成遍历 `app.state.projects` 全量）。`ChatTurn` 只在**步边界**取通知（`_take_notices` → `_inject_nudge`），不在流式帧里取——中途改 messages 会让当前这次请求的半截响应失去对应上下文；且必须走 `_inject_nudge` 而非裸 append（步边界尾部通常是 user，再 append 一条就是连续两条 user，Anthropic 严格角色交替会 400）。
+
+**投递面必须覆盖子 agent（challenge-confirm-notice 修正，2026-10-20 晚）**：用户实测「点了确认有效，其它子 agent 还在跑」（截图里确认已落账，子线程仍在 `curl -sL -o libc-2.23.so`）。两处叠加的根因：
+- **存活判据错**：旧实现用 `app.state.chat_running` 过滤，而那个集合**只登记顶层轮次**（`_chat_launch_turn`）——`call_expert` spawn 的子专家、ARTEX Worker 都不经过它，DB 里 `status=running` 却被 `if tid in running` 全部静默丢弃。现改查 `core/chat/inbox.py` 的**进程级登记表**：`ChatTurn` 构造即 `box_for(tid)`、`run()` 的 `finally` 释放，所以「有箱」精确等于「这一轮正持有它」。
+- **箱子根本没传下去**：`ChatTurn` 有三个构造点，此前只有 `_chat_launch_turn` 传 `notice_inbox`，另两处（`runtime._tool_call_expert`、`artex_worker.make_worker`）的 `_take_notices()` 恒返回空——**子 agent 从来收不到任何通知**。现改为构造时默认自取（显式传 `None` 仍可关掉），三处自动接上；登记表必须放模块级，因为后两个构造点在 `core/chat/` 里跑、**拿不到 `app.state`**。
+
+**范围按 (pid, 题目) 双重限定**：只按 pid 限不够——一个 CTF 项目常并行多题，A 题确认后投给 B 题的 worker 会让它停掉自己在做的**另一道题**（跨项目误投的同一种失败，粒度更细）。归属走 `chat_store.resolve_challenge_asset_id`（子线程沿 `parent_thread_id` 继承，与调度层同口径）；解析不出归属的通用会话仍收（它可能在帮这题做事却没显式绑定）。
+
+**通知文案必须按角色分叉**：主控口径是「停止派新方向（不要再 ctf_dispatch / call_expert）」，而这条通知现在也投给子专家与 Worker——它们手上没有这两个工具。让 worker 去「停止 ctf_dispatch」等于给一条无法执行也无法自检的指令，模型只能猜，常见结果是继续把手上那步跑完（用户看到的「还在跑」）。worker 版讲的是「正在跑的方向不必做完、不要再启动新探测、把中间结论写回、一句话收尾」。
+
+**已解出必须是硬闸，不能只靠通知**（同日）：通知是给模型读的**软**约束，而「派不派方向」本来就在代码判据手里。实测人工确认后主控照样派完剩下方向，白烧十几分钟。故 `_solved_challenge_block()` 在**两个入口**都拦：`ctf_dispatch`（管「提方向」）与 `call_expert`（管「真派出去」，含绕过 dispatch 的直调）。判据取台账派生值 `challenge_state(...).solved`，不看本会话记过什么——人工确认可能发生在任意时刻甚至上一轮。这道闸在 `call_expert` 里**必须排在专家名校验之前**：结论是「这题已无活可干」，与派的是哪个专家无关；排后面时一个拼错的专家名会先被「未知专家」拒掉，模型据此以为换个名字就能派。
 
 **`ctf_submit_flag` 语义变更**：正式 flag ① 进台账（`record_flag`，AI 落 `pending`）② 同时落一条 `intel/unverified` 的**过程留痕** finding（不受五项必填契约约束，因为它是留痕不是结论）③ `set_finding_id` 双向关联。`candidate=true` 的候选线索**不进台账**（线索不是答案），只落 intel finding。回执必须写明「已确认 N/M（候选 K 条待人工确认）」+「仅形态判定通过，未做变换回环」（`transform` 为空时证据强度确实弱一档，不说明模型会当它已验完）。
 
@@ -297,6 +311,15 @@ worker 说「SSTI 打通了，`id` 返回 `uid=0`」——这可能是真的，�
 
 **前端体现（2026-10-19 接入，2026-10-20 按方案 A 修正）**：① 题目行 **🚩 台账 N** 按钮 → `ChallengeFlagLedger` 弹层（逐条裁决 / 手工录入 / 放弃这道题）；② 题目行**派生状态徽章**（`ChallengeStateBadge`：已解出/部分解出/求解中/已放弃，多 flag 题显示 `2/3`，**候选另显 `+K待确认`**，`concluded` 另显「已收尾·待确认」，`conflict` 另显红字「格式冲突 N 条」）；③ 题目行 🚩 徽章的取值**改为台账优先**——`flagByChallenge` 先取**已确认**（accepted）的 flag，没有再退回候选（pending），findings 反查降级为兜底（仅 `verified && category=vuln`）。③ 是必须的：台账重构后正式 flag 的留痕 finding 是 `unverified/intel`，若只认 verified 反查，🚩 会**永远不显示**。
 ④ 台账弹层顶部徽章把「已确认 N/M」「候选 K」「否决 J」「已收尾·待确认」分列，并在「只有候选未确认」时显一条黄色提示（**候选不算解出，调度层仍在派 Worker**）、在 `conflict` 非空时显红字提示（标出冲突的前缀，要求标记掉错的那条）。
+
+**候选 flag 唤醒主控（ctf-flag-wake，2026-10-20）**：候选 flag 落库即**唤醒 CTF 解题主控说一段话**，对话页贴一张「复制 / 确认有效 / 标记为错误」卡。起因是一个真实的空窗：后台并发派发（`executor.shutdown(wait=False)`）让主控先返、worker 后到成为常态，而 `_probe_overflow` 只在本轮步边界 drain，`ChatTurn` 实例一丢就永远补不回来——候选 flag 躺在台账里没人管，用户看不到、主控也不说话。
+- **挂载点是事件总线**：订阅 `challenge.flag.recorded`（`verdict=pending` + `judged_by=ai`），不改 `ctf_submit_flag`。`ToolDispatcher` 拿不到也不该拿 `app.state.jobs`/线程表；而 `record_flag` 本来就发这个事件（最短路径、对提交方完全无感）。
+- **订阅必须在 `_project()` 里每次幂等补挂**：API 建项目走另一条路径直接塞 `app.state.projects`，只在「首次打开」分支挂会永远挂不上——症状是「手工调唤醒函数有效、真实提交毫无反应」（实测踩过）。
+- 四条边界：① 主控 `status=running` **不唤醒**（worker 是同步 spawn，本轮主控自己就会看到；硬塞第二轮撞 409）；② 同一 `flag_id` 只唤醒一次（事件记账 `chat.ctf_flag_wake`，重启后仍有效；幂等更新走 `challenge.flag.updated`，不在白名单）；③ 人工 accepted **不走这里**——那是 `_notify_project_chat_turns` 的地盘，语义是「告诉在跑的那一轮：题解出了，收工」而不是「开一轮新对话解释候选」；④ `judged_by != "ai"` 不唤醒（人工录入不需要 AI 再解释）。
+- **唤醒文案必须有反例分支**：三句——flag 怎么来的（解题路径原文）、能不能自证（有 transform = 可回环复算；没有 = **只是形态像**）、请人类点哪个按钮；外加两条硬约束「本轮不调任何工具/不派方向」「候选不计解出，别说已解出」。这是本轮反复踩的同一类坑：给模型看的判断类文案必须由**本次数据事实**触发，无条件拼接的固定说法会与事实相反。
+- **找主控线程不猜**：`find_controller_thread()` 优先**未挂父线程的顶层会话**，退一步接受任意绑定该题的 ctf-controller 线程；都不匹配返回 None，**绝不按线程标题猜**（`_challenge_fallback_asset()` 式补建会把唤醒打到错题上）。
+- **人类发消息与系统唤醒共用 `_chat_launch_turn()`**（`chat_send` 退化成薄壳）：两处各写一份装配代码迟早分叉，漏传 `artifacts_dir`/`browser_pool` 就是子专家工具全灭（同规则链透传缺口）。
+- 前端 `components/chat/CandidateFlagCard.tsx` + `lib/useCandidateFlags.ts`：3s 轮询台账、`wakeKey` 变化即重拉。**卡片数据取台账不取事件载荷**——事件里 flag 被截到 120 字符（`record_flag` 有意为之防事件表膨胀），拿它做「复制」会复制出半截串，比没有更糟。「标记为错误」强制填理由：理由写进台账后同串再提交会被 `is_rejected` 拦下，不填等于让模型反复提交同一串。回归 `tests/test_ctf_flag_wake.py`（9 例）。
 
 ### 核对通道与首轮分诊（ctf-controller-hardening，2026-10-20）
 
@@ -359,6 +382,36 @@ worker 说「SSTI 打通了，`id` 返回 `uid=0`」——这可能是真的，�
    - **唯一例外**：`correct > 0` 的多 flag 题（已拿到部分 flag）不因单方向证伪而 drop——那说明整题还有戏，交给 ⑩ `partial_multiflag` 判。
 
 `_REFUTED_RX` 覆盖：`证伪|已排除|排除掉|不成立|(未|没有|无)命中|(未|没有|无)发现|not found|no hit/finding/result/evidence|dead_end|此路不通|走不通|确认不存在|不存在该`。
+
+## 报告契约与收尾类别必须按轨分叉（report-contract-by-track，2026-10-21 实施）
+
+**问题**：CTF 轨一道 pwn 题（栈溢出 + 可执行栈 + 栈地址泄漏）解出来后连撞两道**必错**的门禁，模型两轮都拿不到结论落库：
+
+| 报错 | 位置 | 性质 |
+|---|---|---|
+| `正式漏洞缺少必填项：测试环境、操作步骤、验证结果、风险影响评估、POC` | `store.validate_formal_vuln` | 模型明明交了 4 条完整 `repro_steps`（每条 code+expected） |
+| `收尾类别不符: … category=vuln（finding 收尾要求 intel）` | `intents.close_intent` | **必然失败**，与模型行为无关 |
+
+**根因一：同一批 verified 门禁，一半按轨放行、一半不按轨。** `_check_vuln_gates` 第一行就是 `if track not in ("pentest", "redteam"): return`，而 `validate_formal_vuln` **根本没有 track 参数**。DESIGN 里 challenge-flag-ledger 的立项理由（「正式漏洞契约是为渗透结论设计的，CTF flag 不是漏洞」）在文档里成立、在代码里只落实了一半。现在 `validate_formal_vuln` 加 `track` 参数：渗透/红队轨套十项契约，其余轨**降级为「有复现证据即可」**——降的是报告字段，不是红线（`has_repro_evidence` 仍强制，CTF 也不能无证据下结论）。
+
+**`track=None` 刻意仍走严格契约**：人工 API 未指定轨、旧代码路径按「渗透结论」对待，宁严勿松。只有明确是 CTF/研究轨才降级——`test_formal_vuln_contract_defaults_to_strict` 钉死这一点。
+
+**根因一附带的双重口径**：契约判 `"POC": pocs`（只认顶层 `pocs`），而 `has_repro_evidence` 认 `evidence.repro_steps` 里的 code+expected——**两个函数对「有没有证据」给出相反答案**。复现步骤本身就是可执行 POC，不该被判成没交。现改为 `pocs or has_repro_evidence(evidence)`，两处同源。
+
+**根因二：引导文案与 CTF 题目级并入直接打架。** 这条是**结构性**的，不是概率：
+
+1. 模型先 `bb_add_finding` 登记栈溢出（默认 `category=vuln`）；
+2. `ctf_submit_flag` 落 flag 留痕（`category=intel`）；
+3. 题目级并入（`add_finding` 的 challenge-dedup「一题一条」）把留痕并进 vuln 条目、**且不降级**（intel 不压解题结论）→ 留痕 id 实际指向 `category=vuln`；
+4. `close_intent(outcome="finding")` 要求 `intel` → **必拒**。
+
+而四处引导文案（`loop.py` / `tools.py` / `runtime.py` ×2）全写 `outcome="finding"`，模型照着做就撞墙；改 `outcome="vuln"` 能过但语义是错的（flag 不是漏洞，让模型宣称「确认漏洞」会污染链路图）。最坏的是**时灵时不灵**：题目下没登记过 vuln 时留痕就是 intel，同一文案能过——模型只能猜。
+
+**修法：CTF 轨 `close_intent` 整体跳过 category 匹配**。CTF 的「解出」由 flag 台账派生，`vuln`/`intel` 这个二分在 CTF 轨没有消费者（台账不看 findings 类别）。`false-positive` 拦截**全轨保留**——误报发现仍不能拿来收尾（误报支持的是 dead_end）。渗透轨不受影响：那里 vuln/finding 是真语义，且没有「一题一条强制并入」。
+
+**拒绝必须用 `[拒绝]` 前缀**：`bb_add_finding` 此前让 `ValueError` 直接穿到 `_dispatch` 兜底，变成 `[工具异常] ValueError: …`——那是「工具坏了」的语义，模型会倾向重试同一个调用，而这里要的是**改参数**。现捕获后返回 `[拒绝] … + 可执行改法`（同族 `ctf_submit_flag` 一直是这个口径）。注意 `[拒绝]` 进 `HARD_REJECT_PREFIXES`（连续 3 步硬拒 → E2 熔断挂人），所以文案必须带具体出口，否则会把模型逼进熔断。
+
+**schema 边界**：`evidence` 的 description 现在点明「验证结论/预期vs实际 属于**顶层** `verification_result`，不要塞进 evidence」——用户参数里 `verification_result` 就写在 `evidence` 对象内（模型认为「验证结果」属于「证据」很自然），而 store 只读顶层字段，塞进去既不渲染也不被门禁认可。
 
 ## CTF 轨调度与收敛（artex-ctf-track v47，2026-10-19 实施）
 
@@ -734,7 +787,7 @@ SKILL.md 薄路由入口 → kb/route.json 任务导航表（**M0 留域内** `p
 
 **M2 项目绑定（2026-09-21 实施）**：运行时唯一角色源=experts/，`packs/tracks/*/roles/`（23 yaml）退役删除（roles.py 模块保留供 `_parse_inline_value` 复用与历史脚本）。项目绑定专家：创建（`experts` 字段，池外/轨外 422 提示可用池）与换将（`PATCH /api/projects/{pid}/experts`，空清单剥键恢复存量直通态；即时生效于下轮会话构造，黑板行无此列、单一真相源 project.json）。API meta 响应层装饰补 `experts` + 推导 `directions`（`_expert_meta_view`，2026-10-13 前为 `capabilities`/caps_effective）；轨 roles 读端点数据源切 `list_experts`（PackRole 兼容形状），角色写端点退役返 410。发布/开窗 role 值域=**绑定专家清单优先**（`allowed_roles`，宁严勿松），未绑定=按轨全池；构造链把 `directions_effective` 推导面与 allowed_roles 贯穿 AgentSession→ToolDispatcher（认领即换装经 expert_exists 校验，绑窗角色失效回退 _generalist）。
 
-**M3 专家 CRUD 与组队 UI（2026-09-21 实施）**：`/api/experts` 五端点（GET 全池 / GET 单个 / POST / PUT / DELETE）——**全字段提交式覆写**（表单即最终态，None/空=不落键，skills 缺键=全量专家语义）；写前置校验 doctor 同口径前移（id 强制 ASCII slug `[a-z0-9][a-z0-9-]{0,47}`、tracks 合法轨、skills 注册表存在、task_types 越各轨注册表并集、variants 轨名+字段名 `[a-z_]+`、max_steps 正整数，非法 422）；重名 409、protected 拒删 409、缺失 404；写三件套（pack_write_lock 临界区 + _pack_history_backup + _trash_move）。variants 在 UI 只读展示，yaml 里以 `variant_<轨>_<字段>` 平铺键人工维护。前端（§12）：创建页 **caps 多选退役→专家多选**（按轨过滤分组「通用/轨专属」、搜索、persona 一行预览、默认预选 _generalist；空选=按轨全池直通）、场景档 chips 预填、知识继承折叠区；列表/顶栏徽章 bindingBadge 改「轨 · 专家×N」；直播间编排器态 👥组队弹层（轨过滤多选，保存回执带推导能力包只读徽章）；设置页「角色」tab 换「专家」ExpertsPane（全池管理 + HistoryButton）。
+**M3 专家 CRUD 与组队 UI（2026-09-21 实施）**：`/api/experts` 五端点（GET 全池 / GET 单个 / POST / PUT / DELETE）——**全字段提交式覆写**（表单即最终态，None/空=不落键，skills 缺键=全量专家语义）；写前置校验 doctor 同口径前移（id 强制 ASCII slug `[a-z0-9][a-z0-9-]{0,47}`、tracks 合法轨、skills 注册表存在、variants 轨名+字段名 `[a-z_]+`、max_steps 正整数，非法 422；**task_types 校验已随字段退役移除（2026-10-21）**）；重名 409、protected 拒删 409、缺失 404；写三件套（pack_write_lock 临界区 + _pack_history_backup + _trash_move）。variants 在 UI 只读展示，yaml 里以 `variant_<轨>_<字段>` 平铺键人工维护。前端（§12）：创建页 **caps 多选退役→专家多选**（按轨过滤分组「通用/轨专属」、搜索、persona 一行预览、默认预选 _generalist；空选=按轨全池直通）、场景档 chips 预填、知识继承折叠区；列表/顶栏徽章 bindingBadge 改「轨 · 专家×N」；直播间编排器态 👥组队弹层（轨过滤多选，保存回执带推导能力包只读徽章）；设置页「角色」tab 换「专家」ExpertsPane（全池管理 + HistoryButton）。
 
 **M4 场景档 / 知识继承 / 看板默认视图（2026-09-21 实施定稿）**：
 - **M4a 场景档 `packs/kb/<track>/profiles/<id>.yaml`**（2026-10-13 轨并入 kb）：平铺五件套 experts（组队预设）/rule_profiles_owners+rule_profiles_rating（F11 两键）/playbook/artifacts/knowledge（后三者为 D6 预留字段）+ board_view（M4c）。**D6 物化即弃**——建项选中档即一次性物化：experts→meta.experts、rule_profiles/board_view→config 立即生效、playbook/artifacts/knowledge 随 `config.profile` 快照留档（{id,name,playbook,artifacts,knowledge,materialized_at}），此后档文件只作建项预设、不随项目联动（改档不改存量项目）。档提供缺省、请求体显式值优先（experts/config 显式给出时不兜底）。每轨内置 0~3 档（当前 8 个：ctf full-squad/solo-generalist、pentest standard-engagement/recon-first、redteam full-chain/initial-access、research rev-workbench/code-audit）；`GET /api/tracks/{track}/profiles` 只读清单；doctor 增 profile-expert-missing（组队引用不存在或轨外，error）/ profile-board-view-unknown（warning）。

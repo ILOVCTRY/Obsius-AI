@@ -193,13 +193,28 @@ class ExecutionGateway:
         if net is None:
             net = DEFAULT_NET_MODE if runtime == "sandbox" else "bridge"
         if net == "real":
+            # 拒绝文案必须给可执行替代（2026-10-20）：docker 下 real 与 bridge 是
+            # **同一个 docker 网络**（见 docker_network），real 只多一道审批；
+            # 平台又没有 net_real 的申请入口（request_authorization 的 kind 只有
+            # scope_expand/impact_escalate/rating_override），所以「补审批」这条路
+            # 对 agent 实际走不通。实测 agent 撞上后直接放弃出网改本地绕路，
+            # 而它真正该做的是**去掉 net 参数**。
             if not project_id:
-                raise _audit_deny("策略拒绝：net=real 必须绑定项目上下文")
+                raise _audit_deny(
+                    "策略拒绝：net=real 必须绑定项目上下文。"
+                    "**若只是要出网：删掉 net 参数即可**——docker 下省略 net 默认就是 "
+                    "bridge（与 real 走同一个 docker 网络，实测可直连外网）。")
             if not approval_id:
-                raise _audit_deny("策略拒绝：net=real 必须提供已批准的 approval_id")
+                raise _audit_deny(
+                    "策略拒绝：net=real 必须提供已批准的 approval_id。"
+                    "**若只是要出网：删掉 net 参数即可**——docker 下省略 net 默认就是 "
+                    "bridge（与 real 走同一个 docker 网络，实测可直连外网）。"
+                    "net=none 才是断网。")
             if not self._approval_approved(approval_id, project_id=project_id):
                 raise _audit_deny(
-                    "策略拒绝：approval_id 不存在、未批准、已消费或不属于当前项目")
+                    "策略拒绝：approval_id 不存在、未批准、已消费或不属于当前项目。"
+                    "**若只是要出网：删掉 net 与 approval_id 两个参数重试**"
+                    "（docker 默认 bridge 已可出网）。")
 
         # ③' 工作区隔离（§7 2026-09-17）：host/wsl/docker 有文件系统边界问题；
         #     docker 容器化 M0（2026-09-23）挂 workspace 卷并对齐 scratch 相对路径习惯

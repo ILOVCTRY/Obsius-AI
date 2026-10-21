@@ -33,29 +33,35 @@ mode: self-contained
 **关键区分**：`.pcap` 既可能是网络流量也可能是 USB 外设流量——**先看协议层**
 （`tshark -r x.pcapng -Y "usb"` 有输出就是 USB），别默认当网络流量。
 
-## 1. 图片隐写 —— 全方向（12 项，逐项排除）
+## 1. 图片隐写 —— 全方向（13 项，逐项排除）
 
 **不要看到图就去翻 LSB。** 按成本从低到高过一遍，命中即停：
 
-| # | 方向 | 判据 | 动作 |
-|---|---|---|---|
-| 1 | 元数据 | `exiftool`/`strings` 有异常串 | 读 EXIF/XMP/ICC/comment 全字段 |
-| 2 | 附加数据 | `binwalk` 有尾部嵌入 | `binwalk -e` 分离 |
-| 3 | 文件结构异常 | 头尾不符、chunk 长度越界、CRC 错 | 逐 chunk 解析 |
-| 4 | LSB | `zsteg` 有输出 | `zsteg -a` 全通道全位平面 |
-| 5 | 调色板 | 颜色数异常、顺序可疑 | 提取 PLTE 按序转字节 |
-| 6 | 尺寸/宽高 | IHDR 宽高与实际不符 | 改宽高后重新渲染 |
-| 7 | 时间轴 | GIF 多帧、帧间隔异常 | 逐帧提取 + 帧间差分 |
-| 8 | 空间轴 | 图片被切块/拼图 | 网格切分重排 |
-| 9 | 视觉隐写 | 肉眼可见噪点/色差 | 调对比度/色阶/通道分离 |
-| 10 | 盲水印 | 频域嵌入，空域看不出 | 频域比对 |
-| 11 | 二维码/条形码 | 图中有码但残缺 | 修复后解码 |
-| 12 | 隐写工具产物 | 以上都不中 | `stegdetect` 判工具 |
+| # | 方向 | 判据 | 动作 | 详解（§/行） |
+|---|---|---|---|---|
+| 1 | 元数据 | `exiftool`/`strings` 有异常串 | 读 EXIF/XMP/ICC/comment 全字段 | §1 · L62 |
+| 2 | 附加数据 | `binwalk` 有尾部嵌入 | `binwalk -e` 分离 | §2 · L81 |
+| 3 | 文件结构异常 | 头尾不符、chunk 长度越界、CRC 错 | 逐 chunk 解析 | §3 · L97 |
+| 4 | LSB | `zsteg` 有输出 | `zsteg -a` 全通道全位平面 | §4 · L443 |
+| 5 | 调色板 | 颜色数异常、顺序可疑 | 提取 PLTE 按序转字节 | §5 · L515 |
+| 6 | 尺寸/宽高 | IHDR 宽高与实际不符 | 改宽高后重新渲染 | §6 · L530 |
+| 7 | 时间轴 | GIF 多帧、帧间隔只有 2-3 个离散值 | 逐帧提取 + 帧间差分 | §7 · L544 |
+| 8 | 空间轴 | 图片被切块/拼图 | 网格切分重排 | §8 · L562 |
+| 9 | 视觉隐写 | 肉眼可见噪点/色差 | 调对比度/色阶/通道分离 | §9 · L580 |
+| 10 | 盲水印 | 频域嵌入，空域看不出 | 频域比对 | §10 · L596 |
+| 11 | 二维码/条形码 | 图中有码但残缺 | 修复后解码 | §11 · L611 |
+| 12 | 像素值转化 | 像素本身就是数据 | 按 RGB/灰度序列还原文本 | §12 · L645 |
+| 13 | 隐写工具产物 | 以上都不中 | `stegdetect` 判工具 | §13 · L683 |
 
-**各格式必查顺序**：
-- PNG：IHDR 宽高 → 全 chunk（`tEXt/zTXt/iTXt` 常藏文本）→ PLTE → IDAT 解压 → IEND 后有无数据
-- JPG：EXIF 全段 → `FF D9` 之后有无数据 → DCT 系数 → 缩略图与主图不一致
-- GIF：帧数/帧间隔 → 全局与局部调色板 → `NETSCAPE2.0` 扩展块 → 每帧 LSB
+**各格式必查顺序**（§3 的四个子节）：
+- PNG（§3.1 · L105）：IHDR 宽高 → 全 chunk（`tEXt/zTXt/iTXt` 常藏文本）→ PLTE → IDAT 解压 → IEND 后有无数据
+- BMP（§3.2 · L299）：头部 4 个保留字段 → 像素数组后附加 → 调色板 → 位深异常
+- JPG（§3.3 · L328）：EXIF 全段 → `FF D9` 之后有无数据 → DCT 系数 → 缩略图与主图不一致
+- GIF（§3.4 · L383）：帧数/帧间隔 → 全局与局部调色板 → `NETSCAPE2.0` 扩展块 → 每帧 LSB
+
+**渐进式读取**（重要）：`图片隐写.md` 有 689 行，`kb_open` 会返回全文挤占上下文。
+已知方向时**先读分段索引** `forensics/隐写与信号/图片隐写.idx — 按节分段读取.md` 拿行号，
+再用 `read_file` 带 offset/limit 只读那一节。只有完全没头绪时才整篇打开。
 
 → 详解 `forensics/隐写与信号/图片隐写.md`、进阶 `stego-advanced.md`
 
@@ -71,7 +77,7 @@ mode: self-contained
 | 倒放/变速 | 正放听不出 | 倒放、加速、降采样 |
 | 静音段藏数据 | 静音区有微小噪声 | 放大静音段 |
 
-→ 详解 `forensics/隐写与信号/signals-and-hardware.md`
+→ 详解 `forensics/隐写与信号/硬件信号与物理介质取证.md`
 
 ## 3. 网络流量 —— 全方向
 
@@ -85,7 +91,7 @@ mode: self-contained
 | 重放攻击 | 有重复 payload | 提取重放 |
 | **流量里夹带二进制** | 流里有 ELF/PE 魔数 | 导出后交 `二进制利用手法`/`二进制逆向手法` |
 
-→ 详解 `forensics/网络取证/network.md`、进阶 `network-advanced.md`
+→ 详解 `forensics/网络取证/网络流量取证与协议隐写.md`、进阶 `network-advanced.md`
 
 ## 4. USB / HID / 蓝牙外设流量 —— 全方向
 
@@ -99,7 +105,7 @@ mode: self-contained
 | USB 存储 | SCSI/BOT 命令 | 文件提取 / 删除恢复 / 隐藏分区 |
 | 蓝牙 | `btratt`/`btrfcomm` | RFCOMM 重组 / ATT 特征值 / SMP 密钥解密 |
 
-→ 详解 `forensics/隐写与信号/peripheral-capture.md`
+→ 详解 `forensics/隐写与信号/全方向 HID、蓝牙外设流量分析.md`
 
 ## 5. 磁盘镜像 / 内存 —— 全方向
 
@@ -111,7 +117,7 @@ mode: self-contained
 | 内存进程/网络 | `.vmem`/`.dmp` | volatility3 出进程、连接、命令历史 |
 | 内存凭据 | 内存镜像 | 提取 hash/明文口令 |
 
-→ 详解 `forensics/磁盘与内存/disk-and-memory.md`、`disk-recovery.md`、`disk-advanced.md`
+→ 详解 `forensics/磁盘与内存/磁盘与内存镜像取证.md`、`disk-recovery.md`、`disk-advanced.md`
 
 ## 6. 系统取证
 
@@ -120,7 +126,7 @@ mode: self-contained
 | Windows 时间线 | evtx/注册表 | 事件日志 + 注册表 hive 时间线 |
 | Linux 痕迹 | `/var/log`、`.bash_history` | 日志与历史还原操作 |
 
-→ 详解 `forensics/磁盘与内存/windows.md`、`forensics/系统取证/linux-forensics.md`
+→ 详解 `forensics/磁盘与内存/Windows 主机取证与事件时间线.md`、`forensics/系统取证/Linux 与应用取证.md`
 
 ## 7. OSINT（无可分析附件时）
 
@@ -130,13 +136,13 @@ mode: self-contained
 | 照片定位 | 街景匹配、EXIF/媒体溯源 |
 | DNS/网页归档/证书 | 被动 DNS、CT、归档快照 |
 
-→ 详解 `forensics/开源情报/social-media.md`、`geolocation-and-media.md`、`web-and-dns.md`
+→ 详解 `forensics/开源情报/社交媒体情报.md`、`geolocation-and-media.md`、`web-and-dns.md`
 
 ## 8. 跨类提醒
 
 - 流量里夹带 ELF/PE → 转 `二进制逆向手法`；磁盘镜像里的可疑二进制同理。
 - 加密流量解不开 → 转 `密码学手法`。
-- 3D 打印/冷门格式 → 先 `binwalk`，再查 `forensics/其他取证/3d-printing.md`。
+- 3D 打印/冷门格式 → 先 `binwalk`，再查 `forensics/其他取证/3D 打印与 CAD 文件取证.md`。
 - 对真实样本做动态行为分析不属本技能——那是 L3 沙箱 + fakenet。
 
 ## 9. 纪律

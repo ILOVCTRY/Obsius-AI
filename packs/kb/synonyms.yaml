@@ -41,8 +41,16 @@ groups:
   # malware / forensics
   - id: malware-analysis
     terms: [恶意样本, 样本分析, 病毒, 木马, 勒索, c2, 回连, beacon, 行为分析]
+  # 取证按载体拆组（2026-10-21）：原先单组把「流量包/wireshark」和「内存取证/
+  # 镜像/数据恢复」混在一起，命一扩全组 → 问「流量包里找攻击痕迹」时
+  # 磁盘与内存镜像取证 被 镜像+数据恢复+取证 三项同时命中，挤掉网络取证手册
+  # （黄金集实测 recall 因此掉档）。载体不同 = 该看的手册不同，不能互相扩展。
+  - id: forensics-network
+    terms: [流量分析, 流量包, wireshark, tcpdump, pcap, 网络取证, 协议分析]
+  - id: forensics-memory-disk
+    terms: [内存取证, volatility, 镜像, 数据恢复, 磁盘取证, 日志分析]
   - id: forensics
-    terms: [取证, 流量分析, 流量包, wireshark, 内存取证, volatility, 日志分析, 镜像, 数据恢复]
+    terms: [取证]
   # crypto / misc
   - id: crypto-classic
     terms: [密码学, 加密, 解密, rsa, aes, des, 异或, 维吉尼亚, 栅栏, 摩斯, base64, 哈希, 摘要]

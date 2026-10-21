@@ -50,6 +50,19 @@ _UTC_FMT = "%Y-%m-%dT%H:%M:%SZ"
 _EVIDENCE_REF_RE = re.compile(r"\b(?:find|task)-[0-9a-f]{12}\b")
 _KB_SECTION_RE = re.compile(r"坑|注意|已验证|路径|步骤|适用|流程|复现|前提")
 
+# ---- 反单题复现（2026-10-21，KB-WRITING-SPEC.md §2/§3）----
+# 背景：实测一篇 CAN 总线取证提案 132 行正文里 30 行（23%）是题目专属痕迹，
+# 「本题」出现 11 次、具体数字 68 处（帧号 12149 / 仲裁 ID 0x244 / 偏移 0x8E6B4）。
+# 这种「单题解题日志」换一题即失效，却因为有「## 陷阱清单」标题而通过了旧 lint。
+# 三条机械判据（都能自动判定，不需要人读）：
+#   1) 单题痕迹密度：含「本题/实测/该题…」的行 > 5%
+#   2) 裸数字密度：4 位以上十进制 / 0x 十六进制 > 15 处（阈值、量级不算）
+#   3) 判据表存在性：必须有以 `| 现象 |` 或 `| …原语… |` 开头的表（测试面/判据速查）
+_CASE_MARKER_RE = re.compile(r"本题|实测|该题|这道题|题面|此题")
+_BARE_NUM_RE = re.compile(r"(?<![\w.])0x[0-9a-fA-F]{3,}(?![\w.])"
+                          r"|(?<![\w.])\d{4,}(?![\w.%])")
+_CRITERIA_TABLE_RE = re.compile(r"^\|\s*(?:现象|手上的原语|卡在哪|#)\s*\|", re.M)
+
 
 class ProposalError(ValueError):
     """提案非法（API→422）。"""
@@ -227,6 +240,57 @@ def _validate_agent_kb(p: dict) -> None:
         raise ProposalError(
             "kb 新建手册须有「## 」段落结构，且至少一段标题命中沉淀口径"
             "（已验证路径/坑/适用条件/步骤/复现等）；纯 H1 单段文档不便于路由与段落级引用")
+    _validate_not_case_replay(content)
+
+
+def _validate_not_case_replay(content: str) -> None:
+    """拦截「单题解题日志」（KB-WRITING-SPEC.md §3 反面样例）。
+
+    手册要写换题仍成立的判据，不写某一道题怎么解。三条判据见模块常量注释。
+    只在 agent 产 create 时生效——人类修订既有手册不受此限（可能正当地补例子）。
+    """
+    # 只统计正文行：跳过 frontmatter（summary 允许压缩叙述）与代码块
+    body: list[str] = []
+    in_fence = False
+    for ln in content.splitlines():
+        s = ln.strip()
+        if s.startswith(("```", "~~~")):
+            in_fence = not in_fence
+            continue
+        if in_fence or not s or s in ("---",):
+            continue
+        if s.startswith(("title:", "summary:", "phase:", "vuln_class:")):
+            continue
+        body.append(ln)
+    if len(body) < 8:
+        return   # 极短文档交给结构 lint，密度统计无意义
+
+    # 1) 单题痕迹密度
+    hits = sum(1 for ln in body if _CASE_MARKER_RE.search(ln))
+    ratio = hits / len(body)
+    if ratio > 0.05:
+        raise ProposalError(
+            f"正文 {hits}/{len(body)} 行（{ratio:.0%}）含「本题/实测/该题」等单题痕迹，"
+            "超过 5% 上限——这是单题复现，不是知识。"
+            "改法：把「本题真信号 uniq=403」写成「真信号 uniq 比干扰高一个数量级」，"
+            "把「本题峰值 12149」写成「取 `-e frame.number` 的原生 1-based 值」。")
+
+    # 2) 裸数字密度（帧号/偏移/哈希/实测值都是解题记录）
+    nums = _BARE_NUM_RE.findall(content)
+    if len(nums) > 15:
+        raise ProposalError(
+            f"正文含 {len(nums)} 处具体数字/十六进制（如 {', '.join(nums[:5])}）——"
+            "题目答案、帧号、块偏移、哈希不要入库。只保留阈值与量级"
+            "（`< 30%`、`高一个数量级`），观测值属于单题，换题即失效。")
+
+    # 3) 判据表（测试面 / 判据速查）
+    if not _CRITERIA_TABLE_RE.search(content):
+        raise ProposalError(
+            "缺判据表：首节必须是「测试面」或「判据速查」表，表头以 "
+            "`| 现象 |`（或 `| 手上的原语 |` / `| 卡在哪 |`）开头。"
+            "判据库口径是「看到什么现象 → 该做什么 → 什么情况算不成立」，"
+            "无此表的文档在卡住时检索不到。")
+
 
 
 # ---------------- 创建（只落 pending） ----------------

@@ -17,19 +17,19 @@ mode: self-contained
 
 | 特征 | 方法论（`web/漏洞分类/` 下） | 弹药（`web/实战打法/` 下） |
 |---|---|---|
-| REST 接口（swagger/openapi/大量 id 接口） | `web/漏洞分类/API网关/API 网关安全.md` | `web/实战打法/api-rest/10-rest-api.md` |
-| GraphQL | `web/漏洞分类/GraphQL/GraphQL 安全.md` | `web/实战打法/graphql.md`、`web/实战打法/api-rest/11-graphql.md` |
-| WebSocket | `web/漏洞分类/WebSocket/WebSocket 安全.md` | `web/实战打法/api-rest/13-websocket.md` |
-| 网关签名/时间戳/重放 | `web/漏洞分类/API网关/API 网关安全.md` | — |
-| HPP 参数污染 | `web/漏洞分类/HTTP参数污染/HTTP 参数污染（HPP）测试.md` | — |
-| HTTP 走私 | `web/漏洞分类/HTTP请求走私/HTTP 请求走私测试.md` | `web/实战打法/http-smuggling.md` |
-| HTTP/2 特有攻击 | `web/漏洞分类/HTTP2攻击/HTTP2 攻击测试.md` | — |
-| Host 头投毒/密码找回投毒 | `web/漏洞分类/Host头注入/Host 头注入与密码重置毒化.md` | — |
-| Web 缓存投毒/欺骗 | `web/漏洞分类/缓存投毒/缓存投毒测试.md` | — |
-| SSRF（核心打法） | `web/漏洞分类/SSRF/SSRF测试.md` | `web/实战打法/ssrf-cache-host/10-ssrf-core.md` |
-| SSRF 打云（metadata/STS） | `web/漏洞分类/SSRF/SSRF测试.md` | `web/实战打法/ssrf-cache-host/11-cloud.md` |
-| 缓存与 SSRF 组合 | `web/漏洞分类/缓存投毒/缓存投毒测试.md` | `web/实战打法/ssrf-cache-host/12-cache.md` |
-| 邮件头注入 | `web/漏洞分类/邮件头注入/邮件头注入测试.md` | — |
+| REST 接口（swagger/openapi/大量 id 接口） | `web/漏洞分类/API网关/API 网关安全测试手册.md` | `web/实战打法/api-rest/10-REST API 核心攻击 payload 库.md` |
+| GraphQL | `web/漏洞分类/GraphQL/GraphQL 安全测试.md` | `web/实战打法/GraphQL.md`、`web/实战打法/api-rest/11-GraphQL payload 库(API 视角).md` |
+| WebSocket | `web/漏洞分类/WebSocket/WebSocket 安全测试手册.md` | `web/实战打法/api-rest/13-WebSocket 安全 payload 库.md` |
+| 网关签名/时间戳/重放 | `web/漏洞分类/API网关/API 网关安全测试手册.md` | — |
+| HPP 参数污染 | `web/漏洞分类/HTTP参数污染/hpp-test（几乎不交）.md` | — |
+| HTTP 走私 | `web/漏洞分类/HTTP请求走私/HTTP 请求走私测试.md` | `web/实战打法/HTTP Request Smuggling、HTTP、2 Desync.md` |
+| HTTP/2 特有攻击 | `web/漏洞分类/HTTP2攻击/http2-attacks-test（几乎不交）.md` | — |
+| Host 头投毒/密码找回投毒 | `web/漏洞分类/Host头注入/Host 头注入与路由滥用.md` | — |
+| Web 缓存投毒/欺骗 | `web/漏洞分类/缓存投毒/缓存投毒与缓存欺骗测试.md` | — |
+| SSRF（核心打法） | `web/漏洞分类/SSRF/SSRF 测试手册.md` | `web/实战打法/ssrf-cache-host/10-SSRF — 核心 payload 库.md` |
+| SSRF 打云（metadata/STS） | `web/漏洞分类/SSRF/SSRF 测试手册.md` | `web/实战打法/ssrf-cache-host/11-云元数据、IAM、K8s、S3 payload 库.md` |
+| 缓存与 SSRF 组合 | `web/漏洞分类/缓存投毒/缓存投毒与缓存欺骗测试.md` | `web/实战打法/ssrf-cache-host/12-缓存投毒、缓存欺骗、CDN 绕过 payload 库.md` |
+| 邮件头注入 | `web/漏洞分类/邮件头注入/email-header-injection-test（几乎不交）.md` | — |
 
 ## 纪律
 
