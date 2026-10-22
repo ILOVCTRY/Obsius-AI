@@ -876,7 +876,16 @@ _CTF_CONTROLLER_STYLE = (
     "### 收尾\n"
     "所有方向都已 solved / drop，或时间进收尾窗口（见下方时间预算）时收尾，\n"
     "汇总：走过的方向、正式 flag、候选线索、各自证据、仍未确认的内容。\n"
-    "**不要把候选线索写成正式 flag**，也不要在还有 open 方向时说「已全部完成」。")
+    "**不要把候选线索写成正式 flag**，也不要在还有 open 方向时说「已全部完成」。\n"
+    "\n"
+    "### 后台专家的回执会自动送达（expert-bg-wake，2026-10-22）\n"
+    "你派出的方向是**先返先触发**的：第一个回来你就继续往下走，其余在后台跑。\n"
+    "**不要对用户说「我等 X 回执到了再判断」然后结束本轮**——轮次结束后你不会\n"
+    "自己醒过来，那句话兑现不了，用户会以为你在等，实际什么都没发生。\n"
+    "正确的说法是「X 方向仍在后台，回执到了我会接着判定」，而**系统确实会做到**：\n"
+    "后台专家跑完、而你这一轮已经结束时，会以「〔系统补达〕」开头的消息把你叫醒，\n"
+    "结果已在历史里（同一条 call_expert 的 tool 结果）。读到后照常判定即可，\n"
+    "**不要重派那个方向**——它已经跑完了。")
 
 
 class ChatStopped(Exception):
@@ -4371,6 +4380,12 @@ class ChatTurn:
             # 通知箱释放必须在**所有**出口执行（正常/删除/中止/异常）：登记表里
             # 「有箱」是投递方的存活判据，漏释放 = 死线程永久被当活轮次。
             self._release_notice_box()
+            # 后台结果补达唤醒（expert-bg-wake，2026-10-22）**触发点 2**：
+            # 本轮已不会再回到步边界，`_probe_overflow` 里剩下的结果这辈子
+            # 都不会被 drain 了。必须放在 finally 且**晚于** `_release_notice_box`
+            # ——app 层订阅者据此判「主控是否有活轮」，箱还在就会判成 running
+            # 而跳过唤醒，那这个事件等于白发。
+            self._emit_background_unread()
 
     def _web_search_on(self) -> bool:
         """线程级「联网搜索」开关**实时读**（每步从 chat_threads 行读，不缓存）。
@@ -5641,6 +5656,13 @@ class ChatTurn:
                 "background": dropped,
                 "duration_s": round(time.perf_counter() - started, 2),
             })
+            # 后台结果补达唤醒（expert-bg-wake，2026-10-22）**触发点 1**：
+            # `dropped` = 主线程已提前断候（先返先触发/人类插话），这条结果的
+            # 真实内容只续写进了 DB，主控**不保证**还能读到——它可能已经在
+            # 下一步，也可能本轮已收尾（实例销毁，overflow 再没人 drain）。
+            # 这里只广播事实，要不要起轮由 app 层按「主控是否还活着」判。
+            if dropped:
+                self._emit_background_done(tc, ok=ok, result=result)
             return tc.id, (ok, result)
 
         executor = ThreadPoolExecutor(
@@ -5702,6 +5724,74 @@ class ChatTurn:
             executor.shutdown(wait=False)
         pending_ids = [tc.id for tc in experts if tc.id not in results]
         return results, pending_ids
+
+    # ---------- 后台结果补达唤醒（expert-bg-wake，2026-10-22） ----------
+
+    def _controller_action_hint(self) -> str:
+        """补达文案里「接下来能做什么」的分叉段（按轨/角色）。
+
+        **为什么必须分叉**：三个主控的动作面互不相同——CTF 主控要登记 flag /
+        走 ctf_conclude，激进主控要派深挖专家，ARTEX 主控要操舵 Engine。
+        写死一套会让另外两类主控照着做越界动作（实测过的失败形态：给 CTF
+        主控写「派深挖专家」，它就会绕过 ctf_dispatch 直接 call_expert）。
+        """
+        if self.is_ctf_controller:
+            return ("接下来按 CTF 纪律走：拿到 flag → `ctf_submit_flag` 登记；"
+                    "方向证伪 → `close_intent(outcome=\"dead_end\")` 并 "
+                    "`ctf_dispatch` 提新方向（**不要直接 call_expert**，不在准派"
+                    "计划内会被拒）；方向都做完、答案已登记 → `ctf_conclude` "
+                    "收尾；这题确实打不动 → `ctf_abandon`。")
+        if self.is_artex:
+            return ("接下来用 artex_plan / artex_hint 把结论并进规划，或 "
+                    "artex_goal(action=\"prove\") 标记已达成目标。")
+        if self.is_aggressive:
+            return ("接下来按先返先触发规则处置：`[命中]` → 立即对该方向派深挖"
+                    "专家；`[未命中]` → 放弃该方向，继续派下一批探针。")
+        return ""
+
+    def _emit_background_done(self, tc, *, ok: bool, result: str) -> None:
+        """广播「某条后台专家结果已落库」（触发点 1）。
+
+        **只发事件、不判是否唤醒**：判据（主控是否还活着、是否已因同一条结果
+        唤醒过）需要线程状态与 app.state，那些只有 API 层有。core 层擅自
+        起轮会重蹈 `inbox.py` 记的覆辙（拿不到 app.state → 静默漏掉）。
+        """
+        try:
+            self.bb.append_event(
+                self.project_id, "chat.expert.background_done",
+                {"thread_id": self.thread_id,          # 主控线程（收件人）
+                 "tool_use_id": str(tc.id or ""),
+                 "expert": str((tc.arguments or {}).get("expert") or ""),
+                 "ok": bool(ok),
+                 "result_head": str(result or "")[:1500]},
+                session_id=None, author=f"chat-{self.thread_id[-12:]}")
+        except Exception:  # noqa: BLE001 —— 补达是附加项，失败不阻断落库
+            log.exception("后台专家结果补达事件失败 thread=%s", self.thread_id)
+
+    def _emit_background_unread(self) -> None:
+        """广播「主控收尾时手上还有没交出的后台结果」（触发点 2）。
+
+        与触发点 1 是**互补**关系，不是重复：触发点 1 在 worker 完成时判
+        「主控在跑就跳过」，而「主控正在收尾」恰好落在这个空档——它已经不再
+        回到步边界（`_loop` 已 break），overflow 永远 drain 不到。这里由主控
+        自己在收尾时把「还剩哪些没交出去」讲出来，判据来自它手上的确切事实。
+        """
+        with self._probe_lock:
+            pending = [{"tool_use_id": it.get("id"),
+                        "expert": it.get("expert"),
+                        "ok": it.get("ok", True),
+                        "result": it.get("result") or ""}
+                       for it in self._probe_overflow]
+        if not pending:
+            return
+        try:
+            self.bb.append_event(
+                self.project_id, "chat.background_unread",
+                {"thread_id": self.thread_id, "pending": pending[:8],
+                 "count": len(pending)},
+                session_id=None, author=f"chat-{self.thread_id[-12:]}")
+        except Exception:  # noqa: BLE001 —— 补达是附加项，失败不阻断收尾
+            log.exception("后台结果未读事件失败 thread=%s", self.thread_id)
 
     def _drain_probe_overflow(self, messages: list[dict[str, Any]],
                               skip_ids: set[str] | None = None) -> None:

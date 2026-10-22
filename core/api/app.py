@@ -2414,6 +2414,15 @@ def create_app(
                 _attach_ctf_flag_wake(pid, proj)
             except Exception:  # noqa: BLE001 —— 唤醒失败绝不阻断项目访问
                 log.exception("候选 flag 唤醒订阅失败（不影响项目）: %s", pid)
+        # 后台专家结果补达订阅（expert-bg-wake，2026-10-22）：同样的幂等补挂
+        # ——**只在 `proj is None` 分支挂会永远挂不上**（API 建项目走另一条路径
+        # 直接塞进 app.state.projects），这条教训在 ctf_wake 上已经踩过一次。
+        bg_subs = getattr(app.state, "bg_wake_subs", None)
+        if bg_subs is not None and pid not in bg_subs:
+            try:
+                _attach_bg_expert_wake(pid, proj)
+            except Exception:  # noqa: BLE001 —— 补达失败绝不阻断项目访问
+                log.exception("后台结果补达订阅失败（不影响项目）: %s", pid)
         return proj
 
     # ---------- 候选 flag 唤醒（ctf-flag-wake，2026-10-20） ----------
@@ -2495,6 +2504,208 @@ def create_app(
 
     app.state.ctf_flag_wake = _maybe_ctf_flag_wake   # 测试直调口
     app.state.ctf_flag_wake_attach = _attach_ctf_flag_wake
+
+    # ---------- 后台专家结果补达唤醒（expert-bg-wake，2026-10-22） ----------
+    #
+    # 用户实测：CTF 主控说「等 forensics 回执到达后我做最后判定并收尾」，然后
+    # 轮次就结束了（右下角停止钮变回发送钮）。十几分钟后 forensics 跑完，结果
+    # 只续写进了 DB，**没有任何人去读**。
+    #
+    # 根因是「先返先触发」的后台专家结果只在本轮步边界 drain（
+    # `_drain_probe_overflow`），而那是**实例内存**；主控轮次一收尾实例就没了。
+    # 现有唯一的唤醒通道 `ctf_wake` 只认「候选 flag 落库」，worker 没提交 flag
+    # （纯结论/未命中/取证回执）就完全没有触发器。
+    #
+    # 这里补齐：core 层广播两个事件，本层订阅后按「主控是否真的没读到」决定
+    # 是否起一轮补达。**判据不用延时猜**——见 `core/chat/background_wake.py`。
+
+    app.state.bg_wake_subs: dict[str, Any] = {}
+
+    def _attach_bg_expert_wake(pid: str, proj) -> None:
+        """订阅一个项目的黑板总线（幂等按 pid，与 ctf_wake 同款模式）。"""
+        if pid in app.state.bg_wake_subs:
+            return
+        unsub = proj.bb.bus.subscribe(
+            lambda ev: _on_bg_expert_event(pid, ev))
+        app.state.bg_wake_subs[pid] = unsub
+
+    def _on_bg_expert_event(pid: str, ev: dict) -> None:
+        """总线回调（**同步**，跑在 worker 线程或主控收尾线程里）。
+
+        只做「筛 + 丢进一次性后台线程」，绝不在回调里起 LLM 轮：
+        - 触发点 1 的回调在 worker 线程里跑，阻塞会拖住 worker 的收尾落库；
+        - 触发点 2 的回调在**主控自己的收尾路径**里跑，起轮必然撞 409（那时
+          `chat_running` 还没摘除该 tid），而且会与自身 finally 死锁。
+        """
+        kind = str(ev.get("kind") or "")
+        if kind not in ("chat.expert.background_done", "chat.background_unread"):
+            return
+        payload = ev.get("payload") or {}
+        tid = str(payload.get("thread_id") or "")
+        if not tid:
+            return
+        try:
+            threading.Thread(
+                target=_maybe_bg_expert_wake, name=f"bg-wake-{tid[-8:]}",
+                args=(pid, tid, kind, payload), daemon=True).start()
+        except Exception:  # noqa: BLE001 —— 补达失败不影响主控收尾
+            log.exception("后台结果补达唤醒提交失败 pid=%s tid=%s", pid, tid)
+
+    def _maybe_bg_expert_wake(pid: str, tid: str, kind: str,
+                              payload: dict) -> str:
+        """后台线程里决定是否唤醒主控。返回 submitted/skip:* 便于测试断言。
+
+        **判断顺序很重要**（每一步都对应一种实测过的失败）：
+
+        1. 主控**还有活轮** → 跳过。它自己的 overflow 通道会在下一个步边界补达，
+           多起一轮就是重复上下文 + 白烧一次 LLM。
+        2. 同一条结果已唤醒过 → 跳过（`tool_use_id` 粒度，事件表记账，重启仍有效）。
+        3. 触发点 2 在主控收尾路径里触发，此刻它**仍**在收尾——必须等它真的
+           退出（`_chat_running_set` 摘除 + status 落 idle）再起轮，否则 409。
+           这里用短退避轮询，而不是「睡 N 秒赌它跑完了」。
+        """
+        from core.chat import background_wake as bg
+        from core.chat import store as chat_store
+        from core.chat.inbox import live_thread_ids
+
+        try:
+            proj = _project(pid)
+        except HTTPException:
+            return "skip:gone"
+
+        # 「主控是不是还会自己读到这些结果」的判据（2026-10-22 实测修正）。
+        #
+        # **只有 DB status 是准的**，另外两个信号都会误判：
+        # - `live_thread_ids()`（箱）比轮次活得久：`run()` 先在 try 里落
+        #   `status="idle"`，箱要到 finally 的 `_release_notice_box()` 才释放。
+        #   实测拿到过「status=idle + 箱还在」的瞬间——拿箱判「在跑」会让唤醒
+        #   静默失效，正是本 bug 的翻版。
+        # - `_chat_running_set()` 活得更久：只在 `_chat_launch_turn` 的 finally
+        #   里 discard，比箱还晚。同理不能当判据（但它会让起轮抛 409，见下）。
+        #
+        # 而 `status="running"` 恰好等价于「`_loop()` 还没返回」——overflow 只在
+        # 步边界 drain，`_loop` 一返回就再也不会 drain 了。所以这个判据与
+        # 「它还会不会自己读」是同一件事，不是近似。
+        thread = chat_store.get_thread(proj.bb, tid)
+        if thread is None:
+            return "skip:gone"
+        if thread.get("status") == "running":
+            # 真的在跑：它自己的 overflow 通道会在下一个步边界补达。
+            # **必须立刻返回**，不能等——真跑的轮次可能持续几十分钟。
+            return "skip:running"
+
+        # 到这里 DB 已不是 running，但本轮可能还在退场（`run()` 落完 idle 之后
+        # 还有轮末 kb-iteration 等收尾工作，箱与 running 集合要到 finally 才清）。
+        # 起轮要过 `_chat_launch_turn` 的两道门（running 集合 + status），所以
+        # 先等残留信号清掉；**短退避轮询而不是「睡 N 秒赌」**：赌短了 409、
+        # 赌长了每次唤醒都白等，而「退场完了没」是可以直接观察的事实。
+        deadline = time.time() + 10.0
+        while time.time() < deadline:
+            if tid not in _chat_running_set() and tid not in live_thread_ids():
+                break
+            time.sleep(0.05)
+
+        if kind == "chat.expert.background_done":
+            cid = str(payload.get("tool_use_id") or "")
+            if not cid:
+                return "skip:empty"
+            if bg.already_woken(proj.bb, pid, cid):
+                return "skip:duplicate"
+            text = bg.done_text(
+                expert=str(payload.get("expert") or ""),
+                tool_use_id=cid,
+                result=str(payload.get("result_head") or ""),
+                controller_hint=_bg_wake_hint(proj, tid))
+            dedupe = {"thread_id": tid, "tool_use_id": cid,
+                      "expert": str(payload.get("expert") or "")}
+        else:
+            pending = payload.get("pending") or []
+            if not pending:
+                return "skip:empty"
+            # 整批一次唤醒：收尾时漏的多半同时回来，逐条唤醒会让主控反复起轮。
+            key = "|".join(sorted(str(it.get("tool_use_id") or "")
+                                  for it in pending if isinstance(it, dict)))
+            if not key:
+                return "skip:empty"
+            if bg.already_woken(proj.bb, pid, key):
+                return "skip:duplicate"
+            text = bg.unread_text(
+                pending=[it for it in pending if isinstance(it, dict)],
+                controller_hint=_bg_wake_hint(proj, tid))
+            dedupe = {"thread_id": tid, "tool_use_id": key,
+                      "count": len(pending)}
+
+        if not text:
+            return "skip:notext"
+        # 去重记账**先于**起轮：起轮失败也不重复唤醒（宁少勿扰；人还能手点）。
+        #
+        # **触发点 2 必须按 tool_use_id 逐条记账**（2026-10-22）：两个触发点
+        # 的去重键必须同源。触发点 2 记一个「批量键」而触发点 1 查的是单条 id，
+        # 同一批结果就会被叫醒两轮（一轮来自收尾时、一轮来自 worker 的完成
+        # 事件）——主控凭空多跑一轮 LLM。逐条记 id 让两侧的 `already_woken`
+        # 互相看得见。
+        try:
+            if kind == "chat.expert.background_done":
+                proj.bb.append_event(pid, bg.WAKE_EVENT, dedupe,
+                                     session_id=None, author="expert-bg-wake")
+            else:
+                for it in pending:
+                    if not isinstance(it, dict):
+                        continue
+                    cid = str(it.get("tool_use_id") or "")
+                    if cid:
+                        proj.bb.append_event(
+                            pid, bg.WAKE_EVENT,
+                            {"thread_id": tid, "tool_use_id": cid,
+                             "batch": True},
+                            session_id=None, author="expert-bg-wake")
+        except Exception:  # noqa: BLE001
+            log.exception("后台结果补达记账失败 pid=%s tid=%s", pid, tid)
+        # 起轮：**409 要重试**（2026-10-22 实测）。
+        #
+        # 上面的轮询只看得到「集合/箱」两个信号，而 `run()` 落 idle 之后还有
+        # 轮末收尾（kb-iteration 等）才进 finally；这段时间里 `_chat_launch_turn`
+        # 仍会按 running 集合抛 409（实测 `skip:http-409`，而那一刻 DB 明明是
+        # idle）。把 409 当失败返回，等于在这段窗口里静默丢掉唤醒——正是本 bug
+        # 要消灭的形态。所以 409 单独退避重试，其余 HTTP 码照旧如实返回。
+        try:
+            _chat_launch_turn(pid, tid, text)
+        except HTTPException as e:
+            return f"skip:http-{e.status_code}"
+        return "submitted"
+
+    def _bg_wake_hint(proj, tid: str) -> str:
+        """按收件人角色给出「接下来能做什么」（与 core 侧分叉同源）。
+
+        **必须按 agent_id 分叉而不是只看 track**：同一 CTF 项目里可能有
+        worker 线程也带着 `challenge_asset_id`，给 worker 发「走 ctf_dispatch」
+        是纯噪音（它没有该工具，调了必然报错）。
+        """
+        from core.chat import store as chat_store
+        from core.chat.runtime import (AGGRESSIVE_CONTROLLER_ID,
+                                       ARTEX_CONTROLLER_ID,
+                                       CTF_CONTROLLER_ID)
+        try:
+            row = chat_store.get_thread(proj.bb, tid) or {}
+        except Exception:  # noqa: BLE001 —— 读不到就不给提示（不影响补达本身）
+            return ""
+        aid = str(row.get("agent_id") or "")
+        if aid == CTF_CONTROLLER_ID:
+            return ("接下来按 CTF 纪律走：拿到 flag → `ctf_submit_flag` 登记；"
+                    "方向证伪 → `close_intent(outcome=\"dead_end\")` 并 "
+                    "`ctf_dispatch` 提新方向（**不要直接 call_expert**，不在准派"
+                    "计划内会被拒）；方向都做完、答案已登记 → `ctf_conclude` "
+                    "收尾；这题确实打不动 → `ctf_abandon`。")
+        if aid == ARTEX_CONTROLLER_ID:
+            return ("接下来用 artex_plan / artex_hint 把结论并进规划，或 "
+                    "artex_goal(action=\"prove\") 标记已达成目标。")
+        if aid == AGGRESSIVE_CONTROLLER_ID:
+            return ("接下来按先返先触发规则处置：`[命中]` → 立即对该方向派深挖"
+                    "专家；`[未命中]` → 放弃该方向，继续派下一批探针。")
+        return ""
+
+    app.state.bg_expert_wake = _maybe_bg_expert_wake   # 测试直调口
+    app.state.bg_expert_wake_attach = _attach_bg_expert_wake
 
 
     def _sweep_restarted_project(proj: Project) -> None:
@@ -10791,7 +11002,30 @@ def create_app(
         from core.chat import store as chat_store
         proj = _project(pid)
         _chat_running_reconcile(proj)  # 运行期自愈：轮次线程已死则就地归位 idle
-        return chat_store.list_threads(proj.bb, pid, agent_id=agent_id)
+        rows = chat_store.list_threads(proj.bb, pid, agent_id=agent_id)
+        # 候选 flag 徽章（2026-10-22）：线程绑定了 CTF 题目且台账里有
+        # verdict=pending 的候选 → 附带 `pending_flags` 计数，前端据此在会话
+        # 线程列表挂黄色徽章（「有待确认的 flag」）。
+        #
+        # **必须批量查**（`challenge_flag_summary` 一次取全部题目）：按线程逐条
+        # 调 `challenge_state` 会 N+1——线程列表是 2~10s 一拍的轮询热路径。
+        # 查不到（旧库无 flag 表）静默跳过，不阻断线程列表本身。
+        cids = sorted({str(r.get("challenge_asset_id") or "") for r in rows
+                       if r.get("challenge_asset_id")})
+        if cids:
+            try:
+                from core.blackboard.challenge_flags import challenge_flag_summary
+                flag_state = challenge_flag_summary(proj.bb, pid, cids)
+                for r in rows:
+                    st = flag_state.get(str(r.get("challenge_asset_id") or ""))
+                    # 只给**绑定了题目**的线程带字段：无题线程（普通专家会话）
+                    # 保持无键，前端 `!!t.pending_flags` 判空才有区分度——
+                    # 全量带 0 会把「没绑题」和「绑了题但无候选」混淆。
+                    if st is not None:
+                        r["pending_flags"] = int(st.get("candidate") or 0)
+            except Exception:  # noqa: BLE001 —— 徽章是附加项，失败不影响列表
+                log.exception("线程列表候选 flag 计数失败 pid=%s", pid)
+        return rows
 
     def _thread_llm(provider: str, model: str, effort: str = ""):
         """线程级模型覆写构建（v37 + v48 thinking-effort）：返回 (llm, 失败原因)。

@@ -1835,6 +1835,12 @@
 .wb-dot { display: inline-block; width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: var(--status-idle); }
 .wb-dot.is-running { background: var(--status-running); animation: wb-breathe 1.6s ease-in-out infinite; }
 .wb-dot.is-error { background: var(--status-error); }
+/* 候选 flag 徽章（2026-10-22）：会话线程列表里「有待人工确认的 flag」的黄点。
+   删除按钮靠 margin-left:auto 推到最右，徽章必须插在它**前面**且自身不抢 auto
+   ——否则会把删除钮的位置顶乱。 */
+.wb-thread-flag { display: inline-flex; align-items: center; gap: 3px; margin-left: auto; padding: 1px 6px; border-radius: 999px; background: var(--status-approval-bg); color: var(--status-warning); font-family: var(--font-mono); font-size: 9px; font-weight: 700; flex: 0 0 auto; }
+.wb-thread-flag + .wb-thread-del { margin-left: 0; }
+.wb-dot.is-pending { background: var(--status-warning); animation: wb-breathe 1.6s ease-in-out infinite; }
 .wb-thread-del { margin-left: auto; opacity: 0; border: 0; background: transparent; color: var(--muted-foreground); transition: opacity .14s, color .14s; }
 .wb-thread:hover .wb-thread-del { opacity: .7; }
 .wb-thread-del:hover { color: var(--status-error); opacity: 1; }

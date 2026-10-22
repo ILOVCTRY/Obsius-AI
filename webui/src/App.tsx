@@ -11,6 +11,7 @@ import {
   ChevronDown,
   ChevronLeft,
   FileDiff,
+  Flag,
   Globe2,
   Inbox,
   FolderKanban,
@@ -30,7 +31,7 @@ import {
   Zap,
 } from "lucide-react"
 import { api, ApiError } from "@/lib/api"
-import type { ProjectDetail } from "@/lib/types"
+import type { CtfProgressStats, ProjectDetail } from "@/lib/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { LiveRoom } from "@/views/LiveRoom"
@@ -341,6 +342,9 @@ function EventsDebouncedRefresh({ pid, onBump }: {
 export default function App() {
   const [pid, setPid] = useState<string | null>(null)
   const [meta, setMeta] = useState<ProjectDetail | null>(null)
+  // CTF 轨顶栏题目进度（2026-10-22）：「已测干净 X/Y」是渗透攻击面覆盖率，CTF 没有
+  // 资产树这个概念，恒显 0/0·0% 是把渗透语义错带到 CTF。改为按轨分叉显示题目进度。
+  const [ctfStats, setCtfStats] = useState<CtfProgressStats | null>(null)
   const [view, setView] = useState<View>("projects")
   // 变更提案待审数（工作区「变更提案」角标；提案全局共享，无项目也拉）
   const [proposalsN, setProposalsN] = useState(0)
@@ -453,12 +457,31 @@ export default function App() {
   useEffect(() => {
     if (!pid) {
       setMeta(null)
+      setCtfStats(null)
       return
     }
     let alive = true
     const load = () =>
       api.getProject(pid).then((m) => {
-        if (alive) setMeta(m)
+        if (!alive) return
+        setMeta(m)
+        // CTF 轨才拉题目清单聚合顶栏进度（2026-10-22）。两个刻意的选择：
+        // ① **只认 meta.track**——轨是项目级静态属性，不会在一轮刷新内变；
+        // ② **挂在 5s 轮询里、不挂 bumpMeta**——事件 bump 在流式期约 2.5 次/秒，
+        //    挂上去会把 challenges 全量请求放大到同频；顶栏汇总是给人扫的摘要，
+        //    晚几秒无妨（黑板自身也是 5s 轮 + 实时徽章，那边才是逐题状态）。
+        // 请求失败**不清空**已有值：宁可显示几秒前的旧进度，也不要闪成 0/0。
+        if (m.track !== "ctf") {
+          setCtfStats(null)
+          return
+        }
+        return api.challenges(pid).then((cs) => {
+          if (!alive) return
+          setCtfStats({
+            total: cs.length,
+            solved: cs.filter((c) => c.solved).length,
+          })
+        }).catch(() => {})
       }).catch((e: unknown) => {
         // 项目已被删除（常见：另一个标签里删的）：退回列表，子视图轮询随卸载全停。
         // 只认 404；409（删除中）等下一轮变 404 再退，网络错误不退防误伤。
@@ -592,7 +615,13 @@ export default function App() {
               <div className="mobile-brand"><div className="brand-mark"><Sparkles size={15} /></div><span>Obsius</span></div>
               <div className="project-card"><span className="project-pulse" /><h1 className="project-name">{meta?.name ?? "加载项目"}</h1><Badge variant="outline" className="project-badge">{meta ? bindingBadge(meta.track, meta.experts) : "…"}</Badge></div>
               <span className="flex-1" />
-              {meta && <div className="project-stats"><span><Blocks size={13} />{meta.findings} 发现</span><span className="project-stats-sep">·</span><span title={`资产数只计二级子节点（根节点 → 二级子节点 → 三级 URL）；已测干净 ${meta.assets_clean ?? 0} / ${meta.assets}`}><Globe2 size={13} />已测干净 {meta.assets_clean ?? 0}/{meta.assets} · {meta.assets_clean_pct ?? 0}%</span></div>}
+              {/* 统计按轨分叉（2026-10-22 Nan：「红色方框内的状态原本是为渗透测试所留，
+                  在 CTF 轨中不适用」）。「发现」两轨通用，不动；第二项分叉：
+                  · 渗透族（pentest/redteam/research/malware）→ 资产测干净覆盖率；
+                  · CTF → 题目解出进度。判据是 `track === "ctf"` **正向窄门**，
+                    不写 `!== "pentest"`——新轨默认继承资产模型，漏一个轨就错一类。
+                  CTF 分支的 `ctfStats &&` 守卫：拉到之前不占位，避免闪一下「0/0」。 */}
+              {meta && <div className="project-stats"><span><Blocks size={13} />{meta.findings} 发现</span>{meta.track === "ctf" ? ctfStats && <><span className="project-stats-sep">·</span><span title={`已解出 = flag 台账里已确认条数达到题目声明 flag 数的题目（候选待确认不计）；共 ${ctfStats.total} 题`}><Flag size={13} />已解出 {ctfStats.solved}/{ctfStats.total} 题</span></> : <><span className="project-stats-sep">·</span><span title={`资产数只计二级子节点（根节点 → 二级子节点 → 三级 URL）；已测干净 ${meta.assets_clean ?? 0} / ${meta.assets}`}><Globe2 size={13} />已测干净 {meta.assets_clean ?? 0}/{meta.assets} · {meta.assets_clean_pct ?? 0}%</span></>}</div>}
               <Button size="sm" variant="ghost" className="back-project" onClick={goHome}><ArrowLeft size={15} />首页</Button>
               <WindowControls className="-mr-5" />
             </div>

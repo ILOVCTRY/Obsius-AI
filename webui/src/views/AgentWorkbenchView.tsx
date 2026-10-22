@@ -348,6 +348,23 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
 
   useEffect(() => { reloadThreads(agentId) }, [thread?.status, agentId, reloadThreads])
 
+  // 会话列表 5s 轮询（2026-10-22，候选 flag 徽章）。
+  //
+  // **为什么不能只靠上面那条 effect**：它只在 `thread?.status` 变化时重拉，而
+  // 「有待确认的 flag」这件事**不改变任何线程状态**——worker 在后台提交候选
+  // （主控此刻 idle，`ctf_wake` 只唤醒主控说话，状态 idle→running→idle 会变，
+  // 但**人工确认/否决**之后状态纹丝不动）。只靠它，徽章在「确认完了」之后会
+  // 一直挂着，比不显示更糟（人以为还有事没处理）。
+  //
+  // **为什么不挂事件 bump**：事件流在流式期约 2.5 次/秒，挂上去会把线程列表
+  // 全量请求放大到同频（顶栏统计踩过同一个坑，见 memory/MEMORY.md）。5s 足够
+  // ——徽章是「有空去处理」的提示，不要求秒级。
+  useEffect(() => {
+    if (!agentId) return
+    const t = setInterval(() => reloadThreads(agentId), 5000)
+    return () => clearInterval(t)
+  }, [agentId, reloadThreads])
+
   // 候选 flag 确认卡（ctf-flag-wake，2026-10-20）：子代理提交候选 flag 时后端会
   // 唤醒 CTF 解题主控说一段话（`core/chat/ctf_wake.py`），本卡贴 composer 上方，
   // 让人类一键复制 flag、一键确认（accepted）或标记为错误（rejected）。
@@ -374,10 +391,13 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
         await api.decideChallengeFlag(challengeId, flag.id, { verdict, reason })
         refreshCandidates()
         reloadRef.current?.()
+        // 立刻刷新会话列表徽章（2026-10-22）：确认/否决**不会改变线程状态**，
+        // 靠 5s 轮询要多等一拍，观感是「我点了确认但黄点还在」。
+        reloadThreads(agentId)
       } finally {
         setDecideFlagBusy(false)
       }
-    }, [challengeId, refreshCandidates])
+    }, [challengeId, refreshCandidates, reloadThreads, agentId])
 
   useEffect(() => {
     if ((panel !== "skills" && slash?.mode !== "skills") || skills.length) return
@@ -807,6 +827,15 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
                 {t.todo.filter((x) => x.status === "completed").length}/{t.todo.length} 待办
               </span>
             </span>
+            {/* 候选 flag 徽章（2026-10-22）：台账里有待人工确认的 flag → 黄色点
+                提示「这个会话有事等你裁决」。计数随 threads 列表轮询刷新；点进
+                会话后由 composer 上方的候选卡完成确认/否决。 */}
+            {!!t.pending_flags && (
+              <span className="wb-thread-flag" title={`有 ${t.pending_flags} 条候选 flag 待人工确认`}>
+                <span className="wb-dot is-pending" />
+                {t.pending_flags}
+              </span>
+            )}
             <button className="wb-thread-del" title="删除线程"
               onClick={(ev) => { ev.stopPropagation(); void removeThread(t.id) }}>
               <Trash2 size={12} />

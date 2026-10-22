@@ -297,6 +297,18 @@ export interface ProjectDetail extends ProjectMeta {
   capability: HostCapability
 }
 
+/** 顶栏 CTF 题目进度聚合（2026-10-22）：`solved` 与 `total` 同出
+ *  `GET /api/projects/{pid}/challenges` 的**同一份清单**——分子分母必须同源同 scope，
+ *  否则「已解出 2/3」会因两次请求落在不同时刻而自相矛盾。
+ *  `solved` 直接用后端的 `ChallengeSummary.solved`（由 flag 台账派生、候选不计），
+ *  **不在前端重新推导**——黑板 `ChallengeStateBadge` 用的就是它，两边口径必须一致。 */
+export interface CtfProgressStats {
+  /** 题目总数（CTF 轨；其他轨该清单为空，顶栏不显示这项） */
+  total: number
+  /** 其中已解出的题目数 */
+  solved: number
+}
+
 export interface BBEvent {
   id: number
   project_id: string
@@ -2384,6 +2396,15 @@ export interface ChatThread {
   challenge_asset_id?: string
   /** 联网搜索开关（v43，web-search-toggle，2026-10-19）：主控开 = spawn 子代理默认继承 */
   web_search?: boolean
+  /**
+   * 待人工确认的候选 flag 条数（2026-10-22）。
+   *
+   * 由列表接口 `GET /api/projects/{pid}/chat/threads` 按该线程绑定的题目
+   * 批量派生（`challenge_flag_quota` 口径的 `candidate`，**只算 verdict=pending**）。
+   * 0/缺失 = 无待确认事项。**不持久化**——它是台账的派生值，不是线程字段，
+   * 所以只在这条列表响应里出现，单独 `GET /chat/threads/{id}` 不带。
+   */
+  pending_flags?: number
   created_at: string
   updated_at: string
 }
