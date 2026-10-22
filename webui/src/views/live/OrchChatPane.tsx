@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef } from "react"
 import { MarkdownView } from "@/components/settings/MarkdownView"
-import { fmtDateTimeMin, utcTitle } from "@/lib/datetime"
+import { fmtDateTime, fmtDateTimeMin, utcTitle } from "@/lib/datetime"
 import { ActivityGroup } from "@/components/chat/ActivityGroup"
 import { ThinkingBlock } from "@/components/chat/ThinkingBlock"
 import { FileCardList } from "@/components/chat/FileCard"
@@ -116,11 +116,20 @@ function traceTargets(trace: ChatTrace[]): FileTarget[] {
 }
 
 // 人类消息行（2026-10-06 去气泡）：平铺 `❯ <text>`，对齐工作台 HumanNote。
+// 发送时刻（2026-10-21）：工作台 HumanNote 已加，这里必须同步——两处是同一类行，
+// 只改一处会让「对齐 HumanNote」这句注释变成假的。走 fmtDateTime 而非 new Date：
+// 事件 created_at 是 naive UTC，裸 new Date 按本地解析会差 8 小时。
 function HumanRow({ ev }: { ev: BBEvent }) {
+  const at = ev.created_at ? fmtDateTime(ev.created_at) : ""
   return (
     <div className="py-1 text-[13px] leading-relaxed" title={utcTitle(ev.created_at)}>
       <span className="mr-1.5 select-none font-mono text-primary">❯</span>
       <span className="whitespace-pre-wrap break-words text-foreground">{textOf(ev)}</span>
+      {at && (
+        <span className="ml-2 shrink-0 select-none font-mono text-[10px] text-muted-foreground/70">
+          {at}
+        </span>
+      )}
     </div>
   )
 }

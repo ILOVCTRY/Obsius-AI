@@ -247,7 +247,13 @@ export function ArtexWorkbenchView({ pid, meta }: { pid: string; meta: ProjectDe
       pending: counts.pending || 0,
       active: (counts.claimed || 0) + (counts.running || 0),
       done,
-      failed: (counts.failed || 0) + (counts.blocked || 0),
+      // exhausted **必须算进失败**（artex-kpi-scope，2026-10-21）：它是「试过但
+      // 没做完」，对用户就是「这条方向没拿到结果」。此前只算 failed+blocked，
+      // 实测 5 条 Intent 全是未成功（3 exhausted + 2 failed），界面却显示
+      // 「失败/阻塞 2」——把 3 条耗尽静默藏掉了，人以为还有 3 条在正常跑。
+      // `STATUS_META` 里本来就定义了 exhausted，这里只是没接上。
+      failed: (counts.failed || 0) + (counts.blocked || 0) + (counts.exhausted || 0),
+      exhausted: counts.exhausted || 0,
       paused: counts.paused || 0,
       percent: total > 0 ? Math.round((done / total) * 100) : 0,
     }
@@ -409,7 +415,8 @@ export function ArtexWorkbenchView({ pid, meta }: { pid: string; meta: ProjectDe
               <Kpi label="总 Intent" value={kpis.total} hint={`完成 ${kpis.percent}%`} />
               <Kpi label="待执行" value={kpis.pending} tone="text-slate-300" />
               <Kpi label="执行中" value={kpis.active} tone="text-amber-300" pulse={kpis.active > 0} />
-              <Kpi label="失败/阻塞" value={kpis.failed} tone={kpis.failed > 0 ? "text-red-300" : undefined} />
+              <Kpi label="未成功" value={kpis.failed} tone={kpis.failed > 0 ? "text-red-300" : undefined}
+                hint={kpis.exhausted > 0 ? `含耗尽 ${kpis.exhausted}` : undefined} />
               <Kpi label="Fact / Finding" value={`${facts} / ${findings}`} tone="text-cyan-300" />
             </div>
 

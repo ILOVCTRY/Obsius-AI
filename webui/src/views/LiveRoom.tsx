@@ -1414,7 +1414,7 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
           类型筛选 chips 迁此；复用同一 events 窗口 + renderStream（busy 行不传），
           加载更早/行展开/审批按钮与主区共享状态 */}
       {auditOpen && (
-        <div className="absolute bottom-0 right-0 top-9 z-30 flex w-[min(720px,92%)] flex-col border-l bg-background shadow-2xl">
+        <div role="dialog" aria-modal="true" className="absolute bottom-0 right-0 top-9 z-30 flex w-[min(720px,92%)] flex-col border-l bg-popover shadow-2xl">
           <div className="flex h-9 shrink-0 items-center gap-2 border-b px-3">
             <span className="shrink-0 text-xs font-medium">❋ 审计流</span>
             <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground">

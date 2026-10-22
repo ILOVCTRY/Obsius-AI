@@ -113,6 +113,7 @@ const STATUS_TONE: Record<string, string> = {
   completed: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300",
   closed: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300",
   verified: "border-rose-500/40 bg-rose-500/10 text-rose-300",
+  unverified: "border-rose-500/30 bg-rose-500/[0.06] text-rose-300/80",
   failed: "border-red-500/40 bg-red-500/10 text-red-300",
   cancelled: "border-slate-500/40 bg-slate-500/10 text-slate-400",
   exhausted: "border-yellow-500/40 bg-yellow-500/10 text-yellow-300",
@@ -120,11 +121,45 @@ const STATUS_TONE: Record<string, string> = {
   blocked: "border-orange-500/40 bg-orange-500/10 text-orange-300",
 }
 
+// 状态文案**按节点类型分叉**（artex-status-label，2026-10-21）。
+//
+// 同一个 `open` 在不同 kind 上意思完全不同：goal 的 open = 「这个目标还没达成」，
+// hint 的 open = 「这条提示还没用上」，fact/finding 的 open = 「还没被确认」。
+// 一律渲染成「待处理」会让人以为它们都在排队等调度——实测截图里 15 个 hint
+// 全显示「待处理」，而它们根本不是待办事项，只是记录下来的方向依据。
+//
+// 只给**确有歧义**的 kind 单独建表；其余沿用通用表（避免每个 kind 抄一份）。
+const STATUS_LABEL_BY_KIND: Partial<Record<Role, Record<string, string>>> = {
+  goal: {
+    open: "未达成", met: "已达成", pending: "待登记",
+    blocked: "受阻", cancelled: "已放弃",
+  },
+  hint: {
+    open: "未采用", closed: "已采用", completed: "已采用",
+  },
+  fact: {
+    open: "待确认", closed: "已确认", completed: "已确认",
+    exhausted: "未采信", failed: "未采信",
+  },
+  finding: {
+    open: "待确认", unverified: "待确认", verified: "已确认",
+    closed: "已确认", completed: "已确认",
+  },
+}
+
 const STATUS_LABEL: Record<string, string> = {
   open: "待处理", pending: "待调度", claimed: "已领取", running: "执行中",
   paused: "已暂停", completed: "已完成", closed: "已收尾", verified: "已确认",
+  unverified: "未核实",
   failed: "失败", cancelled: "已取消", exhausted: "预算耗尽", met: "已达成",
   blocked: "阻塞",
+}
+
+/** 按 kind 取状态文案：先查该 kind 的专用表，再退回通用表，最后原样显示。 */
+function statusLabel(kind: Role, status: string): string {
+  const own = STATUS_LABEL_BY_KIND[kind]
+  if (own && own[status]) return own[status]
+  return STATUS_LABEL[status] || status
 }
 
 // ---------- 布局 ----------
@@ -369,7 +404,7 @@ function ExploreNode({ data }: NodeProps<Node<NodeData>>) {
         {live && <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-amber-400" />}
         <span className={cn("ml-auto shrink-0 rounded border px-1 py-0 font-mono text-[9px]",
           STATUS_TONE[node.status] || "border-(--border) text-(--text-3)")}>
-          {STATUS_LABEL[node.status] || node.status}
+          {statusLabel(role, node.status)}
         </span>
       </div>
       <div className="mt-0.5 line-clamp-2 text-[11px] font-medium leading-snug text-(--text-1)">{title}</div>
@@ -429,7 +464,7 @@ function DetailDrawer({ node, byId, onPick, onClose }: {
       <DetailRow label="状态">
         <span className={cn("rounded border px-1 py-0 font-mono text-[10px]",
           STATUS_TONE[node.status] || "border-(--border) text-(--text-3)")}>
-          {STATUS_LABEL[node.status] || node.status}
+          {statusLabel(role, node.status)}
         </span>
       </DetailRow>
       <DetailRow label="置信度">{Math.round((node.confidence || 0) * 100)}%</DetailRow>

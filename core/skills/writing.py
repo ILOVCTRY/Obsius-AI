@@ -157,7 +157,19 @@ def _validate_rel(rel_path: str) -> Path:
 def _sources(packs_root: str | Path, cap: str) -> list[KbSource]:
     sources = load_kb_sources(packs_root, [cap])
     if not sources:
-        raise KbError(f"能力域 {cap} 无知识库（packs/kb/{cap}/ 不存在）")
+        # 文案必须给**合法值**与**高频错法**（2026-10-21 Nan 报 bug）：
+        # 只说「packs/kb/forensics-kb/ 不存在」时模型只能猜（试 forensics_kb？），
+        # 而真实原因是它照抄了 kb_search 的「源」字段（KbSource.id = `<域>-kb`）。
+        # 报错点名这条，模型才能一次改对。
+        from core.skills.taxonomy import KB_DIRECTIONS
+        legal = "、".join(KB_DIRECTIONS)
+        hint = ""
+        if cap.endswith("-kb"):
+            hint = (f" 你传的 {cap!r} 是**内部源标识**（KbSource.id），不是目录名；"
+                    f"应改为 {cap[:-3]!r}。")
+        raise KbError(
+            f"能力域 {cap!r} 不存在（packs/kb/{cap}/ 未找到）。{hint}"
+            f"合法 cap 取 path 的第一段：{legal}。")
     return sources
 
 

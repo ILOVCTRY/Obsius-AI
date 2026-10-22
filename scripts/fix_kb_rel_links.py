@@ -8,9 +8,12 @@
 1. 只修「新树断、基线通」的链接（基线参照 ../kb-baseline worktree @ 0e739be）；
    基线就断的（上游死链等 152 处）一律不碰。
 2. 候选=kb 树内同名文件（排除 skills/ 内部副本与源文件自身目录）；
-   选择顺序：同方向 > 非快照（排除 赛事专题/题目知识/）> 唯一。
+   选择顺序：同方向 > 唯一。
 3. 不唯一则跳过并报告，绝不猜。
 4. .history/ 与 skills/*/references/ 副本不在本轮范围。
+
+注：2026-10-21 英文快照消化后 `赛事专题/题目知识/` 已删除，原先「非快照优先」
+的降级项（快照原件与收编版同名时优先选收编版）随之取消。
 """
 from __future__ import annotations
 
@@ -90,10 +93,6 @@ def main() -> int:
                         if c.relative_to(KB).parts[0] == sdir]
             if same_dir:
                 cands = same_dir
-            live = [c for c in cands
-                    if "题目知识" not in c.relative_to(KB).parts]
-            if live:
-                cands = live
         if len(cands) == 1:
             return cands[0]
         return None  # 二义/无候选：不猜

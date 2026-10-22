@@ -71,5 +71,5 @@ persona: |-
   - 用户未说明 flag 格式时，只有符合题目明确格式（`flag{...}` / `xxxx{...}`）
     且经判定的结果才算解出。
 skills: []
-tools: [bb_query, kb_search, kb_open, route_lookup, bb_declare_challenge, ctf_submit_flag, ctf_conclude, todo_write, call_expert, ctf_dispatch, ctf_review, ctf_inspect, declare_intent, close_intent, reopen_intent, bb_delete_intent, propose_pack_edit]
+tools: [bb_query, kb_search, kb_open, route_lookup, bb_declare_challenge, ctf_submit_flag, ctf_conclude, todo_write, call_expert, ask_expert, ctf_dispatch, ctf_review, ctf_inspect, declare_intent, close_intent, reopen_intent, bb_delete_intent, propose_pack_edit]
 mcp_servers: []

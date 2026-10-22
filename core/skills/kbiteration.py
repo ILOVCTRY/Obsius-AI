@@ -29,7 +29,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from core.skills import proposals, writing
+from core.skills import kspec, proposals, writing
 from core.skills.proposals import ProposalError
 
 log = logging.getLogger(__name__)
@@ -80,6 +80,15 @@ _MIN_ACTIONS_HARD = 25     # 步数（执行动作数）——任务较难的代
 # 「失败」这类可能是偶发（权限/网络）的信号。
 _MIN_KB_ZERO_HITS = 1
 
+# 派发轮次阈值（2026-10-21 Nan 定口径）：**轮 = 一次并发派发决策**，不是专家个数。
+# 「派了 3 轮以上」意味着主控已经换过 3 次方向/批次——说明前面的打法没打通，
+# 正是「要么文档缺、要么文档错」的典型现场。
+_MIN_DISPATCH_ROUNDS = 3
+
+# 耗时阈值（秒）：解题超过 30 分钟。与「派发轮次」互补——有些坑是**单个**方向
+# 深挖很久（轮次少但时间长），光看轮次会漏。
+_MIN_ELAPSED_S = 30 * 60
+
 # Web 漏洞类别线索（新 Web 漏洞触发沉淀）：命中发现标题/类别的子串
 _WEB_VULN_HINT = re.compile(
     r"sqli|sql\s*注入|注入|xss|csrf|ssrf|rce|命令执行|代码执行|文件上传|任意文件|"
@@ -89,14 +98,61 @@ _WEB_VULN_HINT = re.compile(
 )
 
 
+def count_dispatch_rounds(bb, thread_id: str, *, after_id: int = 0,
+                          since_iso: str | None = None) -> int:
+    """主控**派发轮次**（dispatch-rounds，2026-10-21 Nan 定口径）。
+
+    **一轮 = 一次并发派发决策**，不是「派了几个专家」。同一轮里并发派 5 个专家
+    仍然只算 1 轮——因为那是主控的**一次**决策，而「派了几轮」要衡量的是
+    「主控反复换方向试了多少次」。
+
+    落库形态决定了这个口径天然可算：主循环每一步只落**一条** assistant 消息，
+    同一步里所有 ``call_expert`` 都挂在这条消息的 ``tool_calls`` 数组里
+    （见 runtime `_loop_turn` 的 `append_message(..., tool_calls=[...])`）。
+    所以按消息条数计 = 按决策次数计，正好是需求要的语义。
+
+    统计范围只算**主控自己这条线程**（子专家的 `call_expert` 已被
+    `_is_spawned_subagent` 堵死，不会发生）。
+    """
+    tid = str(thread_id or "").strip()
+    if not tid:
+        return 0
+    try:
+        rows = bb.conn.execute(
+            "SELECT tool_calls, created_at FROM chat_messages"
+            " WHERE thread_id=? AND role='assistant' AND id>?"
+            " ORDER BY id", (tid, int(after_id or 0))).fetchall()
+    except Exception:  # noqa: BLE001 —— 读不到就当 0，别让信号层炸掉轮末
+        return 0
+    n = 0
+    for r in rows:
+        if since_iso and str(r["created_at"] or "") < since_iso:
+            continue
+        try:
+            calls = json.loads(r["tool_calls"] or "[]")
+        except (TypeError, ValueError):
+            continue
+        # 同一条消息里只要有 call_expert，就算**一轮**（不按个数累加）
+        if any(isinstance(c, dict) and c.get("name") == "call_expert"
+               for c in calls):
+            n += 1
+    return n
+
+
 def signals_of(bb, project_id: str, *, since_event_id: int = 0,
-               since_iso: str | None = None) -> dict:
+               since_iso: str | None = None,
+               thread_id: str = "", since_message_id: int = 0,
+               elapsed_s: float | None = None) -> dict:
     """汇总本轮信号（纯读，异常向外抛——由调用方 best-effort 包住）。
 
     **按轮次窗口汇总，不按会话过滤**：主控一轮会 spawn 子专家，子专家的事件/发现
     挂在子线程名下（session_id/author = chat-<子tid>），若按主控 session 过滤会漏掉
     子专家的失败与产出——故只按 ``since_event_id``（事件）与 ``since_iso``（发现时间）
     圈定本轮窗口。同项目并发线程的少量串入可接受（只影响是否触发的近似）。
+
+    ``thread_id`` / ``since_message_id`` / ``elapsed_s``（2026-10-21 新增）：
+    派发轮次与耗时**只在有线程上下文时才算**（``thread_id`` 为空 → 两个信号记 0，
+    规则自然不命中）。这样单测/脚本调用 `signals_of(bb, pid)` 的旧行为不变。
     """
     events = bb.recent_events(project_id, since_id=since_event_id, limit=500)
     fails: dict[str, int] = {}
@@ -155,6 +211,15 @@ def signals_of(bb, project_id: str, *, since_event_id: int = 0,
         "actions": actions,
         "new_findings": new_findings,
         "new_web_vulns": new_web_vulns,
+        # 派发轮次（2026-10-21）：主控「并发派发一次」= 一轮，与派了几个专家无关。
+        # 没有线程上下文时记 0 —— 让纯事件窗调用方（脚本/旧测试）行为不变。
+        "dispatch_rounds": (count_dispatch_rounds(
+            bb, thread_id, after_id=since_message_id, since_iso=since_iso)
+            if thread_id else 0),
+        # 耗时（秒）：由调用方用「本轮起点墙钟」算好传进来。这里不自己取时间——
+        # 信号层要可测（同一份信号喂不同用例），藏一个 `time.time()` 会让断言
+        # 只能靠 sleep。
+        "elapsed_s": float(elapsed_s or 0.0),
     }
 
 
@@ -180,6 +245,25 @@ def should_trigger(sig: dict) -> tuple[bool, str]:
 # 汇总型（失败总数/步数），人类看到的原因才最贴证据。
 
 TRIGGER_RULES: tuple[dict[str, Any], ...] = (
+    {
+        "key": "dispatch_rounds",
+        "label": "派发轮次偏多",
+        "detail": (f"主控派发 ≥ {_MIN_DISPATCH_ROUNDS} 轮"
+                   "（一轮 = 一次并发派发决策，同轮派几个专家都只算一轮）"
+                   "——反复换方向仍没打通，说明打法/文档有问题"),
+        "hit": lambda s: s.get("dispatch_rounds", 0) >= _MIN_DISPATCH_ROUNDS,
+        "reason": lambda s: (f"主控已派发 {s['dispatch_rounds']} 轮"
+                             "（反复换方向，打法或文档可能有问题）"),
+    },
+    {
+        "key": "elapsed",
+        "label": "耗时超过 30 分钟",
+        "detail": (f"本轮解题耗时 ≥ {_MIN_ELAPSED_S // 60} 分钟"
+                   "（久攻不下，通常是缺关键判据或手册有误）"),
+        "hit": lambda s: s.get("elapsed_s", 0) >= _MIN_ELAPSED_S,
+        "reason": lambda s: (f"解题耗时 {s['elapsed_s'] / 60:.0f} 分钟"
+                             f"（超过 {_MIN_ELAPSED_S // 60} 分钟，久攻不下）"),
+    },
     {
         "key": "repeat_failures",
         "label": "同一工具反复失败",
@@ -253,14 +337,22 @@ def rules_doc() -> dict:
                 "label": "轮末自动判定",
                 "detail": "主控每轮正常收尾时，按下方规则信号判定本轮是否值得沉淀；"
                           "命中才调一次轻量 LLM 生成提案。只看主控线程（其轮次涵盖"
-                          "本轮全部子专家工作），后台执行不阻塞会话。",
+                          "本轮全部子专家工作），后台执行不阻塞会话。"
+                          "**派发轮次口径**：一轮 = 主控的一次并发派发决策——"
+                          "同轮并发派 5 个专家仍只算 1 轮，因为要衡量的是「换了"
+                          "几次方向」，不是「用了几个专家」。",
             },
             {
                 "key": "agent_tool",
                 "label": "Agent 主动沉淀",
-                "detail": "主控与子专家可主动调用 propose_pack_edit 提提案，需满足四种"
+                "detail": "主控可主动调用 propose_pack_edit 提提案，需满足四种"
                           "情形之一：文档内容有误 / 文档缺失 / 手法已本轮验证有效 / "
-                          "产出新 Web 漏洞。同样受项目开关门禁。",
+                          "产出新 Web 漏洞。同样受项目开关门禁。"
+                          "**只有主控能提**（2026-10-21）：call_expert 派生的子代理"
+                          "会被执行层直接拒——它只看得到自己那一段，不知道别的方向"
+                          "试过什么、也不知道主控怎么收敛，提上来的常是「我这个方向"
+                          "该写进手册」而全局看并不值得。子代理的贡献路径是写进"
+                          "收尾摘要，由主控 ask_expert 追问后统一提。",
             },
             {
                 "key": "session_review",
@@ -272,8 +364,11 @@ def rules_doc() -> dict:
         ],
         "rules": trigger_rules(),
         "limits": {
-            "per_session_proposals": 3,
-            "note": "每会话最多 3 条 pending 提案，防凑数；LLM 单次最多产出 5 条。",
+            "per_session_proposals": 20,
+            "note": "每会话最多 20 条 pending 提案（2026-10-21 由 3 提到 20："
+                    "一道题往往能沉淀 5~10 条，3 条会逼模型挑最值的三条、其余"
+                    "经验直接丢；防凑数靠机械质检 + 人审，不靠数量上限）；"
+                    "LLM 单次最多产出 5 条。",
         },
         "landing": "所有提案一律落 pending，全部人工审批；批准前不改任何文件。",
     }
@@ -315,6 +410,11 @@ _ITER_SYSTEM = (
     "（skill 的 edit/create 须给 SKILL.md 全文，frontmatter name 必须等于技能名）。"
 )
 
+#: 写作规范段（与对话链 propose_pack_edit 共用同一份，见 core/skills/kspec.py）。
+#: **必须进 system prompt**：规范原文在 packs/kb 根目录，kb_search/kb_open/read_file
+#: 三条读路都到不了，让模型「自己去查」只会空搜。
+_ITER_SYSTEM = _ITER_SYSTEM + "\n" + kspec.spec_block()
+
 
 def _parse_json(text: str) -> dict | None:
     t = (text or "").strip()
@@ -332,14 +432,24 @@ def run_iteration(bb, project_id: str, *, packs_root: str | Path, llm,
                   session_id: str, author: str, thread_id: str,
                   capabilities: list[str] | None = None,
                   since_event_id: int = 0, since_iso: str | None = None,
+                  since_message_id: int = 0,
+                  elapsed_s: float | None = None,
                   signals: dict | None = None) -> dict:
     """执行一次迭代：算信号 → 命中则调 LLM 生成提案落 pending。**绝不抛**。
+
+    ``thread_id`` 在这里有两个用途，别混：
+    ① 审计归属（提案的 session/author）；
+    ② **派发轮次统计的查询键**（2026-10-21）——`dispatch_rounds` 只数这条线程
+       自己落的 assistant 消息。它恒为主控线程 id（`_maybe_kb_iteration` 只在
+       主控跑），所以「主控派了几轮」与「这条线程有几条派发消息」是同一件事。
 
     返回 {triggered, reason, signals, landed, rejected}（供测试/日志）。
     """
     try:
         sig = signals if signals is not None else signals_of(
-            bb, project_id, since_event_id=since_event_id, since_iso=since_iso)
+            bb, project_id, since_event_id=since_event_id, since_iso=since_iso,
+            thread_id=thread_id, since_message_id=since_message_id,
+            elapsed_s=elapsed_s)
         hit, reason = should_trigger(sig)
         if not hit:
             return {"triggered": False, "reason": "", "signals": sig,

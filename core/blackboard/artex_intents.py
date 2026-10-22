@@ -34,6 +34,23 @@ def _hydrate(row: dict) -> dict:
     return row
 
 
+def _sync_explore(bb, project_id: str, intent: dict | None) -> None:
+    """把 Intent 状态回写到探索图节点（失败不阻断调度）。
+
+    单独包一层是为了**延迟导入**：`artex_exploration` 顶层 import 了
+    `core.blackboard.store`，与本模块无循环依赖，但探索图属于「只读视图」，
+    调度层不该在导入期就依赖它；且老库里可能没有探索图表，同步失败必须静默
+    降级（图是展示层，不能因为画不出来就不干活）。
+    """
+    if not intent:
+        return
+    try:
+        from core.blackboard.artex_exploration import sync_intent_status
+        sync_intent_status(bb, project_id, intent)
+    except Exception:  # noqa: BLE001 —— 图同步失败绝不影响调度
+        log.exception("探索图状态同步异常 intent=%s", (intent or {}).get("id"))
+
+
 def create_intent(bb, project_id: str, objective: str, *, task_id: str = "",
                    expert: str = "", asset_ids=None, constraints=None,
                    depends_on=None, priority: int = 0, parent_id: str | None = None,
@@ -85,7 +102,11 @@ def claim_intent(bb, project_id: str, intent_id: str, worker: str) -> dict:
             raise ValueError("Intent 不存在或已被领取")
     bb.append_event(project_id, "artex.intent.claimed",
                     {"intent_id": intent_id, "worker": worker})
-    return get_intent(bb, project_id, intent_id) or {}
+    row = get_intent(bb, project_id, intent_id) or {}
+    # 探索图节点状态同步（artex-explore-status-sync，2026-10-21）：节点只在创建
+    # 那一刻取过 status（恒 pending），此后没人回写 → 图上「意图永远待调度」。
+    _sync_explore(bb, project_id, row)
+    return row
 
 
 def _dep_state(bb, project_id: str, intent: dict) -> tuple[bool, list[str], list[str]]:
@@ -381,6 +402,9 @@ def _block_downstream(bb, project_id: str, intent_id: str, *, reason: str) -> li
         bb.append_event(project_id, "artex.intent.blocked",
                         {"intent_id": bid, "reason": reason[:400],
                          "blocked_by": intent_id})
+        # 级联改状态同样要回写探索图节点（artex-explore-status-sync）：下游节点
+        # 若不同步，会永远停在创建时的 pending，图上看起来「还有一堆没派」。
+        _sync_explore(bb, project_id, bid)
     return blocked
 
 
@@ -420,6 +444,9 @@ def _unblock_downstream(bb, project_id: str, intent_id: str) -> list[str]:
     for rid in resumed:
         bb.append_event(project_id, "artex.intent.unblocked",
                         {"intent_id": rid, "unblocked_by": intent_id})
+        # 解冻同样回写（blocked → pending）：否则节点会停在 blocked，而调度层
+        # 已经把它放回队列，两边说法不一致。
+        _sync_explore(bb, project_id, rid)
     return resumed
 
 
@@ -668,7 +695,12 @@ def transition_intent(bb, project_id: str, intent_id: str, status: str, *,
     elif status == "completed":
         _unblock_downstream(bb, project_id, intent_id)
     aggregate_parent_status(bb, project_id, intent_id)
-    return get_intent(bb, project_id, intent_id) or {}
+    row = get_intent(bb, project_id, intent_id) or {}
+    # 探索图节点状态同步（artex-explore-status-sync，2026-10-21）：见 `_sync_explore`。
+    # **必须放在 aggregate_parent_status 之后**：父 Intent 的状态会被子任务聚合改写，
+    # 先同步父节点会写进一个马上过期的值。
+    _sync_explore(bb, project_id, row)
+    return row
 
 
 def task_graph(bb, project_id: str, task_id: str) -> dict:

@@ -20,8 +20,6 @@
      `[x](y)` 形态的 Lua/Python/正则/JSON 文本，误改即坏档；
    - 图片 `![alt](x.png)`（wikilink 不承载图片）；
    - 外链 / `mailto:` / 纯锚点；
-   - `*/题目知识/*` 上游快照原件（与上游 ctf-skills 仓库保持字节一致，
-     更新走 `scripts/import_kb.py --force`，改写会被冲掉）；
    - `.obsidian/` 与 `*/.history/`。
 4. 默认 dry-run 只出报告；`--apply` 才落盘。
 
@@ -37,7 +35,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 KB = ROOT / "packs" / "kb"
 
-# 上游快照原件目录名：与上游仓库字节一致，禁止改写
+# 上游快照原件目录名：与上游仓库字节一致，禁止改写。
+# 2026-10-21 英文快照消化后 `题目知识/` 已整体删除，此豁免不再有实际作用，
+# 保留常量是为兼容旧副本（重跑转换器时不误判）。
 _SKIP_SEGMENTS = {"题目知识"}
 # 判"像路径"的宽松规则：有扩展名（.utf8/.p 之类也命中，交给存在性校验兜底）
 _PATHISH = re.compile(r"\.[A-Za-z0-9]{1,8}$")

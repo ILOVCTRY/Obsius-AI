@@ -107,6 +107,14 @@ export function eventStyle(kind: string, payload?: Record<string, unknown>): Eve
   if (kind === "llm.compact")
     // G3 上下文摘要压缩（2026-09-19）：N 条旧历史压成摘要；展开看前后规模
     return { label: "🧹 上下文压缩", className: "text-muted-foreground", defaultOpen: false }
+  // 跨供应商兜底（provider-failover，2026-10-21）：某家重试 11 次仍失败 → 换下一家。
+  // 「换家」与「全链耗尽」都要显眼——它们是「刚才为什么等了这么久」的唯一解释。
+  if (kind === "llm.failover")
+    return { label: "🔀 换供应商", className: "text-(--status-approval)", defaultOpen: true }
+  if (kind === "llm.failover.exhausted")
+    return { label: "🚨 供应商全链耗尽", className: "text-(--status-error)", defaultOpen: true }
+  if (kind === "llm.provider_failed")
+    return { label: "⚠ 供应商调用失败", className: "text-(--viz-sev-medium)", defaultOpen: false }
   if (kind === "orch.compact")
     // 指挥对话历史手动压缩（/compact，2026-10-06）：旧 orch.chat 压成摘要落事件
     return { label: "🧹 上下文压缩", className: "text-muted-foreground", defaultOpen: false }
@@ -351,6 +359,35 @@ export function eventSummary(payload: Record<string, unknown>,
                               _roleNames?: Record<string, string>,
                               ctx?: SummaryCtx,
                               kind?: string): ReactNode {
+  // 跨供应商兜底（provider-failover，2026-10-21）
+  if (kind === "llm.failover") {
+    return (
+      <span className="font-mono text-xs">
+        {String(payload.from || "?")} → {String(payload.to || "?")}
+        {payload.category ? ` · ${String(payload.category)}` : ""}
+      </span>
+    )
+  }
+  if (kind === "llm.failover.exhausted") {
+    const chain = Array.isArray(payload.chain) ? (payload.chain as string[]) : []
+    return (
+      <span className="font-mono text-xs text-(--status-error)">
+        试过 {String(payload.tried ?? chain.length)} 家全部失败
+        {chain.length ? `（${chain.join(" → ")}）` : ""}
+        {payload.category ? ` · ${String(payload.category)}` : ""}
+      </span>
+    )
+  }
+  if (kind === "llm.provider_failed") {
+    return (
+      <span className="font-mono text-xs">
+        {String(payload.provider || "?")} · {String(payload.model || "")}
+        {payload.category ? ` · ${String(payload.category)}` : ""}
+        {payload.status ? ` · HTTP ${String(payload.status)}` : ""}
+        {payload.next_provider ? ` → ${String(payload.next_provider)}` : ""}
+      </span>
+    )
+  }
   // 资产批量导入（cyberspace-mapping M1）：N 行 → 新建/合并/跳过/失败 单行摘要
   if (kind === "asset.imported") {
     const skipped = typeof payload.skipped === "number" && payload.skipped > 0

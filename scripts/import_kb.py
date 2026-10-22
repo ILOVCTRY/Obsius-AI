@@ -1,12 +1,11 @@
 """知识快照一次性导入（DESIGN.md §4.5）。
 
-把 Knowledge/ 下两套外部知识源原样融入 kb 树（快照不翻译、不进 registry、
-不就地修改；AI 只能经 kb_open 按需打开）：
+把 Knowledge/ 下外部知识源按新树类目融入 kb 树：
 
-- ctf-skills（MIT，Lukasz Jagiello）：按类别拆散进各方向 kb/<方向>/赛事专题/题目知识/
-  （2026-10-14 树状化重构后落点；此前为 refs/ctf-<x>），根 LICENSE 上收
-  packs/kb/licenses/（expert-pool M0，2026-09-21 树重组：能力包 kb 树已并入
-  packs/kb/<方向>/ 全局单根）。
+- ctf-skills（MIT，Lukasz Jagiello）：**已于 2026-10-21 停用导入**。原按类别拆散进
+  各方向 `kb/<方向>/赛事专题/题目知识/` 的 71 篇英文快照已按判据式规范全部融入各域
+  中文模块并删除，全库不再保留英文原文。CTF_MAP 保留为空壳以防 `--force` 重建该目录
+  把消化成果冲掉；若确需恢复英文原文，只能从备份手动放回，不再走本脚本。
 - src-strike（内部知识源，无 LICENSE，按项目主授权使用）：按新树类目重映射落
   web 方向（打法→实战打法/、资料→载荷与字典/行业视野/PoC与模板/、散篇→实践笔记/，
   见 STRIKE_TOP_MAP）；其中 4 篇平台规则的完整版覆盖 安全红线/平台规则/
@@ -31,19 +30,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # ctf-skills/<技能目录> -> (方向, 快照目录名)
-# 2026-10-14 树状化重构：快照原件一律落 kb/<方向>/赛事专题/题目知识/<snap>/ 保鲜
-# （收编合并版在 kb/<方向>/ 各知识模块，为迁移产物人工维护；--force 重建只动
-# 题目知识/ 下的快照原件，绝不碰收编版）
+# 2026-10-14 树状化重构时快照原件一律落 kb/<方向>/赛事专题/题目知识/<snap>/。
+# 2026-10-21 英文快照消化：CTF_MAP 清空——71 篇英文已全部融入各域中文模块并删除。
+# 保留空壳（而不是删掉整块逻辑）是为了让 `--force` 走到这里只打印「已停用」，
+# 绝不会重建 `题目知识/` 目录把消化成果冲掉。
 CTF_MAP: list[tuple[str, str, str]] = [
-    ("ctf-web", "web", "赛事专题/题目知识/ctf-web"),
-    ("ctf-pwn", "binary", "赛事专题/题目知识/ctf-pwn"),
-    ("ctf-reverse", "binary", "赛事专题/题目知识/ctf-reverse"),
-    ("ctf-malware", "binary", "赛事专题/题目知识/ctf-malware"),
-    ("ctf-crypto", "crypto", "赛事专题/题目知识/ctf-crypto"),
-    ("ctf-forensics", "forensics", "赛事专题/题目知识/ctf-forensics"),
-    ("ctf-osint", "forensics", "赛事专题/题目知识/ctf-osint"),
-    ("ctf-misc", "misc", "赛事专题/题目知识/ctf-misc"),
-    ("ctf-ai-ml", "misc", "赛事专题/题目知识/ctf-ai-ml"),
+    # ("ctf-web", "web", "赛事专题/题目知识/ctf-web"),
+    # ...（已停用，见 docstring）
+]
+
+# 唯一保留的 ctf-skills 落点：ctf-writeup 是收编版（非英文快照），继续生效。
+WRITEUP_MAP: list[tuple[str, str, str]] = [
     ("ctf-writeup", "misc", "赛事专题/WP撰写"),
 ]
 
@@ -293,10 +290,16 @@ def _copy_snapshot(src: Path, dst: Path, force: bool, stats: dict) -> None:
 
 
 def _find_ctf_root(knowledge: Path) -> Path | None:
-    """源仓库实际多嵌套一层 ctf-skills-main/。"""
+    """源仓库实际多嵌套一层 ctf-skills-main/。
+
+    识别凭据不再只看 `ctf-web`：2026-10-21 英文快照停用后，源里可能只剩
+    `ctf-writeup`（收编版）与根 `LICENSE`。任一标识在即视为合法源根。
+    """
     for cand in (knowledge / "ctf-skills-main" / "ctf-skills-main",
                  knowledge / "ctf-skills-main"):
-        if cand.is_dir() and (cand / "ctf-web").is_dir():
+        if cand.is_dir() and ((cand / "ctf-web").is_dir()
+                              or (cand / "ctf-writeup").is_dir()
+                              or (cand / "LICENSE").is_file()):
             return cand
     return None
 
@@ -313,10 +316,26 @@ def _find_strike_root(knowledge: Path, external_fallback: bool = True) -> Path |
 
 
 def _import_ctf(ctf_root: Path, packs: Path, force: bool, stats: dict) -> set[str]:
-    """导入 ctf-skills；返回实际落到内容的方向集合。"""
+    """导入 ctf-skills；返回实际落到内容的方向集合。
+
+    2026-10-21 起英文快照已全部消化并删除，CTF_MAP 为空 → 本函数只做两件事：
+    ① 打日志说明已停用；② 仍导入 ctf-writeup 收编版（它不是英文快照，继续生效）。
+    绝不在这里重建 `赛事专题/题目知识/`——那会把消化成果冲掉。
+    """
     caps: set[str] = set()
-    _log("[ctf-skills] 开始")
-    for src_name, cap, snap_name in CTF_MAP:
+    if not CTF_MAP:
+        _log("[ctf-skills] 英文快照导入已停用（2026-10-21 已消化进各域中文模块）")
+    else:  # pragma: no cover —— 仅人工恢复英文原文时才走到
+        _log("[ctf-skills] 开始（注意：CTF_MAP 非空，会重建题目知识目录）")
+        for src_name, cap, snap_name in CTF_MAP:
+            src = ctf_root / src_name
+            if not src.is_dir():
+                _log(f"  [警告] 源缺失，跳过: {src}")
+                continue
+            _copy_snapshot(src, packs / "kb" / cap / snap_name, force, stats)
+            caps.add(cap)
+    # ctf-writeup 是收编版（非英文快照），独立导入
+    for src_name, cap, snap_name in WRITEUP_MAP:
         src = ctf_root / src_name
         if not src.is_dir():
             _log(f"  [警告] 源缺失，跳过: {src}")

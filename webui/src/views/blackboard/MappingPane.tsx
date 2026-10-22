@@ -266,7 +266,7 @@ function SearchWorkspace({ pid }: { pid: string }) {
             历史{hist.length > 0 ? `（${hist.length}）` : ""}
           </Button>
           {histOpen && (
-            <div className="absolute right-0 top-8 z-20 w-96 rounded-md border bg-background shadow-md">
+            <div role="menu" className="absolute right-0 top-8 z-20 w-96 rounded-md border bg-popover shadow-md">
               <div className="max-h-80 overflow-auto">
                 {hist.length === 0 && (
                   <p className="px-3 py-4 text-center text-[11px] text-muted-foreground">

@@ -79,6 +79,7 @@ from core.llm.pseudo_toolcall import (PSEUDO_TC_FINAL_TEXT, PSEUDO_TC_MAX,
                                       strip_pseudo_tool_calls)
 from core.runtime.gateway import ExecutionGateway
 from core.runtime.recovery import EnvironmentUnavailable
+from core.skills import kspec
 from core.skills.experts import load_expert
 from core.skills.registry import SkillRegistry
 from core.skills.rules import build_rules_preamble, rating_profile_active
@@ -124,8 +125,15 @@ CONTROLLER_IDS = frozenset({ORCHESTRATOR_ID, AGGRESSIVE_CONTROLLER_ID,
 # （见 intent-tools-chat）：对话主控/子专家同样要按「声明假设→执行→收尾」走，
 # 否则对话产出的发现不落链路图（用户实测：任务跑完但在「黑板→发现→链路」看不到
 # 任何意图——对话链整条链路从未声明过意图）。
-# **propose_pack_edit 自 2026-10-14（kb-iteration）起开放给对话链**（主控 + 子专家）：
-# 经验沉淀提案正是对话链的产物，子专家跑任务有一手证据。详见 _ORCH_BASE_TOOLS。
+# **propose_pack_edit 自 2026-10-14（kb-iteration）起开放给对话链**；
+# **2026-10-21 收窄为「只有主控」**：子代理（call_expert 派生）不再持有。
+# 原因不是子代理没证据（它恰恰有一手证据），而是它只看得到自己那一段——
+# 不知道别的方向试过什么、也不知道主控怎么收敛，提上来的常是「我这个方向
+# 该写进手册」而全局看并不值得。提案权收归主控（它看得到全部子线程摘要），
+# 子代理的贡献路径是写进收尾摘要、由主控 ask_expert 追问后统一提。
+# 三处同口径：工具面（`_tool_specs`）、执行白名单（`_build_dispatcher`）、
+# 系统提示（`_system_prompt` 的经验沉淀段）——外加执行层身份硬闸
+# （`ToolDispatcher._is_spawned_subagent`）。详见 _ORCH_BASE_TOOLS。
 _EXPERT_EXCLUDED = {
     "task_plan", "task_step", "task_reconcile", "publish_task",
     "complete_task", "fail_task", "finish", "request_steps",
@@ -137,6 +145,27 @@ _EXPERT_EXCLUDED = {
 
 # 意图三件套（对话链也要，语义=规划产物与收尾纪律，不依赖任务队列）
 _INTENT_TOOLS = ("declare_intent", "close_intent", "reopen_intent", "bb_delete_intent")
+
+# 续跑注入（ask-expert，2026-10-21 Nan 要求）：主控可以给**已派发过**的专家
+# 线程补一句话让它接着跑。
+#
+# 为什么需要它：`call_expert` 是「一次性派发」——专家跑完就 idle，主控只剩
+# 它那句摘要。摘要不够用时主控只有两条烂路：① 重新 `call_expert` 派一个新
+# 专家（丢掉了原来那一轮的上下文，等于从头再试一遍）；② 自己上手干（主控
+# 不实操是红线）。有了本工具，主控可以回到**原来那条线程**追问细节，或让
+# 那个已经摸熟了现场的专家去准备变更提案。
+#
+# 与 `call_expert` 的边界（两者不可互相替代）：
+# - `call_expert`：新任务、新上下文、新线程；产出是摘要。
+# - `ask_expert`：同一任务、沿用原上下文；产出是追问答案或后续动作。
+ASK_EXPERT_TOOL = "ask_expert"
+
+# 走 `_dispatch_inner` **早拦截分支**的工具：它们的 schema 由
+# `_orch_tool_specs` 单独挂（带动态枚举/说明），**不能**再经
+# `_specs_by_names` 重复下发，执行白名单也要把它们剔掉（否则同一工具
+# 会有两条注册路径）。新增早拦截工具必须同时加进这里——
+# `_build_dispatcher` 与 `_tool_specs` 三处过滤共用本常量，避免漏改。
+_EARLY_ROUTE_TOOLS = ("todo_write", "call_expert", ASK_EXPERT_TOOL)
 
 # 激进主控子代理（probe_mode）的工具面剔除集（2026-10-17，用户要求：
 # 「不需要声明意图、不需要查询黑板」）。语义 = 单点快速子任务——为一次
@@ -246,7 +275,7 @@ _CTF_FLAG_EXEC_TOOLS = ("ctf_ammo",)
 _CTF_CONTROLLER_TOOLS = (
     "bb_query", "kb_search", "kb_open", "route_lookup",
     "bb_declare_challenge", "ctf_submit_flag", "ctf_conclude",
-    "todo_write", "call_expert",
+    "todo_write", "call_expert", ASK_EXPERT_TOOL,
     "ctf_dispatch", "ctf_review", "ctf_inspect",
     *_INTENT_TOOLS,
 )
@@ -338,7 +367,7 @@ _CTF_INSPECT_TOOL_SPEC = {
 
 _PROBE_EXCLUDED_TOOLS = ("bb_query", *_NO_SKILL_OR_INTENT_TOOLS)
 
-_ORCH_BASE_TOOLS = ("todo_write", "call_expert", "skill_open",
+_ORCH_BASE_TOOLS = ("todo_write", "call_expert", ASK_EXPERT_TOOL, "skill_open",
                     "kb_search", "kb_open", "bb_query",
                     "bb_delete_asset", "bb_delete_assets", "bb_merge_assets",
                     "bb_declare_challenge",
@@ -409,7 +438,7 @@ _ARTEX_CONTROLLER_DENIED = frozenset({
     # 一个专家会绕过 Planner，于是目标、探索图、任务范围全空，那条 Intent
     # 的 task_id 还是线程 id 拼出来的假任务。todo_write 同理：待办由
     # artex_plan 的 todos 参数承载，单独维护会与规划脱节。
-    "todo_write", "call_expert",
+    "todo_write", "call_expert", ASK_EXPERT_TOOL,
     # 意图链：主控是调度者，它自己的假设由 Planner 拆成 Intent，
     # 给它这套工具等于允许它绕过 Planner 自建链路。
     "declare_intent", "close_intent", "reopen_intent", "bb_delete_intent",
@@ -494,7 +523,7 @@ def controller_tool_face(agent_id: str,
         # （只有 ARTEX 主控才撤），且它的 base 走 `_CTF_CORE_TOOLS`；
         # 同时 `is_aggressive` 命中 `_PROBE_EXCLUDED_TOOLS` 剔除面。
         face = [*_CTF_CORE_TOOLS, "bb_declare_challenge",
-                "todo_write", "call_expert"]
+                "todo_write", "call_expert", ASK_EXPERT_TOOL]
         face = [t for t in face if t not in _PROBE_EXCLUDED_TOOLS]
         return list(dict.fromkeys(face))
     if aid == ORCHESTRATOR_ID:
@@ -613,7 +642,7 @@ def controller_tool_candidates(agent_id: str) -> list[str] | None:
         names += ["ctf_dispatch", "ctf_review", "ctf_inspect"]
     # todo_write / call_expert 走 `_dispatch` 早拦截分支，任何控制器都可能
     # 被勾选启用（ARTEX 主控由结构性禁令扣掉，见下）。
-    names += ["todo_write", "call_expert"]
+    names += ["todo_write", "call_expert", ASK_EXPERT_TOOL]
     # MCP server 按**通配**给（controller-mcp-face）：逐个工具列会把 200+ 项
     # 塞进设置页（rea 一个 server 就 215 个工具、549K 字符 schema），而勾选
     # 粒度本来就该是「这个主控要不要用这个 server」。见 `mcp_allowed_by_face`。
@@ -1588,9 +1617,19 @@ class ChatTurn:
         self.web_search = bool(self.thread.get("web_search"))
         # worker.yaml 可声明 intent_free；该配置与激进主控派生的 probe_mode
         # 语义一致，允许独立 worker 不声明意图。
+        #
+        # 判据必须按字面量解析，**不能用 ``bool()``**：专家 yaml 走的是自研的
+        # 极简解析（`core.skills.experts._parse_expert`），它只把整数/列表/null
+        # 转成 Python 类型，布尔值原样留着**字符串**——盘上 `intent_free: true`
+        # 读出来是 `"true"`。目前 serializer 只落 true 所以 `bool()` 碰巧没错，
+        # 但那是巧合而非契约：谁手写一次 `intent_free: false` 想关掉它，
+        # `bool("false") is True` 会静默保持开启（免意图闸是个「放宽」型开关，
+        # 反了就是绕过校验）。按字面量白名单取值最稳。
         try:
             worker_cfg = load_expert(self.packs_root, self.agent_id, self.track)
-            self.intent_free = bool(worker_cfg.get("intent_free", False))
+            self.intent_free = str(
+                worker_cfg.get("intent_free", "") or "").strip().lower() in {
+                    "true", "yes", "1", "on"}
         except Exception:  # noqa: BLE001
             self.intent_free = False
         # 控制器类智能体（chat-orchestrator + 激进主控）：拿主控工具面、
@@ -2004,6 +2043,16 @@ class ChatTurn:
             lines.append(
                 "- 后续本线程的 declare_intent / bb_add_finding **不必再填**"
                 " target_asset_id，会自动归到这道题下；附件也无需单独登记。")
+            # 资产登记边界（challenge-asset 兜底，2026-10-21 实测事故）：子专家把
+            # zip 解压后把「zip 内文件」当题目附件登记（bb_add_asset value=<sha256>，
+            # parent_id 不传）→ 根级 binary → 前端「CTF 轨根资产即题目」渲染成
+            # 「又声明了一道题」（用户实测 ctf-2：3 条孤儿 binary）。后端已兜底 +
+            # 拒绝，这里把口径讲清，省一轮无用调用。
+            lines.append(
+                "- **只有题目附件本体才登记 binary**（bb_add_asset type=binary "
+                "value=<附件真实 sha256>，不用传 parent_id，会自动挂到本题下）；"
+                "unpack_attachment 解压出来的 zip 内文件**不要登记**——路径已在解压"
+                "回执里，直接 read_file 用，结论走 bb_add_finding。")
             # 台账现状 + 冲突主动上报（ctf-conflict-push，2026-10-20，P1-1）。
             #
             # 要解决的问题（用户实测）：两个 agent 都能通过 bb_query 看到台账
@@ -2015,6 +2064,21 @@ class ChatTurn:
             # 所以把异常变成**每轮注入的主动推送**：注入在 system 里（不污染
             # 消息历史），每轮重投影，状态一出现就被看到。
             lines.extend(self._ledger_context(cid))
+            # 交付纪律（deliver，2026-10-21 Nan 要求）：**只对子 agent 注入**——
+            # 主控没有 deliver 工具（它的交付对象是人类，直接回话即可），给它写
+            # 这段等于教它调一个不存在的工具（本仓典型事故：提示词与工具面不同口径）。
+            #
+            # 为什么要写进 system 而不只靠工具描述：模型对「任务完成」有很强的
+            # 收尾惯性——一交东西就停。工具描述只在它翻到那个工具时才起作用，
+            # 而「现在要不要收尾」的判断发生在它准备写最后那段话的时候。
+            if not self.is_orchestrator:
+                lines.append(
+                    "- **交付 ≠ 收尾**（`deliver`）：手上有能站住的东西（拿到 flag、"
+                    "定位到密码/密钥位置、排除了几条死路）但还想继续挖时，**先 deliver "
+                    "交出去**——主控那边 call_expert 仍显示运行中，你可以接着做，"
+                    "不必攒到最后。**也别因为交过就停**：只要还能拿到 flag，或手里有与"
+                    "flag 强相关的线索（能定位到关键凭据、有可回环的变换链），就继续；"
+                    "确实已无更大成果，再用一段文本收尾。")
         else:
             lines.append(
                 "- 本线程**尚未登记题目**。题目描述与附件都由用户在输入框给出，"
@@ -2634,6 +2698,36 @@ class ChatTurn:
             pass
         return "**未知形态**（认不出，别猜——派 worker 看）"
 
+    def _accepted_flag_lines(self, cid: str, got: int, quota: int) -> list[str]:
+        """已确认 flag 清单（原文 + 题面提示），用于防重复提交（flag-hint，2026-10-21）。
+
+        与 `_solved_notice`（一次性通知）互补：这条是**每轮都注入**的常规事实，
+        因为 worker 可能在通知投递之后才起轮、或压根没读那条通知。
+        """
+        try:
+            from core.blackboard.challenge_flags import accepted_flag_briefs
+            briefs = accepted_flag_briefs(self.bb, self.project_id, cid)
+        except Exception:  # noqa: BLE001
+            log.exception("读取已确认 flag 清单失败 challenge=%s", cid)
+            return []
+        if not briefs:
+            return []
+        lines = [f"- **本题已确认 {got}/{quota} 条 flag**（下面这些已经拿到，"
+                 "**不要再提交同一串**，也不用再往它们各自的方向挖）："]
+        for b in briefs[:12]:
+            hint = str(b.get("hint") or "").strip()
+            flag = str(b.get("flag") or "").strip()
+            if hint:
+                lines.append(f"  - #{b.get('index')} `{flag}` —— 题面提示：{hint}")
+            else:
+                lines.append(f"  - #{b.get('index')} `{flag}`（题面未登记提示）")
+        if len(briefs) > 12:
+            lines.append(f"  - …（另有 {len(briefs) - 12} 条，用 ctf_review 看全量）")
+        lines.append(
+            f"- 还差 **{max(quota - got, 0)} 条**才解出。剩下的按题面未覆盖的提示去找；"
+            "若你手上这条**不在上面**且方向也不重叠，正常提交即可。")
+        return lines
+
     def _ledger_context(self, cid: str) -> list[str]:
         """台账现状 + **冲突主动上报**（ctf-conflict-push，2026-10-20，P1-1）。
 
@@ -2646,6 +2740,12 @@ class ChatTurn:
         - `over_quota`：确认数超过配额 → 多半是用户主动下调了 `flag_count`。
           **不当错误**，只提示「按新的 M 算」。
         - `concluded`：主控已收尾 → 别再派工，有异议先撤销收尾。
+
+        **唯一允许的常规进度**（flag-hint，2026-10-21）：多 flag 题已确认 ≥1 条时，
+        列出「已确认哪几条（原文 + 题面提示）」。这不是为了汇报进度，是**防重复
+        提交**的必需事实——worker 各自在不同线程里干活，看不到别人的台账；不给它
+        这份清单，它会把自己已经交过的那条再交一遍，或者继续啃已被覆盖的方向。
+        单 flag 题不列（确认即解出，已由硬闸拦，列了纯属噪音）。
         """
         try:
             from core.blackboard.challenge_flags import challenge_state
@@ -2656,6 +2756,8 @@ class ChatTurn:
         quota = int(st.get("quota") or 0)
         got = int(st.get("accepted") or 0)
         cand = int(st.get("candidate") or 0)
+        if quota > 1 and got:
+            out.extend(self._accepted_flag_lines(cid, got, quota))
         if st.get("conflict"):
             keys = [str((c or {}).get("flag") or "") for c in (st.get("conflict") or [])]
             keys = [k for k in keys if k]
@@ -2898,8 +3000,7 @@ class ChatTurn:
                 # ——此前控制器完全不读 yaml，设置页勾选对它们毫无影响。
                 face = self._controller_tool_face()
                 base = tuple(face or ())
-                allowed = [t for t in base if t != "todo_write"
-                           and t != "call_expert"]
+                allowed = [t for t in base if t not in _EARLY_ROUTE_TOOLS]
             else:
                 names = expert_tool_names(self.packs_root, self.agent_id,
                                           self.track)
@@ -2911,8 +3012,7 @@ class ChatTurn:
                              else [s["name"] for s in AGENT_TOOLS
                                    if s["name"] not in _EXPERT_EXCLUDED])
                 allowed = names
-            allowed = [t for t in allowed
-                       if t not in ("todo_write", "call_expert")]
+            allowed = [t for t in allowed if t not in _EARLY_ROUTE_TOOLS]
             # 探针子任务（激进主控子代理，probe_mode）：执行层与 _tool_specs
             # 同口径剔除 bb_query 与意图三件套——双边同步防止「schema 有、
             # 执行拒」或「执行放行、schema 无」的撕裂。
@@ -2928,7 +3028,13 @@ class ChatTurn:
             # 「看开关」）。只保留上面的「关就剔」会让它永远消失——开关开了也
             # 拿不到，`test_chat_kb_iteration_flag_gates_proposal_toolface` 实测
             # 直接挂。故按 web_search 同款：开就补，与 `_tool_specs` 双边同步。
-            if self._kb_iteration_on():
+            #
+            # **子代理不追加（2026-10-21 Nan：只有主控能提提案）**：这个「开就补」
+            # 是绕过专家 yaml 的硬追加——不排除子代理的话，开关一开所有子专家
+            # 都拿到提案工具，与「提案权收归主控」直接矛盾。执行层另有身份硬闸
+            # （`ToolDispatcher._is_spawned_subagent`）兜底，但工具面必须一起收口：
+            # 模型看得见就会调，调了被拒 = 白烧一步。
+            if self._kb_iteration_on() and not self._is_spawned_subagent:
                 if "propose_pack_edit" not in allowed:
                     allowed = [*allowed, "propose_pack_edit"]
             else:
@@ -2939,6 +3045,11 @@ class ChatTurn:
             # 这是会话级用户决定，不是专家能力。
             if self._web_search_on() and "web_search" not in allowed:
                 allowed = [*allowed, "web_search"]
+            # 交付工具（deliver，2026-10-21）：与 `_tool_specs` **双边同步**——
+            # schema 有、执行层不在白名单 = 「看得见、一调就被越界拒」，
+            # 正是本仓最典型的撕裂形态。只给子 agent（理由同 _tool_specs）。
+            if not self.is_orchestrator and "deliver" not in allowed:
+                allowed = [*allowed, "deliver"]
             # Worker 间过程级信息交换（v46）：ARTEX Worker 放行 trace 查询三件套。
             if self.artex_intent_id and not self.is_orchestrator:
                 for tname in _WORKER_TRACE_TOOLS:
@@ -3030,7 +3141,7 @@ class ChatTurn:
             # 与 `_build_dispatcher` **双边同步**：控制器工具面 = yaml `tools`
             # 优先，未设置才回落代码默认（见 `_controller_tool_face`）。
             face = self._controller_tool_face() or []
-            names = {t for t in face if t not in ("todo_write", "call_expert")}
+            names = {t for t in face if t not in _EARLY_ROUTE_TOOLS}
             specs = _specs_by_names(names)
             specs = [*self._orch_tool_specs(), *specs]
         else:
@@ -3080,7 +3191,9 @@ class ChatTurn:
         # 开 = **动态追加**（controller-tool-select，与 `_build_dispatcher` 双边
         # 同步）：控制器改勾选面裁决后它不在默认面里，只留「关就剔」会让开关
         # 开了也拿不到。按 web_search 同款补上。
-        if self._kb_iteration_on():
+        # **子代理不追加（2026-10-21）**：与 `_build_dispatcher` 同口径——
+        # 提案权只归主控，子代理既拿不到 schema 也过不了执行闸。
+        if self._kb_iteration_on() and not self._is_spawned_subagent:
             if not any(s.get("name") == "propose_pack_edit" for s in specs):
                 specs = [*specs, *_specs_by_names({"propose_pack_edit"})]
         else:
@@ -3120,6 +3233,15 @@ class ChatTurn:
             missing = [t for t in want if t not in have]
             if missing:
                 specs = [*specs, *_specs_by_names(set(missing))]
+        # 交付工具（deliver，2026-10-21 Nan 要求）：**只给子 agent**，硬追加、不写
+        # 进专家 yaml——这是「会话语义」而不是专家能力，100+ 个 yaml 逐个加既容易
+        # 漏，也会让能力清单变成噪声。
+        #
+        # 主控不追加：主控的交付对象是人类，直接回一段话即可；而且它的工具面本来
+        # 就紧（ARTEX 主控 slim 面有 8000 字符上限），多一个只会挤掉真工具。
+        if not self.is_orchestrator and not any(
+                s.get("name") == "deliver" for s in specs):
+            specs = [*specs, *_specs_by_names({"deliver"})]
         # bb_query 的 what 面按轨裁剪（track-query-split，2026-10-13）：
         # 渗透/逆向互用不到的面不下发——与 AgentSession 同口径（tool_registry 家族表）。
         # ARTEX 主控再收一档（artex-controller-slim，2026-10-20）：它只查
@@ -3240,6 +3362,44 @@ class ChatTurn:
                         },
                     },
                     "required": ["expert", "task"],
+                },
+            })
+        # 续跑注入（ask-expert，2026-10-21 Nan 要求）：勾了就挂。
+        # **串行**工具（不进 `_parallel_expert_dispatch`）：它写的是已有线程的
+        # 上下文，同轮并发两条 ask 打同一条线程会互相踩历史。
+        if ASK_EXPERT_TOOL in face:
+            specs.append({
+                "name": ASK_EXPERT_TOOL,
+                "description":
+                    "给**已派发过**的专家线程补一条消息，让它带着原上下文接着跑，"
+                    "返回它的新答复。\n"
+                    "用途（这两件事 call_expert 做不到）：\n"
+                    "① **追问细节**：专家摘要太粗，问它「你刚才是怎么判定"
+                    "那个入口无效的」「把 payload 构造再写具体点」——它还记得"
+                    "自己跑过什么，不必从头再试。\n"
+                    "② **问清可沉淀的内容**：问它「这轮有什么判据/坑值得写进手册」"
+                    "「哪份手册哪一段跟实际不符」——**提案由你自己提**"
+                    "（子代理没有提案权，只有主控能提），所以要把细节问够，"
+                    "否则你只能凭一句摘要猜。\n"
+                    "边界：thread_id 只填你**自己派发过**的专家线程（见 "
+                    "call_expert 返回值里的「专家线程 chat-xxx」）。**要新任务/新"
+                    "方向用 call_expert**，不要拿本工具当第二次派发——它不换专家、"
+                    "不换上下文。同一条线程可多次追问。",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "thread_id": {
+                            "type": "string",
+                            "description": "要续跑的专家线程 id（形如 chat-xxxxxxxx，"
+                                           "取自 call_expert 的返回）",
+                        },
+                        "message": {
+                            "type": "string",
+                            "description": "要追加给该专家的消息（自包含：说清"
+                                           "你要什么、为什么需要）",
+                        },
+                    },
+                    "required": ["thread_id", "message"],
                 },
             })
         # artex_* / ctf_* 这些**控制器专属**工具同样按勾选下发
@@ -3556,7 +3716,15 @@ class ChatTurn:
                     "委派前可用 kb_search/kb_open 查知识库确认打法方向、bb_query 了解"
                     "黑板已有资产/发现；资产清理与合并可直接使用受控的"
                     "bb_delete_asset/bb_merge_assets（必须先查询，合并必须给出 reason）；"
-                    "不直接执行扫描/利用等实操。")
+                    "不直接执行扫描/利用等实操。\n"
+                    "**摘要不够细时用 ask_expert 回到原线程追问**（2026-10-21）："
+                    "call_expert 返回里有「专家线程 chat-xxx」，把它和你的问题传给 "
+                    "ask_expert，那个专家会带着自己跑过的全过程接着回答——"
+                    "问它「凭什么判定这条路不通」「把 payload 构造写具体」都行。"
+                    "**不要为了问细节重新 call_expert**：新线程从零开始，"
+                    "原来那轮的观察全丢，还得把活重干一遍。"
+                    "**提案只能由你提**：子代理没有提案权（只有主控能提），"
+                    "所以沉淀细节要靠 ask_expert 问够，再自己写 propose_pack_edit。")
                 parts.append(self._situation_context())
         else:
             if getattr(self, "probe_mode", False) or getattr(self, "intent_free", False):
@@ -3572,8 +3740,18 @@ class ChatTurn:
                     "摘要**（做了什么/关键证据/结论），主控会原样转述给人类。")
             if not (getattr(self, "probe_mode", False) or getattr(self, "intent_free", False)):
                 parts.append(self._mission_context())
-        # 经验沉淀纪律（kb-iteration，2026-10-14）：propose_pack_edit 对主控与子专家均开放
-        # （详见工具描述）；提示何时该提 + 证据要求 + 上限，与任务链 STRICT_PROMPT_TAIL 同口径。
+        # 经验沉淀纪律（kb-iteration，2026-10-14）。
+        # **2026-10-21 Nan 改为「只有主控能提提案」**：子代理（call_expert 派生，
+        # 有 parent_thread_id）不再注入本段、执行层另有一道身份硬闸
+        # （`ToolDispatcher._is_spawned_subagent`）。原因不是子代理没证据——它
+        # 恰恰有一手证据；问题是它**只看得到自己那一段**：不知道别的方向试过
+        # 什么、也不知道主控怎么收敛，提上来的常是「我这个方向该写进手册」，
+        # 全局看可能根本不值得写（方向本身就是死路）。提案权收归主控，它看得到
+        # 全部子线程摘要，判断「什么值得沉淀」才准。
+        #
+        # 子代理的贡献路径：把判据/坑写进**收尾摘要**，主控用 `ask_expert`
+        # 追问细节后统一提。
+        #
         # **受项目级开关门禁（2026-10-15）**：关闭时整段不注入 + 工具面剔除
         # （_tool_specs/_build_dispatcher）——开关关 = Agent 不提任何提案，提示也不诱导。
         # **ARTEX 主控除外**（artex-controller-slim，2026-10-20）：它的工具面里已经
@@ -3582,14 +3760,27 @@ class ChatTurn:
         # 白烧步数。**提示词必须与工具面同口径**，这是第三处需要同步的地方。
         if self._kb_iteration_on() and not (
                 self.is_aggressive or self.probe_mode or self.is_worker
-                or self.is_artex):
+                or self.is_artex or self._is_spawned_subagent):
             parts.append(
                 "## 经验沉淀（可选）\n"
                 "发现知识库/技能文档**内容有误**、**文档缺失**、某手法**已在本轮验证有效**，"
                 "或产出**新的 Web 漏洞**时，可用 propose_pack_edit 提变更提案（kb 文档与技能的"
                 "新建/改写/删除，删除应用时进回收站）——只落 pending 待人类审批，**绝不自行改"
                 "文件**。reason 必须附本轮证据（引用的文档 / 失败的工具 / 产出的发现 id）；"
-                "每会话最多 3 条，禁止凑数。任务较难、试错较多时也值得回看是否有可沉淀的坑。")
+                "每会话最多 20 条，禁止凑数。任务较难、试错较多时也值得回看是否有可沉淀的坑。\n"
+                "**两个明确的「该停下来想想沉淀」时点**（2026-10-21）：\n"
+                "① **派发满 3 轮**——注意「一轮」= 你的一次并发派发决策，同轮并发派 5 个"
+                "专家仍只算 1 轮。满 3 轮意味着你已经换过三次方向还没打通，此时先想"
+                "「是不是缺判据/手册写错了」，而不是继续盲目派第四轮。\n"
+                "② **本轮耗时超过 30 分钟**——久攻不下同理。\n"
+                "这两个时点不强制你提提案（可能确实是题难），但**必须停下来评估一次**："
+                "有可沉淀的就提，没有就说明为什么没有。\n"
+                "**提 kb 提案前先读下面「提案写作格式」**——格式不对会被机械质检直接拒。"
+                "格式就在本提示里，不必先去检索。")
+            # 写作规范（2026-10-21 Nan 报 bug）：模型拿不到模板只能反复空搜。
+            # 根因见 core/skills/kspec.py 模块注释（规范在 packs/kb 根目录 → 三条读路全断）。
+            # **只在持有 propose_pack_edit 时注入**，与工具面同口径。
+            parts.append(kspec.spec_block())
         # 联网搜索指引（v43，web-search-toggle）：开关开 = 工具面已放行
         # web_search（_tool_specs/_build_dispatcher 双边同步），给一段使用纪律；
         # 关着整段不注入（工具不下发，提示也不诱导）。主控与子代理同口径——
@@ -3729,8 +3920,13 @@ class ChatTurn:
             "1. 收到任务先看上面的清单，判断有没有命中你手上这种介质/题型的技能；\n"
             f"   命中就先 skill_open(\"<技能名>\") 读正文，**再**开始 run_cmd / 写脚本。\n"
             "   不要先跑一堆命令、卡住了才回头找方法。\n"
-            "2. 技能正文给打法纪律与判据；具体命令、payload、字段格式不够用时，\n"
-            "   用 kb_search 检索知识库、kb_open 读正文——**不要凭记忆拼命令和参数**。\n"
+            "2. **读技能之后、动手之前，先 kb_search 一次**——查「载体 + 想做的事」，\n"
+            "   例如 kb_search(\"upx 脱壳\")、kb_search(\"zip 逆向 入口点\")、\n"
+            "   kb_search(\"pcap 提取 凭据\")、kb_search(\"图片 隐写 LSB\")。\n"
+            "   技能给的是打法纪律，知识库给的是**判据/命令/payload/踩坑记录**；\n"
+            "   命中就 kb_open 读正文，别凭记忆拼参数。\n"
+            "   一次没命中就换个说法再查一次（中文/英文、术语/现象各试一次），\n"
+            "   两次都不对口才转自己探索——**不要因为一次零命中就再也不查**。\n"
             "3. 已知测试点名称时，route_lookup 可直接定位到对应模块。\n"
         )
 
@@ -4008,7 +4204,8 @@ class ChatTurn:
         for attempt in range(_CHAT_TRUNC_RETRIES + 1):
             try:
                 return self._chat_once(messages, system, tools, on_text,
-                                       on_thinking, on_provider_retry)
+                                       on_thinking, on_provider_retry,
+                                       on_failover=on_retry)
             except LLMError as e:
                 if not getattr(e, "truncated", False) or attempt >= _CHAT_TRUNC_RETRIES:
                     raise
@@ -4020,7 +4217,8 @@ class ChatTurn:
 
     def _chat_once(self, messages: list[dict[str, Any]], system: str | None,
                    tools: list[dict[str, Any]] | None, on_text=None,
-                   on_thinking=None, on_provider_retry=None):
+                   on_thinking=None, on_provider_retry=None,
+                   on_failover=None):
         def provider_kwargs() -> dict[str, Any]:
             kwargs: dict[str, Any] = {
                 "system": system, "tools": tools, "on_text": on_text,
@@ -4049,6 +4247,17 @@ class ChatTurn:
                     supports_retry = False
                 if supports_retry:
                     kwargs["on_retry"] = on_provider_retry
+            # 跨供应商兜底（provider-failover，2026-10-21）：换家前清掉上游增量
+            # 缓冲（复用 on_retry=_reset_delta，语义就是「从零重流」）——不清会拼出
+            # 「失败那家的半截 + 新家的全文」。只有挂了兜底链的 provider 才收该参数。
+            if on_failover is not None:
+                try:
+                    supports_failover = "on_failover" in inspect.signature(
+                        self.llm.chat).parameters
+                except (TypeError, ValueError):
+                    supports_failover = False
+                if supports_failover:
+                    kwargs["on_failover"] = lambda _info=None: on_failover()
             return kwargs
 
         try:
@@ -4101,8 +4310,25 @@ class ChatTurn:
             self._round_start_iso = _bb_now()
         except Exception:  # noqa: BLE001
             self._round_start_iso = None
+        # 派发轮次与耗时的本轮基线（2026-10-21 Nan 要求）：
+        # - `_round_start_msg_id`：本轮开始时的最大消息 id。轮末只数这之后落的
+        #   assistant 消息（一条 = 一次并发派发决策 = 一轮），不把历史轮次的派发
+        #   算进来。
+        # - `_round_start_ts`：墙钟起点，轮末算 elapsed。
+        try:
+            self._round_start_msg_id = self.bb.conn.execute(
+                "SELECT COALESCE(MAX(id),0) FROM chat_messages WHERE thread_id=?",
+                (self.thread_id,)).fetchone()[0]
+        except Exception:  # noqa: BLE001
+            self._round_start_msg_id = 0
+        try:
+            import time as _time
+            self._round_start_ts = _time.monotonic()
+        except Exception:  # noqa: BLE001
+            self._round_start_ts = None
         try:
             final = self._loop(text)
+            final = self._compose_final(final)
             chat_store.update_thread(self.bb, self.thread_id, status="idle")
             # 正常收尾：清剪本轮流式 delta（终稿全文已在 chat_messages，事件只承担
             # 实时可见）——不删则每条携带累计全文的 delta 行持续膨胀事件表。异常/
@@ -4172,6 +4398,22 @@ class ChatTurn:
         except Exception:  # noqa: BLE001 —— 读开关失败按关闭处理
             return False
 
+    def _round_elapsed_s(self) -> float:
+        """本轮已跑秒数（`run()` 里用 monotonic 记的起点）。
+
+        用 monotonic 而非 wall clock：系统时间被校正时 wall clock 会跳，
+        跳出来的「耗时」既可能是负的也可能是几小时——这条信号会直接决定
+        要不要提提案，不能受时钟同步影响。取不到起点（旧实例/测试壳）→ 0。
+        """
+        start = getattr(self, "_round_start_ts", None)
+        if start is None:
+            return 0.0
+        try:
+            import time as _time
+            return max(0.0, _time.monotonic() - float(start))
+        except Exception:  # noqa: BLE001
+            return 0.0
+
     def _maybe_kb_iteration(self) -> None:
         """轮末知识库迭代（kb-iteration，2026-10-14，可选开关）：**best-effort**。
 
@@ -4189,7 +4431,12 @@ class ChatTurn:
             session_id=sid, author=sid, thread_id=self.thread_id,
             capabilities=self.capabilities,
             since_event_id=int(getattr(self, "_round_start_event_id", 0) or 0),
-            since_iso=getattr(self, "_round_start_iso", None))
+            since_iso=getattr(self, "_round_start_iso", None),
+            # 派发轮次（2026-10-21）：只数**本轮**落的 assistant 消息里带
+            # call_expert 的条数——一条消息 = 一次并发派发决策 = 一轮。
+            since_message_id=int(getattr(self, "_round_start_msg_id", 0) or 0),
+            # 耗时：本轮起点墙钟到现在的秒数（起点在 run() 里取）。
+            elapsed_s=self._round_elapsed_s())
         try:
             threading.Thread(
                 target=lambda: kbiteration.run_iteration(
@@ -4197,6 +4444,20 @@ class ChatTurn:
                 name=f"kb-iter-{self.thread_id[-8:]}", daemon=True).start()
         except Exception:  # noqa: BLE001 —— 起线程失败也不影响会话
             log.exception("kb-iteration 线程启动失败 thread=%s", self.thread_id)
+
+    def _compose_final(self, final: str) -> str:
+        """本轮返回值 = **最后一次交付** + 收尾说明（deliver，2026-10-21）。
+
+        组装逻辑与任务链共用 `core.agent.tools.compose_delivery_summary`——两处
+        各写一份必然漂移，同一次交付在 `call_expert` 与直播间就会长得不一样。
+        """
+        try:
+            from core.agent.tools import compose_delivery_summary
+            return compose_delivery_summary(
+                getattr(self._dispatcher, "deliveries", None), final)
+        except Exception:  # noqa: BLE001 —— 组装失败退回原文，绝不炸整轮
+            log.exception("chat 收尾组装失败 thread=%s", self.thread_id)
+            return final
 
     def _loop(self, user_text: str) -> str:
         """入口包装：整轮标记为本线程会话作用域（请求体留痕归属，2026-10-17）。"""
@@ -4977,44 +5238,68 @@ class ChatTurn:
     #: route_lookup）本身就是查阅动作，不提醒。
     _SKILL_NUDGE_GROUPS = ("执行", "文件")
 
+    #: 查阅类工具：调用它们本身就是「先查再做」的动作，不触发提醒。
+    _LOOKUP_TOOLS = ("skill_open", "kb_search", "kb_open", "route_lookup")
+
     def _reset_skill_nudge(self) -> None:
         """每轮复位提醒状态（**实例属性**，不能写类属性——类属性会在所有线程
         实例间共享，A 线程 skill_open 过会让 B 线程永远收不到提醒）。"""
         self._skill_nudge_sent = False
         self._skill_opened_round = set()
+        self._kb_nudge_sent = False
+        self._kb_searched_round = False
 
     def _skill_first_nudge(self, name: str) -> str:
-        """本轮首次实质动作且还没读过技能 → 返回一句提醒（否则空串）。
+        """本轮首次实质动作前缺哪一步，就在回执尾部追加哪一句（否则空串）。
 
-        **软闸语义**：不阻断、不重试，只是把提醒并进这次 tool_result 尾部。
-        只提醒一次（`_skill_nudge_sent`），之后模型照不照做都不再啰嗦——重复
-        提醒会把上下文变成噪声，反而降低工具结果的可见度。
+        **两段式**（2026-10-21 二期）：实测技能清单前置后模型会 skill_open 了
+        （1 次），但仍然**从不查知识库**——某 CTF 项目 151 次工具调用里
+        `kb_search` 0 次、`run_cmd` 130 次。原因是技能正文给的是「流程」，
+        读完照样照着流程跑命令，没有「去查具体判据」这一步。所以提醒拆成两级：
+        - 缺技能 → 提技能（一期）；
+        - 技能已读但没查库 → 只提知识库（二期，本轮新增）。
 
-        为什么不硬拒：分诊/取证类任务有时确实不需要技能（`file` 一把就有结论），
-        硬拒会误伤并白烧一轮。B2 的定位是「让模型在最相关的一屏里看到这句话」。
+        两级各自只提醒一次（`_skill_nudge_sent` / `_kb_nudge_sent`）。**软闸语义**：
+        不阻断、不重试，只把提醒并进这次 tool_result 尾部。硬拒会误伤（`file`
+        一把就有结论的任务确实不需要查库），且会白烧一轮。
+
+        为什么不阻断：这是「提示注意力」问题，不是「规则缺失」问题——模型不是
+        故意违反，是没意识到该查。把话说在它刚要动手的那一屏，成本最低。
         """
-        if getattr(self, "_skill_nudge_sent", False):
-            return ""
-        if name in ("skill_open", "kb_search", "kb_open", "route_lookup"):
+        if name in self._LOOKUP_TOOLS:
             return ""          # 查阅动作本身：不提醒
-        if self._skill_opened_round:
-            return ""          # 本轮已读过技能：不提醒
         try:
             from core.agent.tool_registry import agent_tool_group
             if agent_tool_group(name) not in self._SKILL_NUDGE_GROUPS:
                 return ""
         except Exception:  # noqa: BLE001 —— 分组查不到就不提醒（保守）
             return ""
-        # 只有真配了技能的线程才提醒（激进主控/probe 无技能面）
-        block = self._skill_block_names()
-        if not block:
+        parts: list[str] = []
+        # 一级：还没读过技能
+        if not self._skill_opened_round and not getattr(
+                self, "_skill_nudge_sent", False):
+            names = self._skill_block_names()
+            if names:      # 只有真配了技能的线程才提醒（激进主控/probe 无技能面）
+                self._skill_nudge_sent = True
+                parts.append(
+                    f"[提示] 你还没打开过技能手册就动手了。本线程可用技能："
+                    f"{'、'.join(names)}。\n"
+                    "若上面这份清单里有覆盖当前介质/题型的技能，建议先 "
+                    "skill_open 读正文再继续。")
+        # 二级：技能已读（或本轮没技能可读）但仍没查知识库
+        if not getattr(self, "_kb_searched_round", False) and not getattr(
+                self, "_kb_nudge_sent", False):
+            self._kb_nudge_sent = True
+            parts.append(
+                "[提示] 本轮还没查过知识库。知识库里是历史沉淀的**具体判据、"
+                "命令、payload 和踩坑记录**，比凭记忆拼参数可靠。\n"
+                "动手前建议先 kb_search 一次，查「载体 + 想做的事」，例如 "
+                "kb_search(\"upx 脱壳\")、kb_search(\"zip 逆向 入口点\")、"
+                "kb_search(\"pcap 提取 凭据\")；命中就 kb_open 读正文。\n"
+                "一次零命中可以换个说法再查一次；确实不对口就继续自己做。")
+        if not parts:
             return ""
-        self._skill_nudge_sent = True
-        return (f"\n\n---\n[提示] 你还没打开过技能手册就动手了。本线程可用技能："
-                f"{'、'.join(block)}。\n"
-                "若上面这份清单里有覆盖当前介质/题型的技能，建议先 "
-                "skill_open 读正文再继续；具体命令/payload 不确定时用 kb_search "
-                "查知识库。已经明确知道怎么做可以忽略本条。")
+        return "\n\n---\n" + "\n".join(parts)
 
     def _skill_block_names(self) -> list[str]:
         """本线程技能名清单（供提醒用；与 _skill_block 同口径，失败返空）。"""
@@ -5042,8 +5327,13 @@ class ChatTurn:
         """
         ok, result = self._dispatch_inner(tc)
         name = getattr(tc, "name", "") or ""
-        if name == "skill_open" and ok:
+        if ok and name == "skill_open":
             self._skill_opened_round.add(str((tc.arguments or {}).get("name") or ""))
+            return ok, result
+        if ok and name == "kb_search":
+            # 零命中也算「查过了」：模型履行了「先查再做」，提醒的目标已达成。
+            # 若按「有命中才算」判定，检索质量差时会反复提醒，反而像在逼它重试。
+            self._kb_searched_round = True
             return ok, result
         if ok:
             nudge = self._skill_first_nudge(name)
@@ -5142,6 +5432,14 @@ class ChatTurn:
                 r = self._tool_call_expert(args)
                 self._record_failure(name, r, args)
                 return not r.startswith("[错误"), r
+            # 续跑注入（ask-expert）：**串行**，不参与 _parallel_expert_dispatch
+            # ——它写的是已有线程的上下文，同轮并发两条 ask 打同一线程会互相
+            # 踩历史。放在 call_expert 之后：混合批次里先建新线程再追问旧线程，
+            # 顺序与模型书写顺序一致，审计更好读。
+            if name == ASK_EXPERT_TOOL:
+                r = self._tool_ask_expert(args)
+                self._record_failure(name, r, args)
+                return not r.startswith(("[错误", "[拒绝")), r
             # CTF 解题主控的调度原语（ctf-controller，2026-10-19）：不经
             # ToolDispatcher（那里没有 handler），走本类的专用方法。
             # 放在 call_expert 之后：两者同轮出现时先落计划再派发——否则
@@ -5723,7 +6021,131 @@ class ChatTurn:
                 log.exception("chat ctf 轮次记账失败 thread=%s", self.thread_id)
         return (f"专家线程 {sub_id}（{expert}）已完成。\n"
                 f"收尾摘要：\n{summary[:4000]}\n"
-                f"（人类可在工作台打开该线程查看全过程与追问）")
+                f"（人类可在工作台打开该线程查看全过程与追问；"
+                f"要追问细节（或问清可沉淀的判据），用 ask_expert(thread_id=\"{sub_id}\", ...)）")
+
+    # ---------- 续跑注入（ask-expert） ----------
+
+    def _thread_assigned_assets(self, thread_id: str) -> list[str]:
+        """从意图记录反推该线程被分配的资产（ask_expert 续跑用）。
+
+        **为什么不读线程行**：`assigned_asset_ids` 只是 `ChatTurn` 的内存字段，
+        `chat_threads` 表里根本没有这一列（`store.create_thread` 的入参里也没有）
+        ——读 `row.get("assigned_asset_ids")` 恒得空列表，续跑出来的专家会
+        变成「无分配资产」，维度收敛闸与资产边界全部失效。
+
+        意图是持久事实：子专家派的活必留 `intents.target_asset_id`
+        （`declare_intent` 落库）。按 author 取本线程声明的资产并集即可。
+        读库失败返回空列表（宁可少分配，不要因为一次 DB 抖动让续跑炸掉）。
+        """
+        author = f"chat-{thread_id[-12:]}"
+        try:
+            rows = self.bb.conn.execute(
+                "SELECT DISTINCT target_asset_id FROM intents"
+                " WHERE project_id=? AND author=? AND target_asset_id IS NOT NULL",
+                (self.project_id, author)).fetchall()
+        except Exception:  # noqa: BLE001
+            log.exception("ask_expert 反推分配资产失败 thread=%s", thread_id)
+            return []
+        return [str(r[0]).strip() for r in rows if str(r[0] or "").strip()]
+
+    def _tool_ask_expert(self, args: dict) -> str:
+        """给**已派发过**的专家线程补一条消息，让它带原上下文续跑。
+
+        **为什么不是「再 call_expert 一次」**：`call_expert` 每次都 spawn 一条
+        全新线程，专家从零开始——原线程里「我试过什么、哪条路为什么不通」的
+        上下文全丢。而主控追问的恰恰是那些细节。这里复用**同一条线程**：
+        `ChatTurn.run(text)` 会先 `_load_history()` 再跑，等于在原上下文后面
+        追加一句用户消息。
+
+        **与 `call_expert` 的硬边界**（不做就成了第二套派发入口）：
+        - 只接受**本线程自己 spawn 出来的**子线程（`parent_thread_id == 自己`）。
+          否则主控能借它唤醒任意线程（含别的项目、人类手建的会话），
+          绕开「spawn 深度=1」的委派纪律。
+        - 不换专家、不换工具面、不重新分配资产——继承原线程配置。
+        - 已解出闸照旧生效（题目 solved 后不该再让任何专家跑）。
+
+        **为什么串行**：它写的是**已有线程的上下文**。同轮并发两条 ask 打同一
+        线程会互相踩历史（各自 `_load_history` 后追加，后写覆盖前写的顺序）。
+        `_dispatch_inner` 走单线程分支，不进 `_parallel_expert_dispatch`。
+        """
+        thread_id = str(args.get("thread_id") or "").strip()
+        message = str(args.get("message") or "").strip()
+        if not thread_id or not message:
+            return "[错误] ask_expert 失败：thread_id 与 message 必填"
+        if not self.is_orchestrator or self._is_spawned_subagent:
+            return "[错误] ask_expert 失败：只有主控能续跑专家（spawn 深度=1）"
+        # 已解出闸：与 call_expert 同源（`_solved_challenge_block`）。题目已解出
+        # 后让专家继续跑，产出的是对本题无用的动作——与再派一个新专家同样该拦。
+        solved_block = self._solved_challenge_block()
+        if solved_block:
+            return solved_block
+        if self.llm is None:
+            return "[错误] ask_expert 失败：LLM 未装配"
+        row = None
+        try:
+            row = chat_store.get_thread(self.bb, thread_id)
+        except Exception:  # noqa: BLE001 —— 读库失败按「不存在」处理
+            row = None
+        if row is None:
+            return (f"[错误] ask_expert 失败：线程 {thread_id} 不存在"
+                    "（只接受 call_expert 返回里给出的 chat-xxx）")
+        # 归属校验（红线）：必须是自己 spawn 的子线程。用 parent_thread_id
+        # 判定而不是「在本项目内」——后者太宽，主控能借此唤醒人类手建的会话。
+        if str(row.get("parent_thread_id") or "") != self.thread_id:
+            return (f"[错误] ask_expert 失败：{thread_id} 不是本主控派发的线程"
+                    "（只能续跑自己 call_expert 出来的专家；"
+                    "新任务请用 call_expert）")
+        if row.get("project_id") and str(row["project_id"]) != self.project_id:
+            return f"[错误] ask_expert 失败：线程 {thread_id} 不属于本项目"
+        # 正在跑的线程不能续（会与那一轮的 messages 局部变量打架：那一轮
+        # 已经 `_load_history` 完了，我们追加的消息它读不到，等它收尾后
+        # 才可见——但那时本轮 run 已经用旧历史跑完，等于白写）。
+        if str(row.get("status") or "") == "running":
+            return (f"[拒绝] ask_expert：线程 {thread_id} 正在运行，"
+                    "它的上下文此刻锁在那一轮里，追加消息读不进去。"
+                    "等它跑完（工作台显示空闲）再问；或先用 call_expert 派新任务。")
+        try:
+            sub_turn = ChatTurn(
+                bb=self.bb, llm=self.llm, project_id=self.project_id,
+                thread_id=thread_id, packs_root=self.packs_root,
+                track=self.track, capabilities=self.capabilities,
+                mcp_bridge=self.mcp_bridge, expert_names=[],
+                abort_event=self.abort_event,
+                owner_tags=self.owner_tags,
+                rule_profiles=self.rule_profiles,
+                artifacts_dir=self.artifacts_dir,
+                browser_pool=self.browser_pool,
+                decompiler_factory=self.decompiler_factory,
+                containers=self.containers,
+                probe_mode=self.is_aggressive,
+                # 资产分配沿用原线程（续跑不重新分配，否则专家会「忘记」
+                # 它原本负责哪些资产，或反过来被塞进不属于它的资产）。
+                # **从意图记录反推**：`assigned_asset_ids` 只是 ChatTurn 的
+                # 内存字段、`chat_threads` 表里没有，读 `row[...]` 恒为空。
+                # 子专家派的活必留意图（intents.target_asset_id），那是持久事实。
+                assigned_asset_ids=(
+                    [] if self.is_aggressive
+                    else self._thread_assigned_assets(thread_id)),
+                recovery=self.recovery)
+        except Exception as e:  # noqa: BLE001 —— 构造失败回文本，别炸整轮
+            log.exception("ask_expert 子轮构造失败 thread=%s", thread_id)
+            return f"[错误] ask_expert 续跑失败（线程构造）：{e}"
+        self._emit("chat.ask_expert", {"thread_id": thread_id,
+                                       "message_head": message[:200]})
+        try:
+            reply = sub_turn.run(message)
+        except chat_store.ThreadGone:
+            return (f"专家线程 {thread_id} 已被人工删除，本次续跑中止。"
+                    "需要这个方向请重新 call_expert 派发。")
+        except Exception as e:  # noqa: BLE001 —— 续跑失败回文本，主控可改道
+            log.exception("ask_expert 续跑失败 thread=%s", thread_id)
+            return (f"[错误] ask_expert 续跑失败：{e}"
+                    f"（线程 {thread_id} 已留档，可改用 call_expert 重派）")
+        expert = str(row.get("agent_id") or "")
+        return (f"专家线程 {thread_id}（{expert}）已续跑完成。\n"
+                f"答复：\n{reply[:4000]}\n"
+                "（如需继续追问同一线程，可再调 ask_expert）")
 
     # ---------- 事件 ----------
 

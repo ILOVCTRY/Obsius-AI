@@ -1,9 +1,36 @@
-# core/diagnostics — 诊断（会话审计 + 失败日志 + 请求体留痕 + 红线自检）
+# core/diagnostics — 诊断（会话审计 + 失败日志 + 请求体留痕 + 红线自检 + 模型兜底）
 
 `failog.py` — 工具 / MCP 调用失败日志（diagnostics-log，2026-10-14）。
 `system_prompt.py` — 会话系统提示词快照（diagnostics-system-prompt，2026-10-16）。
 `requests.py` — **LLM 请求体留痕（diagnostics-request-body，2026-10-17）**。
 `redline_test.py` — **红线一键自检（diagnostics-redline-test，2026-10-17）**。
+`llm_failover.py` — **跨供应商兜底记录（provider-failover，2026-10-21）**。
+
+## llm_failover.py：跨供应商兜底记录
+
+`core/llm/fallback.py` 在「某家重试 11 次仍失败」时换下一家，本模块把这条链路
+变成可查事实。三类事件（同一张表，诊断页「模型兜底」页签读它）：
+
+- `llm.provider_failed`：**每一家**失败一条（含最后一家）。payload 带
+  `category`（与 `retry.classify_provider_error` 同源）/`status`/`error`/
+  `elapsed_ms`/`index`/`chain`/`next_provider`/`final`；
+- `llm.failover`：真正换家一条（`from`→`to` + 两边 model + category）；
+- `llm.failover.exhausted`：全链耗尽（真正停止）一条（`chain`/`tried`/最后错误）。
+
+- **双出口**：① `logs/llm_failover.jsonl`（`CYBERSTRIKE_LLM_FAILOVER_LOG` 可改，
+  `ROTATE_BYTES=8MB` 轮转 `.1`）——**无条件写**，是没有项目作用域时唯一的留痕
+  （情报分类器、离线脚本）；② 项目黑板事件——`create_app` 里
+  `set_sink(_llm_failover_sink)` 注册，归属靠 `core.llm.dump.current_scope()`
+  （与请求体留痕同一套 contextvar）。无作用域只写文件。
+- **归属口径必须分别对齐两条链**：chat 线程 = `session_id=None` +
+  `payload.thread_id` + `author=chat-<tid12>`（同 `ChatTurn._emit`）；任务链 =
+  `session_id=<sid>` + `author=<sid>`。sink 用 `chat_store.get_thread` 判是不是
+  线程 id——判错了「定位会话」就点不动。
+- **`summary` 用未过滤全量算**：类别分布/换家次数/耗尽次数是页签顶部的判断依据，
+  跟着过滤走就只剩一格。`query_failover` 的过滤在 Python 侧做（记录量级小）。
+- **红线**：写盘与 sink 异常只 log 不抛——诊断绝不能影响 LLM 调用（同 failog）。
+- 回归：`tests/test_llm_failover.py`（含 JSONL 三条 + sink 只在有作用域时触发 +
+  写盘失败不外抛）、`tests/test_api.py::test_diag_llm_failover_endpoint`。
 
 ## requests.py：请求体留痕
 

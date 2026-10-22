@@ -15,7 +15,8 @@
 
 - **候选抽取** `extract_candidates(text)`：从任意文本抓 `<前缀>{<内层>}` 形态，
   并剔除模板语法/代码片段（`_is_codeish`）。
-- **置信打分** `flagishness(token)`：前缀可信度 + 内层熵 + 诱饵词惩罚，返回浮点分；
+- **置信打分** `flagishness(token)`：前缀可信度 + 内层熵（含**结构化内层**——
+  不依赖前缀名单，专治 `shellmates{}` 这类任意赛事前缀）+ 诱饵词惩罚，返回浮点分；
   `confident_flags(candidates)` 用阈值 + 同形簇抑制（同一前缀出现 ≥4 个不同内层
   = 刷屏的假阳性，全部丢弃）筛出可提交集合。
 - **变换回环** `roundtrip_verify(value, source, transform)`：模型声明
@@ -50,7 +51,10 @@ __all__ = [
     "natural_language_inner",
     "is_bait_prefix",
     "is_bait_inner",
+    "is_structured_inner",
     "FLAGISH_FLOOR",
+    "STRUCTURED_INNER_MIN",
+    "STRUCTURED_INNER_BONUS",
     "MIN_INNER_LEN",
 ]
 
@@ -89,6 +93,19 @@ _FLAGWORD_RX = re.compile(r"(?i)(flag|ctf|htb)")
 
 # 置信阈值：≥ 此分才认为「可以提交」。见 flagishness() 的打分表。
 FLAGISH_FLOOR = 2.0
+# 内层结构化度（2026-10-21 现场：`shellamtes{Y0u_H4vE_ChE4ngED_mY_V4R14Ble_98765}`
+# 只得 1.5 分被拒，而它是真 flag）。
+#
+# **为什么必须有这条**：+3 前缀分完全依赖 `_KNOWN_PREFIXES` 名单或前缀里出现
+# flag/ctf/htb 词，但**赛事前缀本身是任意的**——`shellmates{}` / `idek{}` /
+# `grey{}` / `buckeye{}` / `SEKAI{}` 一个都不含这三个词，真实比赛里到处都是。
+# 名单法必然漏判真 flag，而漏判的代价是「整道题拿不到答案」（拒收后模型只能走
+# candidate=true，那条路不进台账、不判解出）；误判的代价只是一条 pending 行
+# （pending **不计 solved**，见 challenge-flag-ledger 方案 A）——代价严重不对称。
+# 于是补一个**不依赖前缀名单**的信号：真实 flag 的值是人造串（多词/大小写混排/
+# 带数字），模板语法与代码片段几乎不会同时满足这几点。
+STRUCTURED_INNER_MIN = 10
+STRUCTURED_INNER_BONUS = 2.0
 # 题目声明格式的加权（challenge-flag-ledger v47）：题目 meta.flag_format 声明了
 # ``flag{}`` 而本 flag 前缀匹配 → 加分。**只加不减**：声明的格式是**提示不是
 # 约束**——真实比赛里题面写 flag{} 而实际是 DASCTF{} 的情况很常见，硬卡格式会
@@ -246,6 +263,26 @@ def _inner_too_short(token: str) -> bool:
     return len((inner_of(token) or "").strip()) < MIN_INNER_LEN
 
 
+def is_structured_inner(token: str) -> bool:
+    """内层是否像「人工构造的 flag 值」：够长 + 字母数字混排 + 分隔符或大小写混排。
+
+    这是**唯一不依赖前缀名单**的正向信号（见 `STRUCTURED_INNER_MIN` 的说明）。
+    判据取「长 + 数字 + (分隔符 or 大小写混排)」三条同时成立：
+
+    - `Y0u_H4vE_ChE4ngED_mY_V4R14Ble_98765` → 真（36 字符，leetspeak 多词）
+    - `a1b2c3d4e5f6g7h8`（全小写无分隔）→ 假（这种形态网页噪声里满地都是）
+    - `{{config}}` / `{% if user %}` / `${user.name}` → 假（长度/字符集都不满足）
+    """
+    inner = inner_of(token) or token
+    if len(inner) < STRUCTURED_INNER_MIN:
+        return False
+    if not re.search(r"[A-Za-z]", inner) or not re.search(r"\d", inner):
+        return False
+    has_sep = bool(re.search(r"[_\-]", inner))
+    mixed_case = bool(re.search(r"[a-z]", inner) and re.search(r"[A-Z]", inner))
+    return has_sep or mixed_case
+
+
 
 # ---------------- 抽取与打分 ----------------
 
@@ -276,6 +313,7 @@ def flagishness(token: str) -> float:
     | 前缀可信（已知赛事前缀 / 非诱饵的 flag 词前缀） | +3 |
     | 内层含数字 | +1 |
     | 内层形如 hex（`[0-9a-f-]{8,}`） | +2 |
+    | 内层结构化（≥10 字符 + 字母数字混排 + 分隔符/大小写混排，`is_structured_inner`） | +2 |
     | 内层含 `_` 或 `-` | +0.5 |
     | 内层含空格 | -0.5 |
     | 前缀是诱饵（fake/example/test…） | -5 |
@@ -288,6 +326,8 @@ def flagishness(token: str) -> float:
 
     阈值 `FLAGISH_FLOOR=2.0`：`flag{abc123}`=4，`example{abc123}`=-1（拒），
     `flag{example}`=-2（拒），`flag{x}`=0（拒），`{{config}}`=-5（拒）。
+    陌生赛事前缀靠结构化内层过关：
+    `shellamtes{Y0u_H4vE_ChE4ngED_mY_V4R14Ble_98765}`=3.5（收）。
     """
     inner = inner_of(token)
     score = 0.0
@@ -297,6 +337,8 @@ def flagishness(token: str) -> float:
         score += 1
     if re.fullmatch(r"[0-9a-f-]{8,}", inner):
         score += 2
+    if is_structured_inner(token):
+        score += STRUCTURED_INNER_BONUS
     if "_" in inner or "-" in inner:
         score += 0.5
     if " " in inner:

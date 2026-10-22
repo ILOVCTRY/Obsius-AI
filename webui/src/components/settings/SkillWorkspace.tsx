@@ -5,6 +5,7 @@ import type { SkillCatalog, SkillDef, SkillDetail, SkillFileEntry } from "@/lib/
 import { parseSkill } from "@/lib/skillfm"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { Input } from "@/components/ui/input"
 import { MarkdownView } from "./MarkdownView"
 import { SkillCreateDialog } from "./CreateDialogs"
 import { cn } from "@/lib/utils"
@@ -34,6 +35,9 @@ export function SkillWorkspace({ pid, focus, onExpert }: { pid?: string | null; 
   const [busy, setBusy] = useState(false)
   const [createOpen, setCreateOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // 新建文件/目录的行内路径输入（Electron 无 window.prompt，见 createFile 注释）
+  const [newPath, setNewPath] = useState("")
+  const [newIsDir, setNewIsDir] = useState(false)
 
   const load = () => api.skillCatalog(pid).then(setCatalog).catch((e) => setError(String(e)))
   useEffect(() => { load() }, [pid])
@@ -75,11 +79,26 @@ export function SkillWorkspace({ pid, focus, onExpert }: { pid?: string | null; 
     } catch (e) { setError(String(e)) } finally { setBusy(false) }
   }
 
-  const createFile = async (isDir: boolean) => {
+  // 新建文件/目录：路径**行内输入**，不用 window.prompt（2026-10-21）。
+  // 桌面壳（Electron）渲染进程里 `window.prompt` 是 `throw new Error("prompt() is
+  // not supported.")`，而本函数是 async——同步抛错变成 rejected promise，调用处
+  // 丢弃 → 点「新建文件」完全没反应。`confirm`/`alert` 在 Electron 里正常。
+  const createFile = (isDir: boolean) => {
     if (!selected) return
-    const path = window.prompt(isDir ? "新目录路径" : "新文件路径", isDir ? "references/new-folder" : "references/new-file.md")
-    if (!path) return
-    try { await api.createSkillFile(selected.name, { path, is_dir: isDir, content: "" }); setFiles((await api.skillFiles(selected.name)).files) }
+    setNewPath(isDir ? "references/new-folder" : "references/new-file.md")
+    setNewIsDir(isDir)
+    setError(null)
+  }
+
+  const submitNewPath = async () => {
+    if (!selected) return
+    const path = newPath.trim()
+    if (!path) { setError("路径不能为空"); return }
+    try {
+      await api.createSkillFile(selected.name, { path, is_dir: newIsDir, content: "" })
+      setFiles((await api.skillFiles(selected.name)).files)
+      setNewPath("")
+    }
     catch (e) { setError(String(e)) }
   }
 
@@ -128,7 +147,7 @@ export function SkillWorkspace({ pid, focus, onExpert }: { pid?: string | null; 
       <main className="min-h-0 overflow-hidden">
         {!selected || !detail ? <div className="flex h-full items-center justify-center text-xs text-muted-foreground">从左侧选择一个技能</div> : <div className="flex h-full min-h-0 flex-col">
           <header className="flex shrink-0 items-center gap-2 border-b px-5 py-3"><div><div className="font-mono text-sm">{selected.name}</div><div className="text-[10px] text-muted-foreground">{selected.description || "无描述"}</div></div><div className="ml-auto flex gap-1"><Button size="sm" variant="ghost" className="text-xs text-destructive" onClick={deleteSkill}><Trash2 size={13} className="mr-1" />删除技能</Button><Button size="sm" variant={view === "overview" ? "secondary" : "ghost"} className="text-xs" onClick={() => setView("overview")}>概览</Button><Button size="sm" variant={view === "files" ? "secondary" : "ghost"} className="text-xs" onClick={() => setView("files")}>文件</Button></div></header>
-          {view === "overview" ? <div className="min-h-0 flex-1 overflow-y-auto p-5"><div className="grid max-w-3xl grid-cols-3 gap-3"><div className="rounded border p-3"><div className="text-[10px] text-muted-foreground">技能文件</div><b className="text-lg">{files.length}</b></div><div className="rounded border p-3"><div className="text-[10px] text-muted-foreground">估算 tokens</div><b className="text-lg">{selected.estimated_tokens ?? 0}</b></div><div className="rounded border p-3"><div className="text-[10px] text-muted-foreground">引用专家</div><b className="text-lg">{selected.expert_refs?.length ?? 0}</b></div></div><div className="mt-6 max-w-3xl rounded border p-4"><h3 className="mb-3 text-xs font-semibold">专家白名单引用</h3>{selected.expert_refs?.length ? <div className="flex flex-wrap gap-2">{selected.expert_refs.map((id) => <button key={id} className="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-accent/40" onClick={() => onExpert?.(id)}><UserRound size={12} />{id}</button>)}</div> : <p className="text-xs text-muted-foreground">暂无显式白名单引用</p>}</div><div className="mt-6 max-w-3xl rounded border bg-background/40 p-4"><MarkdownView content={bodyMd} prefix={`skill-ov-${selected.name}`} /></div></div> : <div className="grid min-h-0 flex-1 grid-cols-[240px_minmax(0,1fr)_220px]"><aside className="min-h-0 overflow-y-auto border-r p-2"><div className="mb-2 flex items-center gap-1 text-[11px] font-semibold">文件树 <span className="ml-auto flex gap-1"><button title="新建文件" onClick={() => createFile(false)}><FilePlus2 size={14} /></button><button title="新建目录" onClick={() => createFile(true)}><FolderPlus size={14} /></button></span></div>{files.map((entry) => <button key={entry.path} className={cn("flex w-full items-center gap-1 rounded px-2 py-1.5 text-left text-[11px] hover:bg-accent/40", file?.path === entry.path && "bg-primary/10 text-primary", entry.is_dir && "font-semibold")} style={{ paddingLeft: `${8 + entry.path.split("/").length * 8}px` }} onClick={() => chooseFile(entry)}>{entry.is_dir ? <Folder size={13} /> : entry.kind === "image" ? <ImageIcon size={13} /> : <File size={13} />}<span className="truncate">{entry.name}</span></button>)}</aside><section className="flex min-h-0 flex-col">
+          {view === "overview" ? <div className="min-h-0 flex-1 overflow-y-auto p-5"><div className="grid max-w-3xl grid-cols-3 gap-3"><div className="rounded border p-3"><div className="text-[10px] text-muted-foreground">技能文件</div><b className="text-lg">{files.length}</b></div><div className="rounded border p-3"><div className="text-[10px] text-muted-foreground">估算 tokens</div><b className="text-lg">{selected.estimated_tokens ?? 0}</b></div><div className="rounded border p-3"><div className="text-[10px] text-muted-foreground">引用专家</div><b className="text-lg">{selected.expert_refs?.length ?? 0}</b></div></div><div className="mt-6 max-w-3xl rounded border p-4"><h3 className="mb-3 text-xs font-semibold">专家白名单引用</h3>{selected.expert_refs?.length ? <div className="flex flex-wrap gap-2">{selected.expert_refs.map((id) => <button key={id} className="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-accent/40" onClick={() => onExpert?.(id)}><UserRound size={12} />{id}</button>)}</div> : <p className="text-xs text-muted-foreground">暂无显式白名单引用</p>}</div><div className="mt-6 max-w-3xl rounded border bg-background/40 p-4"><MarkdownView content={bodyMd} prefix={`skill-ov-${selected.name}`} /></div></div> : <div className="grid min-h-0 flex-1 grid-cols-[240px_minmax(0,1fr)_220px]"><aside className="min-h-0 overflow-y-auto border-r p-2"><div className="mb-2 flex items-center gap-1 text-[11px] font-semibold">文件树 <span className="ml-auto flex gap-1"><button title="新建文件" onClick={() => createFile(false)}><FilePlus2 size={14} /></button><button title="新建目录" onClick={() => createFile(true)}><FolderPlus size={14} /></button></span></div>{newPath && (<div className="mb-2 rounded border border-primary/40 bg-primary/5 p-1.5"><div className="mb-1 text-[10px] text-muted-foreground">{newIsDir ? "新目录路径" : "新文件路径"}<span className="ml-1 opacity-70">（回车提交，Esc 取消）</span></div><Input autoFocus className="h-7 font-mono text-[11px]" value={newPath} onChange={(e) => setNewPath(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { void submitNewPath() } else if (e.key === "Escape") { setNewPath("") } }} /><div className="mt-1 flex justify-end gap-1"><button className="rounded border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-accent" onClick={() => setNewPath("")}>取消</button><button className="rounded border border-primary/50 px-1.5 py-0.5 text-[10px] text-primary hover:bg-primary/10" onClick={() => void submitNewPath()}>创建</button></div></div>)}{files.map((entry) => <button key={entry.path} className={cn("flex w-full items-center gap-1 rounded px-2 py-1.5 text-left text-[11px] hover:bg-accent/40", file?.path === entry.path && "bg-primary/10 text-primary", entry.is_dir && "font-semibold")} style={{ paddingLeft: `${8 + entry.path.split("/").length * 8}px` }} onClick={() => chooseFile(entry)}>{entry.is_dir ? <Folder size={13} /> : entry.kind === "image" ? <ImageIcon size={13} /> : <File size={13} />}<span className="truncate">{entry.name}</span></button>)}</aside><section className="flex min-h-0 flex-col">
             {file ? <>
               {file.kind === "text" ? (
                 isMarkdown(file.path) && fileMode === "preview"

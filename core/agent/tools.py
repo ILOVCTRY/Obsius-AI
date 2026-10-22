@@ -52,7 +52,8 @@ from core.runtime.recovery import (
 )
 from core.runtime.policy import allowed_runtimes
 from core.scope_policy import check_command_scope, check_project_scope
-from core.skills import proposals
+from core.skills import proposals, writing
+from core.skills.kspec import resolve_root_doc
 from core.skills.proposals import ProposalError
 
 log = logging.getLogger(__name__)
@@ -140,6 +141,11 @@ _BB_ASSET_TYPES = ("host", "domain", "service", "url", "binary")
 # what=assets 未显式传 limit 时的返回上限（2026-10-01 防瀑）：FOFA 大批导入后
 # 全项目资产可达数千，meta 全文数 MB——默认截断，要全量显式传大 limit。
 _BB_ASSETS_DEFAULT_LIMIT = 200
+# 交付箱（deliver，2026-10-21）：单次交付正文上限 + 内存里保留的最近条数。
+# 正文给到 8000 与 finding summary 同量级（够写清「拿到了什么、怎么拿的、还差
+# 什么」）；更早的交付已落 `chat.delivery` 事件表，内存只留最近若干条。
+_DELIVER_MAX_CHARS = 8000
+_DELIVER_KEEP = 20
 # 单次批量删除上限（2026-10-09）：bb_delete_assets 一次最多删这么多条，防一次
 # 误删面过大；超出要求分批。清洗泛解析域名族这类几百条的活，2-3 批即可做完。
 _BB_BATCH_DELETE_MAX = 200
@@ -181,6 +187,36 @@ def _asset_row(a: dict, *, verbose: bool = False) -> dict:
 # 阈值，统一走 spill 兜底更稳。
 _SPILL_SKIP = {"kb_open", "skill_open", "route_lookup"}
 _SPILL_THRESHOLD = 32_000  # 字符（2026-10-01 由 8000 放宽）
+
+
+def compose_delivery_summary(deliveries, final: str) -> str:
+    """把交付箱与收尾文本拼成「交给上层的那段」（deliver，2026-10-21）。
+
+    **为什么以交付为主**：`deliver` 的语义是「这就是我要交给主控的东西」，而模型
+    最后那段纯文本常常是「我干完了 / 已按计划完成」这类过程话术。若只取后者，
+    `call_expert` 的返回值里就没有结论——而那是主控唯一必读的东西（它不读子线程
+    的历史）。交付正文被埋在消息流里 = 白交。
+
+    两者都保留：交付在前（结论），收尾说明在后（补一句状态）。**没交付过时原样
+    返回**，行为与引入本工具前逐字一致（这条是回归闸：任何「没交付」的会话都不该
+    被本函数改动一个字符）。
+
+    两处调用必须同源：`ChatTurn._compose_final`（对话轮）与 `_tool_finish`
+    （任务链）。各写一份必然漂移——一边改了格式另一边不改，同一次交付在主控与
+    直播间看到的样子就不同。
+    """
+    items = list(deliveries or [])
+    if not items:
+        return final
+    last = items[-1] if isinstance(items[-1], dict) else {}
+    body = str(last.get("content") or "").strip()
+    if not body:
+        return final
+    head = f"【交付 · 第 {last.get('n')} 次】\n{body}"
+    tail = str(final or "").strip()
+    if not tail or tail == body:
+        return head
+    return f"{head}\n\n【收尾说明】\n{tail}"
 
 # 读路径放开（2026-10-01）：宿主 read_file/search_files 不再限定工作区根——只有
 # **写**（run_cmd 的 pathguard）才拦边界。容器/WSL 会话里模型拿到的是容器根路径
@@ -369,6 +405,93 @@ def _safe_zip_target(dest: Path, name: str) -> Path | None:
         return None
     return target
 
+
+# ---------- CTF 轨资产登记口径（challenge-asset 兜底，2026-10-21） ----------
+# 实测事故（ctf-2 项目，用户报「题目页把 zip 解压出的附件重复声明成题目」）：
+# 子专家 unpack_attachment 解压后，把 **zip 内文件** 当题目附件登记
+# （`bb_add_asset type=binary value=<sha256>`，parent_id 不传）→ 落成**根级**
+# binary 资产 → 前端 `isChallengeAsset` 把「CTF 轨下的根资产」一律当题目渲染
+# （v38 旧数据兼容设计）→ 题目页多出一道题。库里 3 条孤儿 binary，其中一条的
+# value 还是模型**编造**的哈希（同一个 dUmP.DMP 被真实哈希与编造哈希各登记一条，
+# 去重键按 value，编造值直接绕过去重）。
+#
+# 口径三条（都在 `_tool_bb_add_asset` 里执行，只对 CTF 轨生效）：
+#   ① 解压产物不登记（路径命中 scratch/att-<sha12>/）；
+#   ② binary 的 value 必须是文件真实 sha256（能拿到文件就算，不符即拒并给实际值）；
+#   ③ 未显式传 parent_id → 兜底挂到本题资产下（与 declare_intent / bb_add_finding
+#      同口径，见 `_challenge_fallback_asset`）。
+_HEX64_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+# meta 里可能承载「文件路径」的键（模型写法不统一，全部看一眼）
+_CTF_PATH_META_KEYS = ("path", "file", "filepath", "filename")
+
+
+def _ctf_unpack_product(value: str, meta: dict) -> str | None:
+    """CTF 轨：解压产物不许登记为资产——返回拒绝文案，不是解压产物返回 None。
+
+    `unpack_attachment` 的解压目录恒为 `scratch/att-<sha12>/`，路径分段
+    `att-<12hex>` **只在那里出现**（附件平铺目录是 `<sha12>_<name>` 命名，
+    没有这个分段）。所以只要 value / meta.path 的任一路径分段命中它就是解压产物，
+    一眼可判、不需要碰盘。
+    """
+    cands = [str(value or "")]
+    cands += [str(meta.get(k) or "") for k in _CTF_PATH_META_KEYS]
+    for c in cands:
+        if not c:
+            continue
+        segs = [s for s in c.replace("\\", "/").split("/") if s]
+        if any(_ATT_DIR_RE.match(s) for s in segs):
+            return (
+                "[拒绝] 这是解压产物，不是资产：路径命中 unpack_attachment 的解压目录"
+                "（scratch/att-<sha12>/）。zip 内文件**不要**登记为资产——解压清单与"
+                "各文件路径已在 unpack_attachment 回执里，直接 read_file/run_cmd 用；"
+                "分析结论走 bb_add_finding（自动挂到本题下）。只有**题目附件本体**"
+                "才登记：bb_add_asset type=binary value=<附件真实 sha256>"
+                "（不用传 parent_id，会自动挂到本题资产下）。")
+    return None
+
+
+def _file_sha256(p: Path) -> str | None:
+    h = hashlib.sha256()
+    try:
+        with open(p, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+    except OSError:
+        return None
+    return h.hexdigest()
+
+
+def _resolve_asset_path(rel: str, ws: Path, scratch: Path) -> Path | None:
+    """``meta.path`` 的宽容解析：模型写法不统一，逐个试，取第一个真实文件。
+
+    实测出现过的形态：`scratch/att-<sha12>/pwn`（相对 **工作区根**，模型自己加的
+    前缀）、`att-<sha12>/pwn`（相对 scratch，unpack 回执给的标准形态）、
+    `/workspace/artifacts/attachments/<sha12>_<name>`（容器绝对路径）。
+    `_resolve_read_path` 只覆盖后两种，故这里补「相对 ws」一支。都不是文件返回
+    None（不猜）。
+    """
+    raw = str(rel or "").replace("\\", "/").strip()
+    if not raw:
+        return None
+    cands: list[Path] = []
+    try:
+        cands.append(_resolve_read_path(raw, ws, scratch))
+    except (OSError, ValueError):
+        pass
+    p = Path(raw)
+    if p.is_absolute() or raw.startswith("/"):
+        cands.append(p)
+    else:
+        cands.append(ws / raw)
+        cands.append(scratch / raw)
+    for c in cands:
+        try:
+            if c.is_file():
+                return c
+        except OSError:
+            continue
+    return None
+
 # stuck-convergence D6（2026-09-23）：收尾确认轮上限——防确认本身拖收尾烧 token
 _CLOSING_MAX_ROUNDS = 2
 
@@ -521,6 +644,7 @@ class ToolDispatcher:
     plan_only_mode = state_proxy("plan_only_mode")
     closing_round = state_proxy("closing_round")
     closing_last_progress = state_proxy("closing_last_progress")
+    deliveries = state_proxy("deliveries")
 
     def set_step(self, n: int) -> None:
         self._step = n
@@ -1231,6 +1355,15 @@ class ToolDispatcher:
             more = (f" 等 {len(skipped)} 条" if len(skipped) > _UNPACK_SKIP_NOTE_CAP
                     else "")
             lines.append(f"[跳过] {note}{more}")
+        # CTF 轨口径（2026-10-21）：解压产物不是资产。此前模型按 KB 技能
+        # 「附件本体 bb_add_asset type=binary」的写法，把 **zip 内文件**也登记
+        # 了一遍且不传 parent_id → 根级 binary → 题目页渲染成重复声明的一道题。
+        # 在回执里就把边界说清，比事后拒绝省一整轮工具调用。
+        if (self.track or "").strip().lower() == "ctf":
+            lines.append("注意：这些解压产物**不要**登记为资产（bb_add_asset 会拒）"
+                         "——路径已在上面，直接读；结论走 bb_add_finding。只有题目"
+                         "附件本体才登记（type=binary，不用传 parent_id，会自动挂到"
+                         "本题资产下）。")
         lines.append(f"后续读取: read_file/search_files 用相对 scratch 路径 "
                      f"{dirname}/... （未指定 path 的默认检索已收窄到本目录）")
         body = "\n".join(lines)
@@ -1360,6 +1493,26 @@ class ToolDispatcher:
         scope_verdict = check_project_scope(self.bb, self.project_id, value)
         if not scope_verdict.allowed:
             return self._scope_expand_request(value, scope_verdict.reason)
+        # ---------- CTF 轨登记口径（2026-10-21，见模块头部 _ctf_unpack_product） ----------
+        # 只动 CTF 轨、只动「模型自己传错」的两种形态；显式 parent_id 与非 CTF 轨
+        # 一律保持原口径（渗透/红队/研究轨的资产树语义不变）。
+        ctf_fallback = False
+        if (self.track or "").strip().lower() == "ctf":
+            meta_d = dict(meta) if isinstance(meta, dict) else {}
+            # ① 解压产物不登记：zip 内文件不是资产，登记只会在题目页堆出根资产
+            rej = _ctf_unpack_product(value, meta_d)
+            if rej:
+                return rej
+            # ② 哈希纠偏：binary 的 value 必须是文件真实 sha256。模型抄错/编造的
+            #    哈希没有任何下游能反查，还会绕开同值去重（实测同一文件两条行）。
+            fix = self._ctf_binary_hash_fix(value, type, meta_d)
+            if fix:
+                return fix
+            # ③ parent 兜底：未显式给 parent_id → 挂到本题资产下（与 declare_intent
+            #    / bb_add_finding 同口径）。取不到才维持 None——不编造归属。
+            if not (parent_id and str(parent_id).strip()):
+                parent_id = self._challenge_fallback_asset()
+                ctf_fallback = parent_id is not None
         try:
             r = register_asset(self.bb, self.project_id, value, type_=type,
                                parent_id=parent_id, meta=meta, author=self.author,
@@ -1374,7 +1527,45 @@ class ToolDispatcher:
         if not r["created"] or r.get("host_existed"):
             reply += ("\n[提示] 命中既有资产（同值或同 IP）：先 bb_query what=assets 查重，"
                       "不要对同一目标重复登记、重复扫描；确需补挂/补 meta 才复报。")
+        if ctf_fallback:
+            reply += (f"\n[提示] 已挂到本题资产下（parent={parent_id}）：CTF 轨里"
+                      "解压产物/zip 内文件不要登记为资产（路径见 unpack_attachment "
+                      "回执），结论走 bb_add_finding。")
         return reply
+
+    def _ctf_binary_hash_fix(self, value: str, type_: str, meta: dict) -> str | None:
+        """CTF 轨 binary 资产的 value 必须是**文件真实 sha256**；不符返回拒绝文案。
+
+        只有「值形态是 64  hex」且「meta 给了工作区内真实文件路径」时才校验——
+        拿不到文件就不猜（可能登记的是报告里的已知样本哈希，无路径可对）。
+        拒绝文案里带**算出来的实际值**，模型下一轮照抄即可，不用再跑一次 sha256sum。
+        """
+        raw = str(value or "").strip()
+        t = (type_ or "").strip().lower()
+        if t not in ("", "auto", "binary"):
+            return None
+        if not _HEX64_RE.match(raw):
+            return None
+        rel = ""
+        for k in _CTF_PATH_META_KEYS:
+            v = str(meta.get(k) or "").strip()
+            if v:
+                rel = v
+                break
+        if not rel or not self.artifacts_dir:
+            return None
+        ws = Path(self.artifacts_dir).parent
+        p = _resolve_asset_path(rel, ws, ws / "scratch")
+        if p is None:
+            return None
+        real = _file_sha256(p)
+        if not real or real == raw.lower():
+            return None
+        return (f"[拒绝] binary 资产的 value 与文件实际 sha256 不符：你给的是 "
+                f"{raw[:16]}…，实际是 {real}。编造/抄错的哈希没有任何下游能反查，"
+                f"还会绕开同值去重（同一个文件会被登记成两条资产）。改法："
+                f"value={real}（meta.path 保持 {rel}；附件本体登记不用传 "
+                f"parent_id，会自动挂到本题资产下）。")
 
     # ---------- CTF 题目（challenge-asset，v38，2026-10-14） ----------
 
@@ -1423,13 +1614,21 @@ class ToolDispatcher:
 
     def _tool_bb_declare_challenge(self, name: str,
                                    description: str = "",
-                                   tags: list | None = None) -> str:
+                                   tags: list | None = None,
+                                   flag_count: int | None = None,
+                                   flag_hints: list | str | None = None) -> str:
         """CTF 轨：登记/复用一道题目，并绑定到当前线程（challenge-asset v38）。
 
         用户把「题目描述 + 附件」一起丢进输入框、黑板还没有对应题目节点时调用。
         绑完之后，本线程后续的 `declare_intent` / `bb_add_finding` 不必再传
         `target_asset_id`，会自动归到这道题下。附件本身不用登记（走题目子资产
         通道）。同一道题重复调用 = 复用既有节点，不会插重复行。
+
+        ``flag_hints``（flag-hint，2026-10-21）：多 flag 题的**每条提示**，按
+        序号对齐 ``flag_count``。用户的原话是题面里通常写着「需要 xxxx 管理员
+        后台密码为 flag」「分析流量得到 xxx 版本，版本号为 flag」——这类句子
+        才是判断「这条 flag 属于哪个方向」的依据。登记时存下来，之后人工确认
+        某条 flag 时会把对应提示发给正在跑的 agent，让它自己决定收尾还是继续。
         """
         if self.track != "ctf":
             return ("[拒绝] bb_declare_challenge 仅 CTF 轨可用"
@@ -1440,6 +1639,7 @@ class ToolDispatcher:
         try:
             r = register_challenge(self.bb, self.project_id, name,
                                    description=description, tags=tags,
+                                   flag_count=flag_count, flag_hints=flag_hints,
                                    thread_id=tid, author=self.author,
                                    session_id=self.session_id)
         except ValueError as e:
@@ -1469,7 +1669,8 @@ class ToolDispatcher:
     def _tool_ctf_submit_flag(self, flag: str, evidence: str = "",
                               source: str = "", transform: str = "",
                               challenge_id: str = "",
-                              candidate: bool = False) -> str:
+                              candidate: bool = False,
+                              hint_index: int | None = None) -> str:
         """判定并登记一个 flag（ctf-flagjudge，2026-10-19）。
 
         **为什么需要这个工具**：此前「这道题解出来没有」完全靠模型自述——它会
@@ -1477,7 +1678,8 @@ class ToolDispatcher:
         别的题的 flag 当本题答案，也没人验证「解码得到 flag」这句是不是真的。
         本工具把 hxbai 的三道机械判定搬进来：
 
-        1. **格式置信**（`flagjudge.flagishness`）：可信前缀 + 内层熵 + 诱饵惩罚；
+        1. **格式置信**（`flagjudge.flagishness`）：可信前缀 + 内层熵（含不依赖前缀
+           名单的**结构化内层**信号）+ 诱饵惩罚；
         2. **变换回环**（`flagjudge.roundtrip_verify`）：给了 source+transform 时
            验证「flag 按该变换编码回去确实出现在 source 里」——真解码必然回环，
            瞎猜不会；
@@ -1528,12 +1730,10 @@ class ToolDispatcher:
             # 硬卡格式会误杀）。
             score += flagjudge.FORMAT_MATCH_BONUS
         if not candidate and score < flagjudge.FLAGISH_FLOOR:
-            why = ("前缀是诱饵词（fake/example/test/dummy…）" if flagjudge.is_bait_prefix(token)
-                   else "前缀不可信或内层信息量不足")
+            why = self._flag_reject_reason(token)
             return (f"[拒绝] {token} 置信分 {score:.1f} < 阈值 "
                     f"{flagjudge.FLAGISH_FLOOR:.1f}（{why}）——不像正式 flag。"
-                    "若这是管理员密码/API key 这类**候选线索**，加 candidate=true 再报"
-                    "（会作为 intel 线索登记，不判为解出）。")
+                    + self._flag_reject_hint(token))
         # ② 变换回环
         if source and transform:
             rt = flagjudge.roundtrip_verify(token, source, transform)
@@ -1605,7 +1805,8 @@ class ToolDispatcher:
                 flag_format=declared_format, confidence=score,
                 source=brief[:2000], transform=str(transform or ""),
                 judged_by="ai", verdict="pending", author=self.author,
-                session_id=str(self.session_id or ""))
+                session_id=str(self.session_id or ""),
+                hint_index=hint_index)
         except ValueError as e:
             return f"[拒绝] {e}"
         if ledger.get("rejected"):
@@ -1663,6 +1864,41 @@ class ToolDispatcher:
         notes.append("已入 flag 台账（verdict=pending 候选，等人工确认；"
                      "用户可在题目卡片上确认或标记为错误）")
         return "[已登记] " + " · ".join(notes)
+
+    @staticmethod
+    def _flag_reject_reason(token: str) -> str:
+        """置信不足的**具体**原因——按本次入参算，不给不相干的例子。"""
+        if flagjudge.is_bait_prefix(token):
+            return "前缀是诱饵词（fake/example/test/dummy…）"
+        if flagjudge.is_bait_inner(token):
+            return "内层是占位词（example/test/xxx…）"
+        inner = flagjudge.inner_of(token) or ""
+        pfx = str(token or "").split("{", 1)[0]
+        if inner and len(inner.strip()) < flagjudge.MIN_INNER_LEN:
+            return f"内层只有 {len(inner.strip())} 个字符，像手工占位"
+        if inner and pfx:
+            return (f"前缀 {pfx} 不在已知赛事名单里，内层也没有「够长 + 字母数字混排"
+                    " + 分隔符/大小写混排」这类构造特征")
+        return "内层信息量不足"
+
+    @staticmethod
+    def _flag_reject_hint(token: str) -> str:
+        """拒绝后的**可执行**出口，而不是让模型原样重报。
+
+        2026-10-21 现场：真 flag `shellamtes{Y0u_H4vE_...}` 只得 1.5 分被拒，
+        回执只写「加 candidate=true 再报」——模型照做就把**真答案**降级成 intel
+        线索（不进台账、不判解出）。所以文案必须分清两种情形，并明说「原样重报
+        没有意义」（否则模型会拿同一串白烧一轮）。
+        """
+        out = ""
+        if flagjudge.inner_of(token):
+            out += ("前缀陌生不等于假（赛事前缀本身是任意的），但本工具只按形态判分，"
+                    "**原样重报同一串不会有不同结果**。若确认是真实 flag，走人工："
+                    "让用户在题目卡片上补 `flag_format`（如 `shellamtes{}`）后重报"
+                    "（命中声明格式会直接加权），或在卡片上直接登记。")
+        out += ("若这是管理员密码/API key 这类**候选线索**，加 candidate=true 再报"
+                "（会作为 intel 线索登记，不判为解出）。")
+        return out
 
     def _challenge_flag_format(self, challenge_id: str) -> str:
         """题目声明的 flag 格式（meta.flag_format，''=未声明）。"""
@@ -2993,6 +3229,23 @@ class ToolDispatcher:
                 session_id=self.session_id, author=self.author)
             self.last_progress_step = self._step
             return body
+        # 根目录元文档兜底（2026-10-21）：写作规范等**不属于任何能力域**的文档
+        # 放在 ``packs/kb/`` 根目录，按域解析必然落空 → 模型永远打不开。
+        # 只放白名单内的明确元文档（kspec.ROOT_DOCS），不做通用根目录读（防越界）。
+        # 判据在 kspec.resolve_root_doc（模块级），只读桩也能复用同一份。
+        fp = resolve_root_doc(self.packs_root, rel)
+        if fp is not None:
+            try:
+                body = fp.read_text(encoding="utf-8", errors="replace")
+            except OSError as e:
+                return f"[错误] 知识库根文档读取失败: {e}"
+            self.bb.append_event(
+                self.project_id, "kb.open",
+                {"source": "kb-root", "module": rel, "path": str(fp),
+                 "chars": len(body)},
+                session_id=self.session_id, author=self.author)
+            self.last_progress_step = self._step
+            return body
         lines = ["[防幻觉] 模块不存在: " + rel, "可用模块（照清单改选，禁止猜名）:"]
         for src in sources:
             if not src.root.is_dir():
@@ -3029,6 +3282,11 @@ class ToolDispatcher:
                 for r in search_kb(self.packs_root, cap, q, limit=limit, tag=tag):
                     # M0：path 加域前缀成全局 module 形态（kb_open 直接可用）
                     r["path"] = f"{cap}/{r['path']}"
+                    # **cap 就是 path 的第一段**（2026-10-21 Nan 报 bug）。
+                    # 此前输出的是 `r["source"]`＝KbSource.id（`forensics-kb`），
+                    # 模型照抄成 propose_pack_edit 的 target.cap → KbError。
+                    # 两个字符串长得像但语义不同：source 是内部源标识，cap 是目录名。
+                    r["cap"] = cap
                     rows.append(r)
             except Exception:  # 单域检索失败不拖垮整体
                 continue
@@ -3042,10 +3300,12 @@ class ToolDispatcher:
             return (f"[无命中] 知识库中没有包含 {q!r} 的文档。"
                     "可换中英文关键词各试一次，或按技能正文对照表用 kb_open 直接开模块。")
         lines = [f"kb 检索 {q!r} 命中 {len(rows)} 篇（path 即 kb_open 的 module 参数，"
-                 "再用 kb_open 直接读取正文）:"]
+                 "再用 kb_open 直接读取正文）:",
+                 "> 提案要用 target.cap 时取 **path 的第一段**（下表的 cap=…），"
+                 "不要用内部源标识（形如 `forensics-kb`，那是 KbSource.id，不是目录名）。"]
         for r in rows:
             snippet = (r.get("snippet") or "")[:120]
-            lines.append(f"- {r['path']}（源 {r['source']}，命中 {r['matches']}）\n"
+            lines.append(f"- {r['path']}（cap={r['cap']}，命中 {r['matches']}）\n"
                          f"  {snippet}")
         self.last_progress_step = self._step
         return "\n".join(lines)
@@ -3130,7 +3390,68 @@ class ToolDispatcher:
                 f"同目录可用资源（用 skill_open(path=...) 按需读取）：\n{manifest}")
 
     # 每会话提案上限（DESIGN §4：防凑数/提案洪泛）
-    PROPOSE_LIMIT_PER_SESSION = 3
+    # 2026-10-21 Nan 调整：3 → 20。理由：一个会话解一道题往往能沉淀 5~10 条
+    # （不同方向各一条），3 条会逼模型「挑最值的三条」，剩下的经验直接丢。
+    # 防凑数的真正闸门是**机械质检**（单题痕迹/裸数字/缺判据表）+ **人审**，
+    # 不是数量上限——上限只该防「无限刷」，20 条足够覆盖一道题的全部方向。
+    PROPOSE_LIMIT_PER_SESSION = 20
+
+    def _is_spawned_subagent(self) -> bool:
+        """本会话是否由主控 `call_expert` 派生（= 有父线程）。
+
+        **判据只看 `parent_thread_id`，不看 `spawned_task`**：
+        `ChatTurn._is_spawned_subagent` 要求两者都非空（它还要防「控制器被当
+        专家委派」的语义兜底），但提案门禁要判的是「这条会话是不是人开的」——
+        有父线程就是子代理，`spawned_task` 空不空不影响这个事实。
+
+        非 chat 路径（`AgentSession` / 脚本 / 测试壳）没有 `thread_id`，
+        一律返回 False：那里没有父子概念，不该被这道闸误伤。
+
+        读库失败也返回 False（宁可放行再由人审兜住，不要因一次 DB 抖动
+        把主控的正常提案挡掉）。
+        """
+        tid = str(getattr(self, "thread_id", "") or "").strip()
+        if not tid:
+            return False
+        try:
+            row = self.bb.conn.execute(
+                "SELECT parent_thread_id FROM chat_threads WHERE id=?",
+                (tid,)).fetchone()
+        except Exception:  # noqa: BLE001
+            return False
+        if row is None:
+            return False
+        try:
+            return bool(str(row["parent_thread_id"] or "").strip())
+        except (IndexError, KeyError, TypeError):
+            return False
+
+    @staticmethod
+    def _cap_fix_hint(target: dict | None) -> str:
+        """按**本次实际入参**生成 target.cap 的改法（2026-10-21）。
+
+        写死示例（「如 forensics/… → cap=forensics」）在模型传 `web-kb` 时
+        等于给了一个不相干的例子，它还得自己类比。这里直接算出正确值，
+        让它能一字不改地照抄重试。
+
+        `resolve_kb` 认两种 path 形态（writing.py:176）：
+        - 全局 ``<域>/<快照>/<路径>``（首段==cap）——kb_open / kb_search 主形态；
+        - 域内相对 ``<快照>/<路径>``（首段≠cap）——向后兼容旧引用。
+        所以正确 cap 的线索按可靠性排序：① path 首段若是合法域 → 就是它；
+        ② 否则 cap 自身若是 `<域>-kb` 形态 → 去掉后缀；③ 都没有 → 列清单。"""
+        from core.skills.taxonomy import KB_DIRECTIONS
+        cap = str((target or {}).get("cap") or "").strip()
+        path = str((target or {}).get("path") or "").replace("\\", "/").lstrip("/")
+        head = path.split("/", 1)[0] if path else ""
+        tail = f"cap 是**目录名**，不是 kb_search 输出里形如 `xxx-kb` 的内部源标识。"
+        if head in KB_DIRECTIONS:
+            return (f"改法：target.cap 改成 {head!r}——它就是 target.path 的第一段"
+                    f"（`{path}` → cap=`{head}`）。{tail}")
+        if cap.endswith("-kb") and cap[:-3] in KB_DIRECTIONS:
+            return (f"改法：target.cap 改成 {cap[:-3]!r}——你传的 {cap!r} 是内部源标识"
+                    f"（KbSource.id，= `<域>-kb`），去掉 `-kb` 就是目录名。{tail}")
+        return (f"改法：target.cap 取 target.path 的第一段（当前 path={path!r}）；"
+                f"合法 cap：{'、'.join(KB_DIRECTIONS)}。{tail}")
 
     def _tool_propose_pack_edit(self, kind: str, mode: str, target: dict,
                                 summary: str, reason: str,
@@ -3140,9 +3461,26 @@ class ToolDispatcher:
         **项目级开关门禁（2026-10-15，Nan 报 bug：关闭「知识库迭代」时主控仍在
         提提案）**：本工具是 Agent 主动提案的唯一入口，与轮末自动提案
         （kbiteration.run_iteration）同口径读 ``config.kb_iteration.enabled``——
-        关闭即拒。此前只有轮末路径有门禁、工具路径裸奔，是 bug 根因。"""
+        关闭即拒。此前只有轮末路径有门禁、工具路径裸奔，是 bug 根因。
+
+        **只有主控能提提案（2026-10-21 Nan 要求）**：`call_expert` 派生的子代理
+        一律拒。理由不是「子代理没证据」——恰恰相反，子代理才有一手证据；
+        问题是**子代理各自为战、只看得到自己那一段**：它不知道别的方向试过
+        什么、也不知道主控最终怎么收敛，提上来的往往是「我这个方向应该写进
+        手册」，而全局看可能根本不值得写（方向本身就是死路）。提案权收归主控，
+        由它汇总后统一提——它看得到全部子线程摘要，判断「什么值得沉淀」才准。
+        子代理要贡献内容，正确路径是主控用 `ask_expert` 追问细节（见 runtime
+        `_tool_ask_expert`），而不是自己提。"""
         if not self.packs_root:
             return "[错误] 本会话未配置 packs_root，无法提提案"
+        # **身份闸排最前**：这是「你是谁」层面的禁令，与「开关开没开」「配额
+        # 还剩多少」无关。排在后面时，子代理会先看到「开关没开」这种可操作的
+        # 提示，误以为让人类开开关就能提，白烧一轮。
+        if self._is_spawned_subagent():
+            return ("[拒绝] 子代理不能发起变更提案：只有主控能提（你这条会话是"
+                    "主控 call_expert 派生的）。不要重试本工具——若你有值得沉淀的"
+                    "发现，直接写进你的**收尾摘要**告诉主控（关键判据/踩到的坑/"
+                    "哪份手册写错了），主控会汇总后统一提提案。")
         try:
             from core.skills import kbiteration
             proj = self.bb.get_project(self.project_id)
@@ -3173,6 +3511,14 @@ class ToolDispatcher:
             p = proposals.create_proposal(self.packs_root, payload, origin="agent")
         except ProposalError as e:
             return f"[拒绝] 提案非法，未落地: {e}"
+        except writing.KbError as e:
+            # **必须回填 `[拒绝]` 而非放任成 `[工具异常]`**（2026-10-21 Nan 报 bug）：
+            # 裸 KbError 会冒到 `_dispatch` 兜底变成 `[工具异常] KbError: …`，
+            # 那是「工具坏了」的语义，模型会原样重试同一调用；而这里实际是
+            # **target 参数写错**（典型：cap 填成 `forensics-kb`），要的是改参数。
+            # 改法按**本次实际入参**动态生成，模型能直接照抄，不必再猜一轮。
+            return (f"[拒绝] 提案 target 参数非法，未落地: {e}\n"
+                    f"{self._cap_fix_hint(target)}")
         self.bb.append_event(
             self.project_id, "proposal.created",
             {"id": p["id"], "kind": kind, "mode": mode,
@@ -3464,9 +3810,96 @@ class ToolDispatcher:
                         f"{lines}\n逐个 close_intent 收尾（漏洞/发现/死路）；确有客观原因"
                         "无法收尾，再次 finish 并在 summary 写明原因。")
         self.finished = True
-        self.summary = summary
+        # 收尾文本以**交付**为主（deliver，2026-10-21）：任务链与对话轮同口径，
+        # 见 `compose_delivery_summary`。没交付过时这里等价于 `summary`。
+        self.summary = compose_delivery_summary(self.deliveries, summary)
         self._close_browser_session()
         return "会话即将结束"
+
+    # ---------- 交付（deliver，2026-10-21 Nan 要求） ----------
+
+    def _tool_deliver(self, content: str, next_step: str = "") -> str:
+        """交付本次成果给主控/人类——**不结束本轮**。
+
+        **为什么要与 `finish` 分开**（用户原话）：「当子 agent 完成主控派的任务时，
+        可以使用工具（直接返回本次需要交付的内容），在主控那边 call_expert 仍然
+        显示运行中。子代理如果认为自己可以取得更大成果，如获取 flag，或者与获取
+        flag 强相关内容，可以继续运行，而不是直接进行收尾，放弃获取 flag 的机会。」
+
+        此前唯一的交付通道是**收尾**（对话轮里连 `finish` 都没有，靠「模型不再调
+        工具」隐式结束）：子 agent 一旦把手上成果说出来，这一轮就结束了。CTF 场景
+        代价最大——worker 常常「已经能交一部分（比如拿到一个 flag、或定位到密码
+        位置），但再挖几步就能拿满」，它没有「先交、再继续」的选项，只能在
+        「憋着不交」和「交了就走」之间二选一。
+
+        本工具把「交付」从「收尾」里拆出来：
+        - **只写交付箱 + 落事件，不置 `finished`**，本轮继续跑；
+        - 主控的 `call_expert` 因此**仍显示运行中**（它本来就是在等本轮结束）；
+        - 可反复交付，主控最终拿到的是**最后一次**交付（见
+          `ChatTurn._compose_final`），不是只有收尾那段话。
+
+        **为什么回显正文**（用户要求「直接返回本次需要交付的内容」）：模型对「我刚
+        才说了什么」的短期记忆并不可靠，回显一份让它能自查「交的东西是否就是我想
+        交的」，也让这次 tool_result 本身成为一份可追溯的交付凭据。
+        """
+        body = str(content or "").strip()
+        if not body:
+            return ("[拒绝] deliver 失败：content 必填——写清本次要交付给主控的"
+                    "结论/成果/证据（flag、路径、可复现命令、还差什么）")
+        if len(body) > _DELIVER_MAX_CHARS:
+            body = body[:_DELIVER_MAX_CHARS]
+        nxt = str(next_step or "").strip()[:400]
+        try:
+            from core.blackboard.store import now as _now
+            ts = _now()
+        except Exception:  # noqa: BLE001
+            ts = ""
+        items = list(self.deliveries or [])
+        # 序号取「上一条 + 1」而不是 `len(items)+1`：箱子有保留上限，裁剪后 len
+        # 会卡在 _DELIVER_KEEP，用 len 算会让第 21 次之后的序号**原地重复**
+        # （实测：交 25 次，最后一条显示「第 21 次」）。
+        try:
+            n = int(items[-1].get("n") or 0) + 1 if items else 1
+        except (AttributeError, TypeError, ValueError):
+            n = len(items) + 1
+        items.append({"n": n, "content": body, "next_step": nxt, "at": ts})
+        # 只留最近 N 条：更早的已落事件表（可复盘），内存里不必囤。
+        self.deliveries = items[-_DELIVER_KEEP:]
+        try:
+            self.bb.append_event(
+                self.project_id, "chat.delivery",
+                {"session_id": self.session_id, "thread_id": self.session_id,
+                 "n": n, "chars": len(body), "head": body[:300],
+                 "next_step": nxt},
+                session_id=self.session_id, author=self.author)
+        except Exception:  # noqa: BLE001 —— 事件失败不该让交付失败
+            log.exception("deliver 事件落库失败 session=%s", self.session_id)
+        # 交付即实质进展：卡死检测据此清零（憋着不交的模型会被当成原地打转）。
+        self.last_progress_step = self._step
+        head = [
+            f"[已交付 · 第 {n} 次] 主控已收到本次内容；"
+            "**主控那边 call_expert 仍显示运行中**——交付不等于结束，本轮继续。",
+            "",
+            "本次交付内容（原样回显，核对一下你交的是不是这个）：",
+            "---",
+            body,
+            "---",
+        ]
+        if nxt:
+            head.append(f"你说的下一步：{nxt}")
+        head.extend([
+            "",
+            "接下来**你自己判断**：",
+            "- **还能取得更大成果 → 继续做**。CTF 轨尤其如此：只要还能拿到 flag，"
+            "或手里有与 flag 强相关的线索（能定位到密码/密钥/关键表/可回环的变换链），"
+            "就接着挖——不要因为「已经交过东西」就收尾，那等于主动放弃拿 flag 的机会。",
+            "- **确实已无更大成果 → 用一段文本总结结束本轮**。结束时主控拿到的就是"
+            "你**最后一次交付**的内容（外加你这段收尾说明），所以别把关键结论只写在"
+            "收尾里。",
+            "",
+            "交付可以多次：每交一次就覆盖「主控看到的最新成果」，不必攒到最后。",
+        ])
+        return "\n".join(head)
 
     def _tool_request_steps(self, reason: str = "") -> str:
         """E8 自助加步：一次固定 +200；剩余 >20 拒收（防囤步数），落审计事件。"""

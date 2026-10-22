@@ -190,7 +190,11 @@ def run_redline_test(bb, *, session_id: str, provider: str = "",
             if not prov or not mod:
                 dname, dmodel = store.default_target()
                 prov, mod = prov or dname, mod or dmodel
-            llm = store.build(prov or None, mod or None, timeout=PROBE_TIMEOUT)
+            # fallback=False（provider-failover，2026-10-21）：自检要测的是
+            # 「**这一家**通不通」。挂兜底链会把 A 的失败静默换成 B 的成功，
+            # 结论就变成假的（用户以为 A 通了）。
+            llm = store.build(prov or None, mod or None, timeout=PROBE_TIMEOUT,
+                              fallback=False)
         except Exception as e:  # noqa: BLE001 —— 供应商不可用要能说人话
             out["verdict"] = "probe_failed"
             out["error"] = f"供应商构建失败：{e}"

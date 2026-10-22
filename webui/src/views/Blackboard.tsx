@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { Textarea } from "@/components/ui/textarea"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { cn } from "@/lib/utils"
 import { SEVERITY_COLOR } from "@/lib/events"
@@ -500,9 +501,25 @@ export function Findings({ pid, track, showCanvas }: {
 // 允许 `已访问+有发现` / `已测试·干净+有发现` 同时出现。
 /** CTF 轨下「题目」判定（challenge-asset v38，2026-10-14）：`type=challenge` 的规范
  *  题目节点，**或 CTF 轨下的根资产**——旧数据/直挂附件没有 challenge 节点，CTF 轨下
- *  根资产即题目载体（一个项目一道题时，根资产就是这道题）。 */
+ *  根资产即题目载体（一个项目一道题时，根资产就是这道题）。
+ *
+ *  **排除「解压产物」形态的根 binary**（2026-10-21，实测事故后收紧）：子专家解压 zip
+ *  后把 zip 内文件按二进制登记且不传 parent_id，落成根级 binary，被这条兼容规则渲染成
+ *  「又声明了一道题」——用户在题目页看到重复题目（实测 ctf-2：3 条孤儿 binary，其中
+ *  一条 value 还是模型编造的哈希）。判据与后端同源：值是 64 位 hex、meta 无 kind、
+ *  且 meta.path 缺失或落在解压目录 `scratch/att-<sha12>/` 里。真正的题目附件本体
+ *  path 在 `artifacts/attachments/` 下，不受影响。 */
+const _SHA256_RE = /^[0-9a-f]{64}$/i
+/** 解压目录分段（与后端 `_ATT_DIR_RE` 同口径）：`att-<12hex>` 只出现在 scratch 解压目录里 */
+const _UNPACK_DIR_RE = /(^|\/)att-[0-9a-f]{12}(\/|$)/i
+const _isUnpackArtifact = (a: Asset) =>
+  a.type === "binary" &&
+  _SHA256_RE.test(a.value) &&
+  !a.meta?.kind &&
+  (!a.meta?.path || _UNPACK_DIR_RE.test(String(a.meta.path)))
 const isChallengeAsset = (a: Asset, track?: string) =>
-  a.type === "challenge" || (isCtfTrack(track) && !a.parent_id)
+  a.type === "challenge" ||
+  (isCtfTrack(track) && !a.parent_id && !_isUnpackArtifact(a))
 /** 题目已解出 flag 的绿色徽章（2026-10-14）：**完整显示** flag，点即复制（1.5s 回显 ✓）。
  *  flag 由该题目子树内 finding 的 evidence 识别（`extractFlag`，零 schema 迁移）。 */
 function FlagBadge({ flag }: { flag: string }) {
@@ -1386,6 +1403,14 @@ function ChallengeFlagLedger({ asset, onClose, onMutated }: {
   const [busy, setBusy] = useState(false)
   const [manual, setManual] = useState("")
   const [manualSource, setManualSource] = useState("")
+  // 否决理由**行内收集**，不用 window.prompt（2026-10-21 修用户实测「点着没反应」）：
+  // 桌面壳（Electron）在渲染进程把 `window.prompt` 换成了 `throw new Error(...)`，
+  // 而 `decide` 是 async —— 函数体内的同步抛错变成 rejected promise，调用处
+  // `void decide(...)` 把它丢掉，于是**无请求、无报错、无任何 UI 反馈**。
+  // `confirm`/`alert` 在 Electron 里正常，坏的只有 `prompt`，故只换这三处调用。
+  const [rejecting, setRejecting] = useState<string | null>(null)
+  const [rejectReason, setRejectReason] = useState("")
+  const [rejectErr, setRejectErr] = useState("")
 
   const refresh = useCallback(() => {
     api.challengeFlags(asset.id).then((r) => { setData(r); setErr("") })
@@ -1393,17 +1418,26 @@ function ChallengeFlagLedger({ asset, onClose, onMutated }: {
   }, [asset.id])
   useEffect(() => { refresh() }, [refresh])
 
-  const decide = async (flagId: string, verdict: "accepted" | "rejected" | "pending") => {
-    const reason = verdict === "rejected"
-      ? window.prompt("标记为错误 flag 的理由（会写进台账，AI 之后不会再提交这串）：", "") ?? ""
-      : ""
-    if (verdict === "rejected" && reason === null) return
+  const decide = async (flagId: string, verdict: "accepted" | "rejected" | "pending",
+                        reason = "") => {
     setBusy(true); setErr("")
     try {
       await api.decideChallengeFlag(asset.id, flagId, { verdict, reason })
+      setRejecting(null); setRejectReason(""); setRejectErr("")
       refresh(); onMutated()
     } catch (e) { setErr(e instanceof Error ? e.message : String(e)) }
     finally { setBusy(false) }
+  }
+
+  /** 点「标记为错误」→ 先展开理由输入（**不提交**）；理由必填，取消即彻底不动。 */
+  const startReject = (flagId: string) => {
+    setRejecting(flagId); setRejectReason(""); setRejectErr("")
+  }
+
+  const confirmReject = async (flagId: string) => {
+    const r = rejectReason.trim()
+    if (!r) { setRejectErr("标记为错误必须填理由——它决定 AI 之后还能不能重提这串"); return }
+    await decide(flagId, "rejected", r)
   }
 
   const addManual = async () => {
@@ -1429,9 +1463,33 @@ function ChallengeFlagLedger({ asset, onClose, onMutated }: {
 
   const st = data?.state
   const quotaLabel = st ? `${st.accepted}/${st.quota}` : "—"
+  // 每条 flag 对应的题面提示（flag-hint，2026-10-21）：台账行上只有 `hint_index`，
+  // 提示正文在题目级 `flag_hints` 上。未指定（-1）的按 accepted 登记顺序补空位
+  // ——与后端 `accepted_flag_briefs` 同口径，否则「AI 提交时没带 hint_index」
+  // 的行会全部显示成「无提示」，而这恰恰是最需要人核对方向的那些行。
+  const hintOf = new Map<string, { idx: number; hint: string }>()
+  if (data) {
+    const hints = data.flag_hints ?? []
+    const acc = data.flags.filter((f) => f.verdict === "accepted")
+    const used = new Set<number>()
+    for (const f of acc) {
+      const i = Number(f.hint_index ?? -1)
+      if (i >= 0) used.add(i)
+    }
+    let seq = 0
+    for (const f of acc) {
+      let i = Number(f.hint_index ?? -1)
+      if (i < 0) { while (used.has(seq)) seq += 1; i = seq; used.add(i) }
+      hintOf.set(f.id, { idx: i + 1, hint: hints[i] ?? "" })
+    }
+  }
+  // 多 flag 题（quota > 1）与单 flag 题的「确认有效」后果完全不同：单 flag 确认
+  // 即解出，多 flag 确认只是 1/N。文案必须分叉，否则用户点确认后以为题目已完，
+  // 而 agent 那边其实还在找剩下的（flag-hint，2026-10-21）。
+  const multi = (st?.quota ?? 1) > 1
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-      <div className="flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-lg border bg-background shadow-xl">
+      <div role="dialog" aria-modal="true" className="flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-lg border bg-popover shadow-xl">
         <div className="flex shrink-0 items-center gap-2 border-b px-4 py-2">
           <span className="text-[10px] text-muted-foreground">flag 台账</span>
           <span className="min-w-0 flex-1 truncate text-sm font-medium">{asset.value}</span>
@@ -1468,7 +1526,10 @@ function ChallengeFlagLedger({ asset, onClose, onMutated }: {
           {st && st.candidate > 0 && st.accepted < st.quota && (
             <p className="rounded border border-(--status-approval)/40 bg-(--status-approval)/5 px-2 py-1 text-[11px] text-(--status-approval)">
               有 {st.candidate} 条**候选**待你确认，但它们**不算解出**（已确认 {st.accepted}/{st.quota}）——
-              调度层仍在为这道题派 Worker。确认有效即视为解出，并会立刻停止正在跑的探索。
+              调度层仍在为这道题派 Worker。
+              {multi
+                ? `本题要 ${st.quota} 条 flag，确认一条只是 ${st.accepted + 1}/${st.quota}，探索会继续；只有拿满 ${st.quota} 条才判解出。`
+                : "确认有效即视为解出，正在跑的探索会收到通知并收尾。"}
             </p>
           )}
           {st && st.conflict.length > 0 && (
@@ -1477,7 +1538,9 @@ function ChallengeFlagLedger({ asset, onClose, onMutated }: {
               一道题通常只有一种格式，至少一条是假的——请标记掉错误的那条，否则本题不会算解出。
             </p>
           )}
-          {(data?.flags ?? []).map((f) => (
+          {(data?.flags ?? []).map((f) => {
+            const meta = hintOf.get(f.id)
+            return (
             <div key={f.id} className="rounded border px-2 py-1.5">
               <div className="flex flex-wrap items-center gap-2">
                 <span className={cn("font-mono text-xs",
@@ -1490,31 +1553,72 @@ function ChallengeFlagLedger({ asset, onClose, onMutated }: {
                       : "text-(--status-approval)")}>
                   {f.verdict === "accepted" ? "人工确认" : f.verdict === "rejected" ? "已否决" : "待复核"}
                 </Badge>
+                {/* 序号 + 对应题面：这是「这条是哪个方向来的」唯一可读的凭据。
+                    只给 flag 原文，人和 agent 都判断不出方向（flag-hint，2026-10-21）。 */}
+                {meta && f.verdict === "accepted" && (
+                  <span className="text-[10px] text-muted-foreground"
+                        title="本题第几条 flag（按题面提示的顺序）">
+                    第 {meta.idx} 条
+                  </span>
+                )}
                 <span className="text-[10px] text-muted-foreground">
                   {f.judged_by === "human" ? "人工" : "AI"} · 置信 {f.confidence.toFixed(1)}
                 </span>
                 <span className="min-w-0 flex-1" />
                 {f.verdict !== "accepted" && (
                   <button className="shrink-0 rounded border px-1.5 text-[10px] text-muted-foreground hover:border-primary/40 hover:text-primary"
-                          disabled={busy} onClick={() => void decide(f.id, "accepted")}>确认有效</button>
+                          disabled={busy}
+                          title={multi
+                            ? `确认后为 ${st ? `${st.accepted + 1}/${st.quota}` : "1/N"}，题目仍未解出，探索继续`
+                            : "确认后本题判为解出，正在跑的探索会收到通知并收尾"}
+                          onClick={() => void decide(f.id, "accepted")}>确认有效</button>
                 )}
                 {f.verdict !== "rejected" && (
                   <button className="shrink-0 rounded border px-1.5 text-[10px] text-muted-foreground hover:border-(--status-error)/40 hover:text-(--status-error)"
-                          disabled={busy} onClick={() => void decide(f.id, "rejected")}>标记为错误</button>
+                          disabled={busy} onClick={() => startReject(f.id)}>标记为错误</button>
                 )}
                 {f.verdict === "rejected" && (
                   <button className="shrink-0 rounded border px-1.5 text-[10px] text-muted-foreground hover:border-primary/40 hover:text-primary"
                           disabled={busy} onClick={() => void decide(f.id, "pending")}>撤销否决</button>
                 )}
               </div>
+              {/* 否决理由行内输入：理由不是可选项（决定 AI 之后还能不能重提这串），
+                  且「取消」必须是**真的取消**——旧实现 `?? ""` 让 `reason === null`
+                  恒不成立，浏览器里取消会变成「空理由否决」，用户以为取消了其实已否决。 */}
+              {rejecting === f.id && (
+                <div className="mt-1 rounded border border-(--status-error)/40 bg-(--status-error)/5 p-1.5">
+                  <Textarea className="min-h-[52px] resize-y bg-background text-xs" autoFocus
+                            value={rejectReason}
+                            onChange={(e) => { setRejectReason(e.target.value); setRejectErr("") }}
+                            placeholder="为什么这串是错的？（必填，会写进台账——AI 之后不会再提交它）" />
+                  {rejectErr && <p className="mt-1 text-[10px] text-(--status-error)">{rejectErr}</p>}
+                  <div className="mt-1 flex items-center justify-end gap-1.5">
+                    <button className="rounded border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-accent"
+                            disabled={busy}
+                            onClick={() => { setRejecting(null); setRejectReason(""); setRejectErr("") }}>
+                      取消
+                    </button>
+                    <button className="rounded border border-(--status-error)/50 px-1.5 py-0.5 text-[10px] text-(--status-error) hover:bg-(--status-error)/10"
+                            disabled={busy} onClick={() => void confirmReject(f.id)}>
+                      {busy ? "提交中…" : "确认否决"}
+                    </button>
+                  </div>
+                </div>
+              )}
               {f.verdict_reason && (
                 <p className="mt-0.5 text-[10px] text-(--status-error)">否决理由：{f.verdict_reason}</p>
+              )}
+              {meta?.hint && (
+                <p className="mt-0.5 text-[10px] text-muted-foreground">
+                  <span className="opacity-60">题面要求：</span>{meta.hint}
+                </p>
               )}
               {f.source && (
                 <p className="mt-0.5 line-clamp-2 text-[10px] text-muted-foreground">来源：{f.source}</p>
               )}
             </div>
-          ))}
+            )
+          })}
         </div>
 
         <div className="shrink-0 border-t p-2 space-y-1.5">
@@ -1563,6 +1667,7 @@ function ChallengeCreateDialog({ pid, onClose, onCreated }: {
   const [entries, setEntries] = useState("")
   const [flagFormat, setFlagFormat] = useState("flag{}")
   const [flagCount, setFlagCount] = useState("1")
+  const [flagHints, setFlagHints] = useState("")
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState("")
 
@@ -1581,6 +1686,10 @@ function ChallengeCreateDialog({ pid, onClose, onCreated }: {
         entry_hint: entryHint.trim(),
         flag_format: flagFormat.trim(),
         flag_count: Number(flagCount) || 1,
+        // 每条 flag 的提示：一行一条，**序号与 flag 一一对应**（第 1 行 = 第 1 条
+        // flag）。中间的空行不能跳过——空行表示「这个序号没提示」，跳过会让
+        // 后面所有提示整体错位（flag-hint，2026-10-21）。尾部空行由后端裁掉。
+        flag_hints: flagHints.length ? flagHints.split("\n").map((x) => x.trim()) : [],
         // 入口点：一行一个（URL 或附件路径），类型交给后端自动识别
         entries: entries.split("\n").map((x) => x.trim()).filter(Boolean)
           .map((v) => ({ value: v })),
@@ -1592,7 +1701,7 @@ function ChallengeCreateDialog({ pid, onClose, onCreated }: {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-      <div className="flex max-h-[85vh] w-full max-w-xl flex-col overflow-hidden rounded-lg border bg-background shadow-xl">
+      <div role="dialog" aria-modal="true" className="flex max-h-[85vh] w-full max-w-xl flex-col overflow-hidden rounded-lg border bg-popover shadow-xl">
         <div className="shrink-0 border-b px-4 py-2 text-sm font-medium">新建题目</div>
         <div className="min-h-0 flex-1 overflow-y-auto p-3 space-y-2">
           <label className="block space-y-1 text-xs text-muted-foreground">
@@ -1638,6 +1747,16 @@ function ChallengeCreateDialog({ pid, onClose, onCreated }: {
                      onChange={(e) => setFlagCount(e.target.value)} placeholder="1" />
             </label>
           </div>
+          <label className="block space-y-1 text-xs text-muted-foreground">
+            每条 flag 的提示
+            <span className="ml-1 opacity-60">
+              （一行一条，第 1 行对应第 1 条 flag；确认后会把这一句告诉 agent，
+              它据此判断「这条是不是我在找的方向」）
+            </span>
+            <textarea className="mt-1 min-h-20 w-full rounded border bg-background px-2 py-1 text-xs text-foreground"
+                      value={flagHints} onChange={(e) => setFlagHints(e.target.value)}
+                      placeholder={"需要 xxx 管理员后台密码为 flag\n分析流量得到 xxx 版本，版本号为 flag"} />
+          </label>
           {err && <p className="text-[11px] text-(--status-error)">{err}</p>}
         </div>
         <div className="flex shrink-0 items-center justify-end gap-2 border-t px-3 py-2">
@@ -1680,6 +1799,10 @@ function ChallengeEditDialog({ asset, cs, onClose, onSaved }: {
   const [entryHint, setEntryHint] = useState(String(meta.entry_hint ?? ""))
   const [flagFormat, setFlagFormat] = useState(String(meta.flag_format ?? ""))
   const [flagCount, setFlagCount] = useState(String(meta.flag_count ?? "1"))
+  // 提示回填：**尾部空行要保留**（否则用户看不到「第 3 条还没写」），中间的
+  // 空行本来就是占位，原样回填即可（flag-hint，2026-10-21）。
+  const [flagHints, setFlagHints] = useState(
+    (Array.isArray(meta.flag_hints) ? (meta.flag_hints as string[]) : []).join("\n"))
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState("")
 
@@ -1713,6 +1836,15 @@ function ChallengeEditDialog({ asset, cs, onClose, onSaved }: {
       if (entryHint.trim() !== String(meta.entry_hint ?? "")) body.entry_hint = entryHint.trim()
       if (flagFormat.trim() !== String(meta.flag_format ?? "")) body.flag_format = flagFormat.trim()
       if (nextCount !== Number(meta.flag_count ?? 1)) body.flag_count = nextCount
+      // 提示：**只在真的改过时传**（undefined = 后端不动该键）。全量传会让
+      // 「AI 后来补的提示」被前端旧快照覆盖成空（与其它字段同一条纪律）。
+      const oldHints = Array.isArray(meta.flag_hints) ? (meta.flag_hints as string[]) : []
+      const newHints = flagHints.length ? flagHints.split("\n").map((x) => x.trim()) : []
+      // 尾部空行在比较时不算差异（后端也会裁掉），否则「打开即保存」会白写一次
+      const trimTail = (a: string[]) => { const b = [...a]; while (b.length && !b[b.length - 1]) b.pop(); return b }
+      if (JSON.stringify(trimTail(newHints)) !== JSON.stringify(trimTail(oldHints))) {
+        body.flag_hints = newHints
+      }
       if (Object.keys(body).length === 0) { onClose(); return }
       await api.patchChallenge(asset.id, body)
       onSaved(); onClose()
@@ -1722,7 +1854,7 @@ function ChallengeEditDialog({ asset, cs, onClose, onSaved }: {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-      <div className="flex max-h-[85vh] w-full max-w-xl flex-col overflow-hidden rounded-lg border bg-background shadow-xl">
+      <div role="dialog" aria-modal="true" className="flex max-h-[85vh] w-full max-w-xl flex-col overflow-hidden rounded-lg border bg-popover shadow-xl">
         <div className="flex shrink-0 items-center gap-2 border-b px-4 py-2">
           <span className="text-sm font-medium">编辑题目</span>
           <span className="min-w-0 flex-1 truncate text-[10px] text-muted-foreground">id={asset.id}</span>
@@ -1789,6 +1921,17 @@ function ChallengeEditDialog({ asset, cs, onClose, onSaved }: {
                      onChange={(e) => setFlagCount(e.target.value)} placeholder="1" />
             </label>
           </div>
+          <label className="block space-y-1 text-xs text-muted-foreground">
+            每条 flag 的提示
+            <span className="ml-1 opacity-60">
+              （一行一条，第 1 行对应第 1 条 flag；确认后会把这一句告诉 agent，
+              它据此判断「这条是不是我在找的方向」。中间的空行表示「该序号没提示」，
+              不能删掉——删了后面会整体错位）
+            </span>
+            <textarea className="mt-1 min-h-20 w-full rounded border bg-background px-2 py-1 text-xs text-foreground"
+                      value={flagHints} onChange={(e) => setFlagHints(e.target.value)}
+                      placeholder={"需要 xxx 管理员后台密码为 flag\n分析流量得到 xxx 版本，版本号为 flag"} />
+          </label>
           {err && <p className="text-[11px] text-(--status-error)">{err}</p>}
         </div>
         <div className="flex shrink-0 items-center justify-end gap-2 border-t px-3 py-2">

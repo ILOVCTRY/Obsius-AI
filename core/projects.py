@@ -19,6 +19,7 @@
 import fnmatch
 import json
 import logging
+import ntpath
 import os
 import re
 import shutil
@@ -147,10 +148,58 @@ _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 
 
+def _fs_str(path) -> str:
+    r"""删除/探测专用的文件系统路径字符串：Windows 上补 ``\\?\`` 扩展前缀。
+
+    **为什么必须**（2026-10-21 线上 422 现场）：Agent 下载附件时保留 URL 尾段
+    做文件名，会出现 ``...lang=..``、``...(1).`` 这种**以点结尾**的名字。Win32
+    路径规范化会吃掉结尾的点与空格，于是 ``os.lstat("...lang=..")`` 实际去查
+    ``...lang=`` → FileNotFoundError（实测 WinError 2）。删除递归里 lstat 失败
+    被当成「已不存在」跳过 → 子文件没删 → 父目录 rmdir 报
+    WinError 145「目录不是空的」→ 永久删除永远做不干净。
+    加 ``\\?\`` 后内核不再做任何规范化，尾点/尾空格名可正常 stat/unlink/rmdir。
+
+    注意 ``\\?\`` 同时关闭分隔符转换，故必须先把 ``/`` 换成 ``\\``；且
+    **不能用 os.path.abspath**（它自己就会剥尾点，实测）——只用 normpath 消
+    ``.``/``..``，它保留尾点与尾空格。UNC 走 ``\\?\UNC\``。非 Windows 原样返回。
+    """
+    s = os.fspath(path)
+    if os.name != "nt":
+        return str(s)
+    s = str(s)
+    if s.startswith("\\\\?\\"):
+        return s
+    s = s.replace("/", "\\")
+    if not ntpath.isabs(s):
+        s = ntpath.join(os.getcwd(), s)
+    s = ntpath.normpath(s)
+    if s.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + s[2:]
+    return "\\\\?\\" + s
+
+
+def _lstat(p) -> os.stat_result:
+    """lstat，走扩展路径（见 _fs_str）：普通路径下尾点名会「查无此文件」。"""
+    return os.lstat(_fs_str(p))
+
+
+def _disp_name(p) -> str:
+    """错误文案用的路径：剥掉 ``\\?\\`` 前缀，别把内部实现细节漏给用户。"""
+    if not p:
+        return ""
+    s = str(p)
+    if s.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + s[8:]
+    if s.startswith("\\\\?\\"):
+        return s[4:]
+    return s
+
+
 def _win_reparse_handle(path: Path, access: int):
     r"""以「不 follow 链接」方式打开 reparse point，返回 Win32 HANDLE。
 
-    非 Windows / 打不开返回 None。用 ``\\?\`` 前缀避开 MAX_PATH 与 8.3 名解析。
+    非 Windows / 打不开返回 None。用 ``\\?\`` 前缀避开 MAX_PATH 与 8.3 名解析
+    （同时避开尾点被吃掉——见 _fs_str）。
     """
     if os.name != "nt":
         return None
@@ -161,9 +210,7 @@ def _win_reparse_handle(path: Path, access: int):
     k32.CreateFileW.argtypes = [wt.LPCWSTR, wt.DWORD, wt.DWORD, ctypes.c_void_p,
                                 wt.DWORD, wt.DWORD, wt.HANDLE]
     k32.CreateFileW.restype = wt.HANDLE
-    ap = os.path.abspath(path)
-    if not ap.startswith("\\\\?\\"):
-        ap = "\\\\?\\" + ap
+    ap = _fs_str(path)
     h = k32.CreateFileW(ap, access, _SHARE_ALL, None, _OPEN_EXISTING,
                         _FILE_FLAG_OPEN_REPARSE_POINT
                         | _FILE_FLAG_BACKUP_SEMANTICS, None)
@@ -218,9 +265,9 @@ def _clear_readonly(path: Path) -> None:
             pass
         return
     try:
-        st = os.lstat(path)
+        st = _lstat(path)
         if getattr(st, "st_file_attributes", 0) & _FILE_ATTR_READONLY:
-            os.chmod(path, stat.S_IWRITE)
+            os.chmod(_fs_str(path), stat.S_IWRITE)
     except OSError:
         pass
 
@@ -242,19 +289,20 @@ def _fs_kind(st: os.stat_result) -> str:
 
 def _du_bytes(path: Path) -> int:
     """文件/目录占用字节（仅统计；symlink/LX 链接不 follow 按 0 体积计，
-    读取失败跳过）。同 _fs_kind 口径，避免 rglob 撞 LX 链接整体归零。"""
+    读取失败跳过）。同 _fs_kind 口径，避免 rglob 撞 LX 链接整体归零。
+    路径走 _fs_str/_lstat：尾点文件名在普通 Win32 路径下 stat 不到。"""
     total = 0
     stack = [path]
     while stack:
         p = stack.pop()
         try:
-            st = os.lstat(p)
+            st = _lstat(p)
         except OSError:
             continue
         kind = _fs_kind(st)
         if kind == "dir":
             try:
-                with os.scandir(p) as it:
+                with os.scandir(_fs_str(p)) as it:
                     stack.extend(p / e.name for e in it)
             except OSError:
                 continue
@@ -268,14 +316,14 @@ def _unlink_retry(path: Path) -> None:
     已不存在视为成功，耗尽抛 PermissionError。
 
     只读位在 Windows 上同样导致 WinError 5（WSL 程序写的 .X99-lock 等），
-    故首轮失败即清位再试。"""
+    故首轮失败即清位再试。实际调用走扩展路径（见 _fs_str），尾点名可删。"""
     last_perr: PermissionError | None = None
     cleared = False
     for delay in (0.0, 0.05, 0.1, 0.2):
         if delay:
             time.sleep(delay)
         try:
-            path.unlink()
+            os.unlink(_fs_str(path))
             return
         except FileNotFoundError:
             return
@@ -289,14 +337,14 @@ def _unlink_retry(path: Path) -> None:
 
 def _rmdir_retry(path: Path) -> None:
     """删空目录（目录型 reparse point 的 unlink 被拒时退此路）；语义同
-    _unlink_retry。"""
+    _unlink_retry（含扩展路径）。"""
     last_perr: PermissionError | None = None
     cleared = False
     for delay in (0.0, 0.05, 0.1, 0.2):
         if delay:
             time.sleep(delay)
         try:
-            path.rmdir()
+            os.rmdir(_fs_str(path))
             return
         except FileNotFoundError:
             return
@@ -328,14 +376,14 @@ def _remove_link(path: Path) -> None:
     except OSError:
         pass
     if _strip_reparse_point(path):
-        st = os.lstat(path)
+        st = _lstat(path)
         if _fs_kind(st) == "dir":
             _rmdir_retry(path)
         else:
             _unlink_retry(path)
         return
     # 三条路都失败：把最后一次的真实异常抛出去（调用方聚合/转 422）
-    st = os.lstat(path)
+    st = _lstat(path)
     if _fs_kind(st) == "dir":
         _rmdir_retry(path)
     else:
@@ -346,48 +394,61 @@ def _remove_entry(path: Path) -> None:
     """递归删除文件/目录，兼容 Windows reparse point（symlink/junction/WSL LX
     链接）：_fs_kind 属性位判定、绝不 follow——目录型链接只删链接本体，不会
     把链接目标内容牵连进来。逐项退避重试；有残留时 PermissionError（占用）
-    原类抛出、其他 OSError 聚合抛出（API 层转 422，不再漏成 500）。"""
-    errs: list[OSError] = []
+    原类抛出、其他异常聚合抛出 OSError（API 层转 422，不再漏成 500）。
+
+    全程走扩展路径（_fs_str/_lstat）：**尾点/尾空格文件名**（Agent 按 URL 尾段
+    存附件得到的 ``...lang=..``）在普通 Win32 路径下 stat 不到，会被下面的
+    FileNotFoundError 分支当「已不存在」跳过，随后父目录 rmdir 报
+    WinError 145 → 永久删除永远留残（2026-10-21 线上 422 现场）。
+
+    各步接 BaseException 而非仅 OSError：os.unlink 可能被外部 hook（安全软件/
+    沙箱 CLI 的 sitecustomize 会改 os.unlink 并在批量删除时抛 SystemExit）
+    改掉，SystemExit 不是 OSError、API 层 three-except 也接不住 → 500。
+    这里一律收进 errs，统一转成「删除残留 N 项」的 422，宁可报删除失败
+    也不让请求静默 500。
+    """
+    errs: list[BaseException] = []
 
     def walk(p: Path) -> None:
         try:
-            st = os.lstat(p)
+            st = _lstat(p)
         except FileNotFoundError:
             return
-        except OSError as e:
+        except BaseException as e:  # noqa: BLE001 - 见 docstring：一律收编转 422
             errs.append(e)
             return
         kind = _fs_kind(st)
         if kind == "link":
             try:
                 _remove_link(p)
-            except OSError as e:
+            except BaseException as e:  # noqa: BLE001
                 errs.append(e)
             return
         if kind == "file":
             try:
                 _unlink_retry(p)
-            except OSError as e:
+            except BaseException as e:  # noqa: BLE001
                 errs.append(e)
             return
         try:
-            with os.scandir(p) as it:
+            with os.scandir(_fs_str(p)) as it:
                 names = [e.name for e in it]  # 只取名不做 stat，避开 LX 子链
         except FileNotFoundError:
             return
-        except OSError as e:
+        except BaseException as e:  # noqa: BLE001
             errs.append(e)
             return
         for name in names:
             walk(p / name)
         try:
             _rmdir_retry(p)
-        except OSError as e:
+        except BaseException as e:  # noqa: BLE001
             errs.append(e)
 
     walk(path)
     if errs:
-        detail = "; ".join(f"{e.filename or path}: {e}" for e in errs[:5])
+        detail = "; ".join(
+            f"{_disp_name(getattr(e, 'filename', None)) or path}: {e}" for e in errs[:5])
         first = errs[0]
         msg = f"删除残留 {len(errs)} 项: {detail}"
         if isinstance(first, PermissionError):

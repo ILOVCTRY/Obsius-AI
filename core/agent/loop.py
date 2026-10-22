@@ -11,6 +11,7 @@
 """
 
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -166,7 +167,7 @@ STRICT_PROMPT_TAIL = """
    route_index.yaml（mode=edit 增补本域条目，条目 kb 路径带域前缀）。技能可提
    mode=edit（改正文）/ create（新建技能）/ delete（删除，应用时进回收站）/ suggest
    （粒度过粗时提拆分建议，产建议文档、实际拆分由人执行）。英文快照原文不翻译、
-   不覆盖；每个会话最多 3 条，禁止凑数。提案批准权在人类。
+   不覆盖；每个会话最多 20 条，禁止凑数。提案批准权在人类。
 7. 产物落盘纪律：正式产物（POC/报告/有效载荷/验证有效的关键结果）一律
    bb_add_artifact（永久保存+进证据链）；临时中间文件用**相对路径**写当前工作
    目录（服务端已固定到本项目 scratch，可随时清理，系统 TEMP 已重定向到项目内）；
@@ -1695,6 +1696,19 @@ class AgentSession:
         pub_text = {"chars": 0, "seq": 0, "at": 0.0,
                     "leak": False}  # leak：已判伪工具调用，停发回复增量（2026-10-20）
 
+        def _clear_stream_buffers() -> None:
+            """换供应商前清空增量缓冲（provider-failover，2026-10-21）。
+
+            在 _worker 线程里被调用，与 on_thinking/on_text 的 append 同线程，
+            顺序天然正确；主线程 _flush_* 只是读者，读到短一截也无害（下一次
+            delta 带累计全文，前端按最新 seq 覆盖显示）。
+            """
+            acc.clear()
+            pub["chars"] = 0
+            text_acc.clear()
+            pub_text["chars"] = 0
+            pub_text["leak"] = False
+
         def _worker() -> None:
             try:
                 kwargs: dict[str, Any] = {"system": system, "tools": tools}
@@ -1704,6 +1718,13 @@ class AgentSession:
                     # on_text 恒传（2026-09-21 中断落盘）：任务轮只攒不发 delta，
                     # abort 时半截叙述有货可捞；对话轮由 _flush_text 节流发布。
                     kwargs["on_text"] = text_acc.append
+                # 跨供应商兜底：换家前清缓冲（挂兜底链的 provider 才认这个参数，
+                # 直接调自研/替身 provider 时多传会被 TypeError 拒——故先探签名）
+                try:
+                    if "on_failover" in inspect.signature(self.llm.chat).parameters:
+                        kwargs["on_failover"] = lambda _info=None: _clear_stream_buffers()
+                except (TypeError, ValueError):
+                    pass
                 box["resp"] = self.llm.chat(messages, **kwargs)
             except BaseException as e:  # noqa: BLE001 —— 原样转抛给等待方
                 box["err"] = e

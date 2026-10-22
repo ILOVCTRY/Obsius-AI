@@ -26,7 +26,7 @@ mode: self-contained
 | 无 NX（栈可执行）/ ret2shellcode | `binary/漏洞利用/ROP 与 shellcode.md` |
 | NX 开、No PIE：ret2text / 基础栈溢出 | `binary/漏洞利用/栈与基础溢出.md` |
 | NX+PIE：ret2libc / ROP / 栈迁移 | `binary/漏洞利用/ROP 与 shellcode.md` → `binary/漏洞利用/ROP 进阶.md` |
-| 有格式化字符串（%x/%p/%n） | `binary/赛事专题/题目知识/ctf-pwn/CTF Pwn - Format String Exploitation.md`（配套 `binary/漏洞利用/scripts/fmtstr_payload_suite.py`） |
+| 有格式化字符串（%x/%p/%n） | `binary/漏洞利用/格式串利用.md`（配套 `binary/漏洞利用/scripts/fmtstr_payload_suite.py`） |
 | Canary：泄露/爆破/覆盖 | `binary/漏洞利用/ROP 进阶.md` |
 | 菜单题 / malloc-free / UAF / double free / tcache | `binary/漏洞利用/堆利用.md` → `binary/漏洞利用/FILE 结构体与堆利用.md` |
 | seccomp 过滤（orw / open-read-write） | `binary/漏洞利用/沙箱逃逸与受限环境.md`（配套 `binary/漏洞利用/scripts/seccomp_orw_generator.py`、`binary/漏洞利用/scripts/shellcraft_asm.py`） |

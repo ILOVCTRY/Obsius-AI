@@ -302,6 +302,9 @@ tool(
         '重报同值=合并 meta 不插重复行（发布前先 bb_query 查重）。'
         'meta.title=一句话简述；meta.owner=平台标签（.edu.cn 系→edusrc 等，命中的平台规则会注入会话）。'
         '扫描/测试状态走 bb_asset_status，不要写 meta.scanned。'
+        'CTF 轨：只有**题目附件本体**才登记 binary（value=附件真实 sha256），'
+        '不用传 parent_id——自动挂到本题资产下；**zip 解压产物不要登记**'
+        '（路径已在 unpack_attachment 回执里，结论走 bb_add_finding）。'
     ),
     input_schema={
         'type': 'object',
@@ -312,14 +315,21 @@ tool(
             },
             'value': {
                 'type': 'string',
+                'description': (
+                    '资产值。binary 必须是文件**真实 sha256**（编造/抄错的哈希没有下游能反查，'
+                    '还会绕开同值去重）；CTF 轨传解压目录内的路径会被拒。'
+                ),
             },
             'meta': {
                 'type': 'object',
-                'description': 'title=一句话简述；owner=平台标签',
+                'description': 'title=一句话简述；owner=平台标签；binary 可带 path=文件路径（用于校验 sha256）',
             },
             'parent_id': {
                 'type': 'string',
-                'description': '父资产 id（url/service 的 IP 主机部自动挂载，domain 自动 DNS；显式传可跳过自动逻辑）',
+                'description': (
+                    '父资产 id（url/service 的 IP 主机部自动挂载，domain 自动 DNS；显式传可跳过自动逻辑）。'
+                    'CTF 轨不传 = 自动挂到本题资产下。'
+                ),
             },
         },
         'required': [
@@ -338,6 +348,13 @@ tool(
         'target_asset_id，会自动归到这道题下；附件本身不用登记（走本题目的子资产通道）。'
         'name=题目名（短、可一眼认出，如「树状化-签到题」）；description=一句话描述；'
         'tags=题型数组（web/pwn/re/crypto/misc/forensics）。同一道题重复调用=复用既有节点，不插重复行。'
+        '**多 flag 题必须传 flag_count + flag_hints**：flag_count=共几条 flag；'
+        'flag_hints=**每条 flag 各一句题面提示**，按序号对齐（第 i 条提示对应第 i 个 flag），'
+        '如 ["需要 xxx 管理员后台密码为 flag","分析流量得到 xxx 版本，版本号为 flag"]；'
+        '题面没给某条提示时传空串占位（不能跳过，否则后面全部错位）。'
+        '这些提示会随「人工确认某条 flag」的通知一起发给正在跑的 agent——它据此判断'
+        '「这条是不是我正在分析的方向」，是就转向、不是就继续，避免确认一条 flag 就把'
+        '整道多 flag 题的所有方向都收掉。'
         '**仅 CTF 轨可用**，其余轨调用会被拒。'
     ),
     input_schema={
@@ -356,6 +373,19 @@ tool(
                 'items': {'type': 'string'},
                 'description': '题型标签数组，如 ["web","misc"]（落 meta.tags，可筛选）',
             },
+            'flag_count': {
+                'type': 'integer',
+                'description': '本题共几条 flag（默认 1）。多 flag 题必须填，它决定「拿满几条才算解出」',
+            },
+            'flag_hints': {
+                'type': 'array',
+                'items': {'type': 'string'},
+                'description': (
+                    '每条 flag 各一句题面提示，按序号对齐 flag_count。'
+                    '如 ["需要 admin 后台密码为 flag","分析流量得到版本号，版本号为 flag"]；'
+                    '某条题面没给提示就传空串占位（不能跳过——否则序号错位）'
+                ),
+            },
         },
         'required': [
             'name',
@@ -371,8 +401,10 @@ tool(
         'CTF 轨专用：**判定并登记**一个 flag。拿到疑似 flag 用本工具——先做三层机械判定，'
         '通过后写入 **flag 台账**（challenge_flags，flag 的唯一真值）并落一条过程留痕，'
         '题目状态由台账派生（拿满 `meta.flag_count` 条即解出），不必再调 bb_add_finding。'
-        '① 格式置信：`flag{...}`/`xxxctf{...}` 等可信前缀、内层有熵；题面占位符（`flag{example}`/'
-        '`flag{test}`）、诱饵前缀（`fake_flag{}`）、模板语法（`{% if %}`/`${x}`）会被拒并说明原因。'
+        '① 格式置信：前缀（`flag{...}`/`xxxctf{...}` 等已知前缀，或 `shellmates{}` 这类'
+        '任意赛事前缀——后者靠内层构造度判定：够长 + 字母数字混排 + 分隔符/大小写混排）；'
+        '题面占位符（`flag{example}`/`flag{test}`）、诱饵前缀（`fake_flag{}`）、'
+        '模板语法（`{% if %}`/`${x}`）会被拒并说明原因。'
         '② 变换回环：flag 从编码/变换解出时传 `source`=原始观测字节 + `transform`=base64/hex/url/rot13，'
         '工具会验证「按该变换编码回去确实出现在 source 里」；回环不成立=解错了，拒收。'
         '③ 跨题防串：与本题已登记或其它题目高度相似（互为子串）的 flag 会被拒（防多题并发串号）。'
@@ -411,6 +443,14 @@ tool(
             'candidate': {
                 'type': 'boolean',
                 'description': 'true=只登记为候选线索（intel/unverified），不判为解出',
+            },
+            'hint_index': {
+                'type': 'integer',
+                'description': (
+                    '本条 flag 对应题面「第几条提示」（0 基，从 0 开始数）。'
+                    '多 flag 题按题面顺序传 0/1/2…，确认后人工与其它 agent 才知道'
+                    '「这条对应哪个方向」，避免重复提交。留空=-1 由确认顺序推断'
+                ),
             },
         },
         'required': [
@@ -1490,8 +1530,8 @@ tool(
         'properties': {
             'module': {
                 'type': 'string',
-                'description': '知识库模块路径，全局形态 `<域>/<快照>/<路径>`，如 web/漏洞分类/SQL注入/注入类漏洞（SQL注入-命令注入-SSTI）.md（web 漏洞类目）、'
-                               'binary/赛事专题/题目知识/ctf-pwn/heap-fsop.md（题目知识原件）；'
+                'description': '知识库模块路径，全局形态 `<域>/<模块>/<路径>`，如 web/漏洞分类/SQL注入/注入类漏洞（SQL注入-命令注入-SSTI）.md（web 漏洞类目）、'
+                               'binary/漏洞利用/堆利用.md（binary 利用手册）；'
                                '也认 Obsidian wikilink [[web/漏洞分类/SQL注入/注入类漏洞（SQL注入-命令注入-SSTI）|手册]]',
             },
         },
@@ -1542,7 +1582,10 @@ tool(
     flags=("intent_pre", "knowledge"),
     description=(
         '提一条知识库/技能变更**提案**：只落 pending，批准权在人类，禁止自行改文件；'
-        '**仅当本项目开启「知识库迭代」时可用**，关闭会被拒。每会话最多 3 条，触发情形与证据要求见系统提示工具纪律。'
+        '**仅当本项目开启「知识库迭代」时可用**，关闭会被拒。'
+        '**只有主控能提**——call_expert 派生的子代理会被拒（它看不到全局，'
+        '要贡献内容请写进收尾摘要或等主控 ask_expert 追问）。'
+        '每会话最多 20 条，触发情形与证据要求见系统提示工具纪律。'
         'kind=skill：mode=edit（改正文）/ create（新建）/ delete（进回收站可恢复）/ suggest（粒度过粗时提拆分建议，'
         'content 为建议文档全文，批准后落技能目录 拆分建议.md，结构变更由人执行），target={name: 技能名}；'
         'edit/create 的 content 须为 SKILL.md 全文，frontmatter name 必须等于技能名，create 时该技能须不存在。'
@@ -2200,6 +2243,46 @@ tool(
         },
         'required': [
             'summary',
+        ],
+    },
+)
+
+tool(
+    'deliver',
+    group='控制',
+    flags=("control",),
+    description=(
+        '**交付本次成果**给主控/人类——**不结束本轮**（主控那边 call_expert 仍显示'
+        '「运行中」，你可以接着干）。'
+        '与收尾的区别：收尾（直接输出一段文本结束）会把这一轮关掉；deliver 只把'
+        '「当前拿到什么」交出去，然后**你自己决定要不要继续**。'
+        '可以多次交付，每交一次覆盖「主控看到的最新成果」；本轮结束时主控拿到的'
+        '就是你**最后一次**交付的内容（外加你的收尾说明）。'
+        '**什么时候该交**：手上已经有能站住的东西（拿到的 flag、可复现的路径、'
+        '确认的密钥/口令位置、排除了哪几条死路），但还打算继续深挖——先交，别憋着。'
+        '**什么时候继续、什么时候收尾**：若你判断**还能取得更大成果**——CTF 轨尤其'
+        '如此：还能拿到 flag，或手里有与 flag 强相关的线索（能定位到密码/密钥/关键'
+        '表、有可回环的变换链）——就**继续做**，不要因为「已经交过东西」就收尾，'
+        '那等于主动放弃拿 flag 的机会；确实已无更大成果，再用一段文本总结结束本轮。'
+    ),
+    input_schema={
+        'type': 'object',
+        'properties': {
+            'content': {
+                'type': 'string',
+                'description': (
+                    '本次交付的正文（≤8000 字符）：拿到了什么、怎么拿到的'
+                    '（可复现命令/路径）、证据是什么、还差什么。'
+                    '主控与人类都靠这段判断下一步，别只写「已完成」'
+                ),
+            },
+            'next_step': {
+                'type': 'string',
+                'description': '你接下来打算做什么（可选，一句话；让主控知道你不是在摸鱼）',
+            },
+        },
+        'required': [
+            'content',
         ],
     },
 )

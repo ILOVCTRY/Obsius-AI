@@ -146,7 +146,8 @@ def record_flag(bb, project_id: str, challenge_id: str, flag: str, *,
                 source: str = "", transform: str = "",
                 judged_by: str = "ai", verdict: str = "pending",
                 verdict_reason: str = "", author: str = "",
-                session_id: str = "", finding_id: str = "") -> dict:
+                session_id: str = "", finding_id: str = "",
+                hint_index: int | None = None) -> dict:
     """登记一条 flag（幂等：同题目同串只更新，不新增）。
 
     返回 ``{flag, created, rejected, row}``。``rejected=True`` 表示该串已被人工
@@ -154,6 +155,10 @@ def record_flag(bb, project_id: str, challenge_id: str, flag: str, *,
 
     幂等更新时**不降级 verdict**：已 accepted 的不会被后到的 pending 冲回去；
     已 rejected 的也不会被 pending 覆盖（人工裁决优先于 AI）。
+
+    ``hint_index``：本行对应题面「第几条 flag」的提示（0 基，-1=未指定）。
+    确认这条 flag 时会把 ``meta.flag_hints[hint_index]`` 一并告诉子 agent，
+    它据此判断「这条是不是我正在分析的方向」——是就收尾，不是就继续。
     """
     cid = str(challenge_id or "").strip()
     if not cid:
@@ -166,6 +171,15 @@ def record_flag(bb, project_id: str, challenge_id: str, flag: str, *,
     asset = bb.get_asset(cid)
     if asset is None or asset.get("project_id") != project_id:
         raise ValueError(f"题目不存在于本项目: {cid}")
+    try:
+        hidx = int(hint_index) if hint_index is not None else -1
+    except (TypeError, ValueError):
+        hidx = -1
+    # 夹到 [-1, MAX_FLAG_COUNT-1]：模型可能传个越界值（如第 8 条但题目只 6 条）。
+    # 越界值本身无害（派生时会被当「未指定」补空位），但落库就是脏数据——
+    # 之后人工在台账里看到「第 8 条」会以为提示丢了。
+    if hidx < -1 or hidx >= MAX_FLAG_COUNT:
+        hidx = -1
 
     existing = bb.conn.execute(
         "SELECT * FROM challenge_flags WHERE project_id=? AND challenge_id=?"
@@ -186,16 +200,21 @@ def record_flag(bb, project_id: str, challenge_id: str, flag: str, *,
             "transform": (transform or str(row.get("transform") or ""))[:200],
             "finding_id": (finding_id or str(row.get("finding_id") or ""))[:80],
             "flag_format": (flag_format or str(row.get("flag_format") or ""))[:40],
+            # 提示序号：显式给了才覆盖（-1 不冲掉既有值——重新提交同串时
+            # worker 通常不带 hint_index，不该把它清掉）。
+            "hint_index": hidx if hidx >= 0 else int(row.get("hint_index") or -1),
             "updated_at": ts,
         }
         with bb._tx():
             bb.conn.execute(
                 "UPDATE challenge_flags SET verdict=?, verdict_reason=?, confidence=?,"
-                " source=?, transform=?, finding_id=?, flag_format=?, updated_at=?"
+                " source=?, transform=?, finding_id=?, flag_format=?, hint_index=?,"
+                " updated_at=?"
                 " WHERE id=? AND project_id=?",
                 (patch["verdict"], patch["verdict_reason"], patch["confidence"],
                  patch["source"], patch["transform"], patch["finding_id"],
-                 patch["flag_format"], ts, row["id"], project_id))
+                 patch["flag_format"], patch["hint_index"], ts,
+                 row["id"], project_id))
         bb.append_event(project_id, "challenge.flag.updated", {
             "challenge_id": cid, "flag_id": row["id"], "flag": token[:120],
             "verdict": patch["verdict"]})
@@ -207,13 +226,13 @@ def record_flag(bb, project_id: str, challenge_id: str, flag: str, *,
         bb.conn.execute(
             "INSERT INTO challenge_flags(id,project_id,challenge_id,flag,flag_format,"
             "confidence,source,transform,judged_by,verdict,verdict_reason,author,"
-            "session_id,finding_id,created_at,updated_at)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "session_id,finding_id,hint_index,created_at,updated_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (fid, project_id, cid, token, str(flag_format or "")[:40],
              float(confidence or 0.0), str(source or "")[:2000],
              str(transform or "")[:200], str(judged_by or "ai"), verdict,
              str(verdict_reason or "")[:500], str(author or ""),
-             str(session_id or ""), str(finding_id or "")[:80], ts, ts))
+             str(session_id or ""), str(finding_id or "")[:80], hidx, ts, ts))
     bb.append_event(project_id, "challenge.flag.recorded", {
         "challenge_id": cid, "flag_id": fid, "flag": token[:120],
         "verdict": verdict, "judged_by": judged_by,
@@ -295,6 +314,85 @@ def challenge_flag_quota(bb, project_id: str, challenge_id: str) -> int:
     except (TypeError, ValueError):
         n = _DEFAULT_FLAG_COUNT
     return max(1, min(n, MAX_FLAG_COUNT))
+
+
+def challenge_flag_hints(bb, challenge_id: str) -> list[str]:
+    """题目声明的「每条 flag 各一句提示」（`meta.flag_hints`，2026-10-21）。
+
+    按**序号**与 flag 对齐（第 i 条提示对应第 i 个 flag）。空串 = 题面没给这条
+    提示，**必须保留占位**，否则后面几条全错位。
+
+    用途：确认某条 flag 时把对应提示一并告诉子 agent——它据此判断「这条是不是
+    我正在分析的方向」，是就收尾、不是就继续。没有提示时它只能看 flag 原文
+    （`flag{1a2b}`），对方向的指示性几乎为零，只能猜。
+    """
+    meta = _meta_of(bb.get_asset(challenge_id))
+    raw = meta.get("flag_hints")
+    if not isinstance(raw, (list, tuple)):
+        return []
+    out: list[str] = []
+    for it in list(raw)[:MAX_FLAG_COUNT]:
+        out.append(str(it or "").strip()[:300])
+    while out and not out[-1]:
+        out.pop()
+    return out
+
+
+def flag_hint_at(bb, challenge_id: str, index: int) -> str:
+    """第 ``index`` 个 flag（0 基）的提示；没声明 / 越界 / 空 → 空串。"""
+    hints = challenge_flag_hints(bb, challenge_id)
+    if 0 <= index < len(hints):
+        return hints[index]
+    return ""
+
+
+def accepted_flag_briefs(bb, project_id: str, challenge_id: str) -> list[dict]:
+    """已确认 flag 的「序号 + 原文 + 题面提示」清单（flag-hint，2026-10-21）。
+
+    这是「告诉子 agent 已经拿到哪些 flag」的数据源。每条：
+
+    ``{index, flag, hint}``——``index`` 是**题面里的第几条**（1 基，供人读），
+    ``hint`` 是该条的题面提示（没声明为空串）。
+
+    **序号怎么定**：优先用台账行的 ``hint_index``（提交/录入时显式指定的）；
+    未指定（-1）时按 accepted 顺序推断——人工逐条确认时这个推断通常就对，
+    而它比「什么都不给」好得多：agent 至少知道「这是第几条」。
+
+    排序按 ``hint_index`` 升序（未指定的排后面、按登记时间），让输出稳定——
+    每次注入顺序抖动会让模型以为台账在变。
+    """
+    rows = accepted_flags(bb, project_id, challenge_id)
+    hints = challenge_flag_hints(bb, challenge_id)
+    out: list[dict] = []
+    used: set[int] = set()
+    # 第一轮：显式声明了 hint_index 的占位
+    for r in rows:
+        try:
+            idx = int(r.get("hint_index") or -1)
+        except (TypeError, ValueError):
+            idx = -1
+        if 0 <= idx < max(len(hints), 1) and idx not in used:
+            used.add(idx)
+    # 第二轮：未指定的按「第一个空位」补，尽量与题面顺序对齐
+    seq = 0
+    for r in rows:
+        try:
+            idx = int(r.get("hint_index") or -1)
+        except (TypeError, ValueError):
+            idx = -1
+        if idx < 0:
+            while seq in used:
+                seq += 1
+            idx = seq
+            used.add(idx)
+        hint = hints[idx] if 0 <= idx < len(hints) else ""
+        out.append({"index": idx + 1, "flag": str(r.get("flag") or ""),
+                    "hint": hint, "_sort": idx})
+    out.sort(key=lambda x: x["_sort"])
+    for item in out:
+        item.pop("_sort", None)
+    return out
+
 
 
 def _flag_prefix(flag: str) -> str:

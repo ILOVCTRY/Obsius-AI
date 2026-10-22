@@ -67,7 +67,7 @@ export function TeamRunReport({ pid, teamId, onClose, onOpenSession }: {
     team?.members.find((m) => m.id === rm.member_id)?.label || rm.member_key
 
   return (
-    <div className="absolute inset-0 z-40 flex flex-col bg-background">
+    <div role="dialog" aria-modal="true" className="absolute inset-0 z-40 flex flex-col bg-popover">
       {/* 顶栏 */}
       <div className="flex shrink-0 flex-wrap items-center gap-3 border-b px-4 py-2.5">
         <button type="button" onClick={onClose}

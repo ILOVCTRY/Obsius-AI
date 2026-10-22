@@ -56,6 +56,11 @@ class SessionState:
     plan_only_mode: bool = False          # 计划闸教练模式：工具面收缩到计划/控制
     closing_round: int = 0                # D6：0=未在确认；1/2=当前确认轮序号
     closing_last_progress: int = 0        # D6：本轮发起时的 last_progress_step
+    # 交付箱（deliver，2026-10-21）：子 agent 在**不结束本轮**的前提下把阶段成果
+    # 交出去，主控的 call_expert 仍在跑。每项 {"n","content","next_step","at"}。
+    # 与 `summary` 的区别：`summary` 只在 `finish` 时写一次且会话随之结束；本箱
+    # 可写多次、写多少次都不影响继续跑——这正是「交付 ≠ 收尾」的落点。
+    deliveries: list = field(default_factory=list)
 
     def reset_for_task(self) -> None:
         """每任务复位（_loop_body 入口调用）。
@@ -80,3 +85,7 @@ class SessionState:
         self.cadence_hinted_findings = set()
         self.closing_round = 0
         self.closing_last_progress = 0
+        # 交付箱随任务复位：上一任务的交付不该出现在下一任务的收尾组装里
+        # （ChatTurn 每轮新建 state，这行对它无副作用；AgentSession 复用 state，
+        # 不复位会把 A 任务的交付当 B 任务的成果交出去）。
+        self.deliveries = []

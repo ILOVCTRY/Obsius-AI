@@ -8,13 +8,16 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import type { BBEvent, ChatMessage, DiagFailure, DiagLlmDump,
-  DiagRedlineTest, DiagRequestDetail, DiagRequestMeta, DiagSession,
+import type { BBEvent, ChatMessage, DiagFailure, DiagFailover,
+  DiagLlmDump, DiagRedlineTest, DiagRequestDetail, DiagRequestMeta, DiagSession,
   DiagSkillUsage, DiagSystemPrompt, LlmProvider } from "@/lib/types"
 
 /** 诊断（diagnostics-log，2026-10-14）：会话消息审计 + 工具/MCP 失败日志。
  *  左会话清单（chat 对话线程 / agent 执行会话），右侧会话消息流；
  *  「失败日志」页签按 类型/工具名/来源 过滤 tool.failed 与 mcp.failed。
+ *  「模型兜底」（provider-failover，2026-10-21）：某供应商重试 11 次仍失败会自动
+ *  换下一家，这里看每次失败/换家/全链耗尽——回答「刚才等了很久最后报错」到底
+ *  发生了什么（类别分布、耗时、换到谁）。
  *  「记录请求体」（diagnostics-request-body，2026-10-17）：顶栏开关，开启后
  *  每步真实出网请求体按会话落盘，右侧可逐条查看（system/messages/tools 原样）。 */
 export function DiagnosticsView({ pid }: { pid?: string | null }) {
@@ -26,7 +29,7 @@ export function DiagnosticsView({ pid }: { pid?: string | null }) {
   const [chatMsgs, setChatMsgs] = useState<ChatMessage[] | null>(null)
   const [agentEvents, setAgentEvents] = useState<BBEvent[] | null>(null)
   const [loadingMsgs, setLoadingMsgs] = useState(false)
-  const [tab, setTab] = useState<"sessions" | "failures" | "skills">("sessions")
+  const [tab, setTab] = useState<"sessions" | "failures" | "skills" | "failover">("sessions")
   // 请求体留痕开关（进程级）：进页面读一次，点击切换
   const [dump, setDump] = useState<DiagLlmDump | null>(null)
   const [dumpBusy, setDumpBusy] = useState(false)
@@ -108,6 +111,10 @@ export function DiagnosticsView({ pid }: { pid?: string | null }) {
                   className="h-7 px-2.5 text-xs" onClick={() => setTab("skills")}>
             技能使用
           </Button>
+          <Button size="sm" variant={tab === "failover" ? "secondary" : "ghost"}
+                  className="h-7 px-2.5 text-xs" onClick={() => setTab("failover")}>
+            模型兜底
+          </Button>
         </div>
         <span className="mx-1 h-4 w-px bg-border" />
         <Button size="sm" variant={dump?.enabled ? "secondary" : "ghost"}
@@ -134,6 +141,13 @@ export function DiagnosticsView({ pid }: { pid?: string | null }) {
           chatMsgs={chatMsgs} agentEvents={agentEvents} loadingMsgs={loadingMsgs} />
       ) : tab === "failures" ? (
         <FailuresTab pid={pid}
+          onOpenSession={(f) => {
+            const hit = sessions.find((s) =>
+              s.id === String(f.payload?.thread_id || f.session_id || ""))
+            if (hit) { setSel(hit); setTab("sessions") }
+          }} />
+      ) : tab === "failover" ? (
+        <FailoverTab pid={pid}
           onOpenSession={(f) => {
             const hit = sessions.find((s) =>
               s.id === String(f.payload?.thread_id || f.session_id || ""))
@@ -851,7 +865,7 @@ function EventStream({ events }: { events: BBEvent[] }) {
 
 function FailuresTab({ pid, onOpenSession }: {
   pid: string
-  onOpenSession: (f: DiagFailure) => void
+  onOpenSession: (f: SessionRef) => void
 }) {
   const [rows, setRows] = useState<DiagFailure[] | null>(null)
   const [kind, setKind] = useState<"all" | "tool" | "mcp">("all")
@@ -930,6 +944,177 @@ function FailuresTab({ pid, onOpenSession }: {
                 {String(p?.source || "")} · {String(f.author || "")}
                 {f.session_id ? ` · ${f.session_id}` : ""}
                 {p?.thread_id ? ` · ${String(p.thread_id)}` : ""}
+              </div>
+            </div>
+          )
+        })}
+      </ScrollArea>
+    </div>
+  )
+}
+
+// ---------- 模型兜底页签（provider-failover，2026-10-21） ----------
+//
+// 回答「刚才等了很久、最后报错，到底发生了什么」。三类事件同表展示：
+//   llm.provider_failed   每家失败一条（category/status/耗时/下一家）
+//   llm.failover          真正换家（from → to）
+//   llm.failover.exhausted 全链耗尽 = 真正停下
+// **category 的分布比条数有用**：全是 auth = key/额度问题；全是 channel_block =
+// 网关风控窗口；全是 cooldown = 该模型全池冷却（换家就对了）。
+
+/** 兜底记录行的最小形状（会话定位只需要 session_id / thread_id）。 */
+type SessionRef = { session_id: string | null; payload?: Record<string, unknown> }
+
+const FAILOVER_CAT: Record<string, { label: string; cls: string }> = {
+  upstream: { label: "上游 5xx", cls: "text-(--status-error)" },
+  rate_limit: { label: "限流 429", cls: "text-(--status-error)" },
+  auth: { label: "鉴权失败", cls: "text-(--status-error)" },
+  quota: { label: "额度/余额", cls: "text-(--status-error)" },
+  cooldown: { label: "模型冷却", cls: "text-(--viz-sev-medium)" },
+  channel_block: { label: "渠道校验拦截", cls: "text-(--viz-sev-medium)" },
+  network: { label: "网络中断", cls: "text-(--viz-sev-medium)" },
+  context: { label: "上下文超限", cls: "text-(--status-approval)" },
+  bad_request: { label: "参数不合法", cls: "text-muted-foreground" },
+  truncated: { label: "流截断", cls: "text-muted-foreground" },
+  partial: { label: "流中断（已吐增量）", cls: "text-muted-foreground" },
+  aborted: { label: "人工中止", cls: "text-muted-foreground" },
+  unknown: { label: "未分类", cls: "text-muted-foreground" },
+}
+
+const failoverCat = (c: string) =>
+  FAILOVER_CAT[c] ?? { label: c || "未分类", cls: "text-muted-foreground" }
+
+function fmtMs(ms: number): string {
+  if (!ms) return "—"
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`
+}
+
+function FailoverTab({ pid, onOpenSession }: {
+  pid: string
+  onOpenSession: (f: SessionRef) => void
+}) {
+  const [data, setData] = useState<DiagFailover | null>(null)
+  const [cat, setCat] = useState("")
+  const [provider, setProvider] = useState("")
+
+  const load = () => {
+    setData(null)
+    api.diagLlmFailover(pid, {
+      category: cat || undefined,
+      provider: provider.trim() || undefined,
+      limit: 300,
+    })
+      .then(setData)
+      .catch(() => setData({
+        rows: [], kinds: [],
+        summary: { by_category: {}, by_provider: {}, switches: 0, exhausted: 0 },
+      }))
+  }
+  // pid/cat 变化自动重查；provider 走「查询」按钮（避免每次按键打接口）
+  useEffect(load, [pid, cat])  // eslint-disable-line react-hooks/exhaustive-deps
+
+  const cats = Object.keys(data?.summary.by_category ?? {}).sort()
+  const s = data?.summary
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex flex-wrap items-center gap-2 border-b p-2.5">
+        <button className={cn("rounded-full px-2.5 py-1 text-[11px]",
+                              !cat ? "bg-primary/10 text-primary"
+                                   : "text-muted-foreground hover:bg-accent")}
+                onClick={() => setCat("")}>全部类别</button>
+        {cats.map((c) => (
+          <button key={c}
+                  className={cn("rounded-full px-2.5 py-1 text-[11px]",
+                                cat === c ? "bg-primary/10 text-primary"
+                                          : "text-muted-foreground hover:bg-accent")}
+                  onClick={() => setCat(cat === c ? "" : c)}>
+            {failoverCat(c).label} {s?.by_category[c]}
+          </button>
+        ))}
+        <span className="flex-1" />
+        <Input value={provider} placeholder="供应商子串（如 幻灵）"
+               onChange={(e) => setProvider(e.target.value)}
+               onKeyDown={(e) => e.key === "Enter" && load()}
+               className="h-7 w-44 text-xs" />
+        <Button size="sm" variant="outline" className="h-7 px-2.5 text-xs" onClick={load}>
+          查询
+        </Button>
+      </div>
+      {s && (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b px-3 py-1.5 text-[10px] text-muted-foreground">
+          <span>换家 <b className="text-foreground">{s.switches}</b> 次</span>
+          <span>全链耗尽（真正停下） <b className={cn(s.exhausted ? "text-(--status-error)" : "text-foreground")}>{s.exhausted}</b> 次</span>
+          <span>失败记录 <b className="text-foreground">{data?.rows.length ?? 0}</b> 条</span>
+          <span className="text-muted-foreground/70">
+            规则：某家重试 11 次仍失败 → 按 providers.json 顺序换下一家的默认模型，全链失败才停
+          </span>
+        </div>
+      )}
+      <ScrollArea className="min-h-0 flex-1">
+        {data === null && <div className="p-4 text-xs text-muted-foreground">加载中…</div>}
+        {data !== null && !data.rows.length && (
+          <div className="p-4 text-xs text-muted-foreground">
+            {cat || provider
+              ? "该过滤条件下没有记录"
+              : "没有兜底记录 —— 所有调用都在第一家供应商内成功，或还没发生过失败"}
+          </div>
+        )}
+        {data?.rows.map((r) => {
+          const p = r.payload
+          const kind = r.kind
+          const c = failoverCat(String(p.category || ""))
+          const isSwitch = kind === "llm.failover"
+          const isExhausted = kind === "llm.failover.exhausted"
+          const err = String(p.error || "")
+          return (
+            <div key={r.id} className="border-b px-3 py-2">
+              <div className="flex flex-wrap items-center gap-2 text-[10px] text-muted-foreground">
+                <Badge variant="outline" className={cn(
+                  "h-4 px-1 text-[10px]",
+                  isExhausted ? "text-(--status-error)"
+                    : isSwitch ? "text-(--status-approval)" : "text-muted-foreground")}>
+                  {isExhausted ? "全链耗尽" : isSwitch ? "换家" : "供应商失败"}
+                </Badge>
+                {isSwitch ? (
+                  <span className="font-mono text-foreground/80">
+                    {String(p.from || "?")} → {String(p.to || "?")}
+                    <span className="ml-1 text-muted-foreground">
+                      ({String(p.from_model || "")} → {String(p.to_model || "")})
+                    </span>
+                  </span>
+                ) : (
+                  <span className="font-mono text-foreground/80">
+                    {String(p.provider || "?")}
+                    <span className="ml-1 text-muted-foreground">{String(p.model || "")}</span>
+                  </span>
+                )}
+                {p.category ? <span className={c.cls}>{c.label}</span> : null}
+                {p.status ? <span>HTTP {String(p.status)}</span> : null}
+                {p.elapsed_ms ? <span>耗时 {fmtMs(Number(p.elapsed_ms))}</span> : null}
+                {p.index ? <span>链内第 {String(p.index)} 家</span> : null}
+                {isExhausted && p.tried ? <span>试过 {String(p.tried)} 家</span> : null}
+                <span>·</span>
+                <span>{fmtDateTimeMin(r.created_at)}</span>
+                <span className="flex-1" />
+                <button className="text-primary hover:underline"
+                        onClick={() => onOpenSession(r)}>定位会话</button>
+              </div>
+              {isExhausted && Array.isArray(p.chain) && (
+                <div className="mt-1 text-[10px] text-muted-foreground/80">
+                  链：{(p.chain as string[]).join(" → ")}
+                </div>
+              )}
+              {!isSwitch && err && (
+                <pre className="mt-1 whitespace-pre-wrap break-all text-[11px] leading-relaxed text-(--status-error)">
+                  {err.slice(0, 400)}{err.length > 400 ? " …" : ""}
+                </pre>
+              )}
+              <div className="mt-1 text-[10px] text-muted-foreground/70">
+                {String(r.author || "")}
+                {r.session_id ? ` · ${r.session_id}` : ""}
+                {p.thread_id ? ` · ${String(p.thread_id)}` : ""}
+                {p.next_provider ? ` · 下一家 ${String(p.next_provider)}` : ""}
               </div>
             </div>
           )

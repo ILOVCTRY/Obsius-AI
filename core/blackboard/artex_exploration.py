@@ -194,17 +194,122 @@ def list_edges(bb, project_id: str, *, node_id: str | None = None,
     return result
 
 
+def sync_intent_status(bb, project_id: str, intent: dict | str) -> bool:
+    """把调度层 Intent 的状态回写到探索图的 ``{intent_id}:explore`` 节点。
+
+    **这是修复「探索图永远显示待调度」的地方**（artex-explore-status-sync，
+    2026-10-21）。此前探索图的 intent 节点只在**创建那一刻**取一次 status
+    （`_persist_tree` 里 `status=item.get("status")`，而新建 Intent 恒为
+    pending），之后 `claim_intent` / `transition_intent` 只改 `artex_intents`
+    表、**从不回写节点**——整个代码库里 `UPDATE artex_exploration_nodes` 只有
+    `upsert_node` 一处，而没有任何 intent 状态流转路径调用它。
+
+    后果（实测 PWN 题迭代任务）：5 条 Intent 里 3 条 exhausted、2 条 running，
+    图上 4 个 intent 节点**全是「待调度」**；fact 节点因为走
+    `record_intent_result` 才拿到 closed。用户看到的「意图只会显示待调度」
+    正是这条链路断了。
+
+    返回是否真的更新了（节点不存在时返回 False，不补建——补建会让已删除
+    Intent 的幽灵节点复活）。
+
+    **只同步 status，不动 title/content**：节点标题是 Planner 原文，而 Intent
+    的 objective 可能被 steer 改写过，覆盖会让「图上写的是当初派的方向」这一
+    性质失效。
+    """
+    iid = intent.get("id") if isinstance(intent, dict) else intent
+    iid = str(iid or "").strip()
+    if not iid:
+        return False
+    status = str((intent.get("status") if isinstance(intent, dict) else "") or "").strip()
+    if not status:
+        # 只给了 id：现查一次，避免调用方为了同步再写一遍查询。
+        try:
+            row = bb.conn.execute(
+                "SELECT status FROM artex_intents WHERE project_id=? AND id=?",
+                (project_id, iid)).fetchone()
+        except Exception:  # noqa: BLE001
+            return False
+        if row is None:
+            return False
+        status = str(row["status"] if hasattr(row, "keys") else row[0] or "")
+    node_id = f"{iid}:explore"
+    existing = get_node(bb, project_id, node_id)
+    if existing is None:
+        return False
+    # **kind 必须沿用节点已有的值，不能写死 "intent"**：根 Intent 的探索节点
+    # 是 `_persist_tree` 用 kind="goal" 建的（parent_id 为空时），写死会把
+    # 「起点」降级成普通意图、连带 META 配色和分层归属一起错（roleOf 里 goal
+    # 还分 begin/goal 两种）。这里只改 status。
+    kind = str(existing.get("kind") or "intent")
+    try:
+        upsert_node(bb, project_id, node_id, kind, status=status)
+    except Exception:  # noqa: BLE001 —— 同步失败不阻断调度（图是只读视图）
+        log.exception("探索图 Intent 节点状态同步失败 intent=%s status=%s", iid, status)
+        return False
+    return True
+
+
+# 单条 Intent 下最多保留多少 Hint 节点（artex-hint-cap，2026-10-21）。
+#
+# 现场实测（PWN 题迭代）：4 个 intent 节点挂了 **26 个 hint**，其中单个 intent
+# 12 个。它们全是 `status=open`、永不关闭，在探索图上表现为起点左侧一整片
+# 「提示」卡——把真正的主脊（意图→产出）挤到屏幕外，而画布默认 minZoom 0.85
+# 不肯缩到能看全图。hint 是「方向的依据」，不是探索成果，留最近若干条足够
+# 支撑「这条意图当初为什么这么派」。
+_HINT_PER_INTENT = 6
+
+
 def record_hint(bb, project_id: str, *, task_id: str, intent_id: str,
                 text: str, author: str = "human") -> dict | None:
-    """把一条方向提示写成 Hint 节点，并记录 Intent 由它推导而来。"""
+    """把一条方向提示写成 Hint 节点，并记录 Intent 由它推导而来。
+
+    **同文本去重 + 单意图限量**（artex-hint-cap，2026-10-21）：主控反复给同一
+    条提示（措辞几乎不变）是常态，此前每次都建新节点，图上堆成一片。去重按
+    前 120 字（即 title 长度）精确匹配——不做模糊归并，那会把「补一句限定条件」
+    的后续提示误吃掉。
+    """
     text = str(text or "").strip()
     intent_id = str(intent_id or "").strip()
     if not text or not intent_id:
         return None
+    title = text[:120]
+    existing = [n for n in list_nodes(bb, project_id, task_id=task_id or None,
+                                      intent_id=intent_id, kind="hint")]
+    # **按 rowid 定新旧，不要按 created_at**：`now()` 精度只到秒
+    # （`timespec="seconds"`），同一秒内连写几条时间戳完全相同，`ORDER BY
+    # created_at` 退化成随机 hex id 顺序——裁剪会随机删掉新的、留下旧的。
+    # rowid 是 SQLite 的插入序，天然单调。
+    if existing:
+        try:
+            order = {str(r["id"]): int(r["rid"]) for r in bb.conn.execute(
+                "SELECT id, rowid AS rid FROM artex_exploration_nodes"
+                " WHERE project_id=? AND kind='hint' AND intent_id=?",
+                (project_id, intent_id)).fetchall()}
+            existing.sort(key=lambda n: order.get(str(n.get("id")), 0))
+        except Exception:  # noqa: BLE001 —— 取不到 rowid 就保持原序
+            log.exception("Hint 新旧排序失败 intent=%s", intent_id)
+    # ① 同文本已在 → 不重复建（返回已有节点，调用方语义不变）
+    for n in existing:
+        if str(n.get("title") or "") == title:
+            return n
+    # ② 超过单意图上限 → 挤掉最旧的几条（先删边再删节点，避免悬空边）
+    overflow = len(existing) - (_HINT_PER_INTENT - 1)
+    for old in existing[:max(0, overflow)]:
+        try:
+            with bb._tx():
+                bb.conn.execute(
+                    "DELETE FROM artex_exploration_edges WHERE project_id=?"
+                    " AND (from_node_id=? OR to_node_id=?)",
+                    (project_id, old["id"], old["id"]))
+                bb.conn.execute(
+                    "DELETE FROM artex_exploration_nodes WHERE project_id=? AND id=?",
+                    (project_id, old["id"]))
+        except Exception:  # noqa: BLE001 —— 清理失败不影响新提示落库
+            log.exception("裁剪旧 Hint 失败 node=%s", old.get("id"))
     node = create_node(
         bb, project_id, "hint",
         node_id=f"{intent_id}:hint:{new_id('h')}",
-        title=text[:120], content=text, task_id=str(task_id or ""),
+        title=title, content=text, task_id=str(task_id or ""),
         intent_id=intent_id, status="open", confidence=0.5,
         metadata={"author": author},
     )
@@ -390,8 +495,59 @@ def _annotate_node(node: dict) -> dict:
     return node
 
 
+def _backfill_intent_status(bb, project_id: str, nodes: list[dict]) -> list[dict]:
+    """读路径惰性补齐存量节点的 status（artex-explore-status-sync，2026-10-21）。
+
+    **为什么必须在读路径补**：修复只挂在 `claim_intent` / `transition_intent`
+    上，只管**此后**发生的状态流转。修复前已经跑完的任务（如 PWN 题迭代：
+    3 条 exhausted、2 条 running，图上全显示待调度）不会有任何新流转，光靠
+    写路径永远修不回来——用户打开旧项目还是看到一模一样的错状态。
+
+    只补**由 Intent 派生**的节点（`kind='intent'` 的普通方向，以及根 Intent 的
+    `kind='goal'` 起点锚点——后者同样只在创建时取过一次 status），且**只在状态
+    确实不同时才写**（避免每次读都产生 `node.updated` 事件把事件流刷满）。
+    失败静默降级：图是展示层。
+    """
+    # 根 Intent 的锚点节点是 kind='goal' 且**没有** metadata.source（有 source 的
+    # 才是 Planner 注册的计分目标，那种节点的 status 由 prove_goal 管，不能按
+    # intent 状态覆盖——否则「目标已达成」会被一条 running 的根 Intent 冲回 open）。
+    targets = [n for n in nodes
+               if n.get("kind") == "intent"
+               or (n.get("kind") == "goal"
+                   and not str((n.get("metadata") or {}).get("source") or ""))]
+    if not targets:
+        return nodes
+    try:
+        rows = bb.conn.execute(
+            "SELECT id, status FROM artex_intents WHERE project_id=?",
+            (project_id,)).fetchall()
+    except Exception:  # noqa: BLE001 —— 老库无调度表
+        return nodes
+    truth = {str(r["id"]): str(r["status"] or "") for r in rows}
+    changed: dict[str, str] = {}
+    for node in targets:
+        iid = str(node.get("intent_id") or "").strip()
+        want = truth.get(iid)
+        if want and want != str(node.get("status") or ""):
+            changed[str(node["id"])] = want
+    if not changed:
+        return nodes
+    for node in nodes:
+        want = changed.get(str(node["id"]))
+        if want is None:
+            continue
+        try:
+            upsert_node(bb, project_id, str(node["id"]), str(node.get("kind") or "intent"),
+                        status=want)
+            node["status"] = want
+        except Exception:  # noqa: BLE001
+            log.exception("存量探索节点状态补齐失败 node=%s", node.get("id"))
+    return nodes
+
+
 def exploration_graph(bb, project_id: str, *, task_id: str | None = None) -> dict:
-    nodes = [_annotate_node(n) for n in list_nodes(bb, project_id, task_id=task_id)]
+    nodes = _backfill_intent_status(
+        bb, project_id, [_annotate_node(n) for n in list_nodes(bb, project_id, task_id=task_id)])
     ids = {n["id"] for n in nodes}
     edges = []
     for e in list_edges(bb, project_id):

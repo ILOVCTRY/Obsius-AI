@@ -335,7 +335,7 @@ chmod 400 rsa.key && ssh -i rsa.key root@<web_host>
 
 要点：`load_file()` 是**数据库进程的权限**在读文件，不受 web 用户限制，但要求 `FILE` 权限 + `secure_file_priv` 允许 + 文件 world-readable。三个条件缺一不可，先在低权限 shell 里 `SHOW VARIABLES LIKE 'secure_file_priv'` 确认。
 
-## 6. 组件指纹清单
+## 6. 组件指纹清单（CMS / WordPress / Apache）
 
 按顺序过一遍，命中哪个查哪节。
 

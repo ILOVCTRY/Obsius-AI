@@ -44,6 +44,15 @@ _CHALLENGE_TAGS_MAX = 12
 # 提示词，无限长度会直接吃掉上下文预算。
 _CHALLENGE_BRIEF_MAX = 8000
 _CHALLENGE_ENTRY_MAX = 1000
+# 每个 flag 的「提示」（题目原文里对这条 flag 的说明，2026-10-21）。
+#
+# 用户的原话：多 flag 题里每条 flag 通常各有一句提示（「需要 xxxx 管理员后台
+# 密码为 flag」「分析流量得到 xxx 版本，版本号为 flag」）。确认一条 flag 后，
+# **把这条 flag 的提示一并告诉子 agent**，它才能自己判断「这条是不是我正在
+# 分析的方向」——是就收尾，不是就继续干。没有提示，它只能靠 flag 原文猜，
+# 而 flag 原文（`flag{1a2b}`）对方向的指示性几乎为零。
+_CHALLENGE_FLAG_HINTS_MAX = 50      # 与 flag_count 上限对齐（1..50）
+_CHALLENGE_FLAG_HINT_MAX = 300      # 单条提示的长度上限
 
 # DNS 批次内预热缓存（仅 import_assets 填充/清空；批外 resolve 恒真实解析，
 # 不做进程级缓存——负缓存（解析失败）长存会让 DNS 恢复后的域名永远挂不上）
@@ -321,6 +330,39 @@ def _normalize_flag_format(raw: str) -> str:
     return f"{head[:32]}{{}}"
 
 
+def _normalize_flag_hints(raw) -> list[str]:
+    """规范化「每条 flag 的提示」列表（`meta.flag_hints`，2026-10-21）。
+
+    **为什么按序号存在题目 meta 而不是 flag 行上**：提示来自**题面**（题目要求
+    「第 N 个 flag 是什么」），它在 flag 被找到**之前**就已知——落 flag 行就得
+    等提交时才补，而提交者（worker）往往不知道题面第 N 条说的是哪个。存题目
+    侧，任何拿到 flag 的人都能按 `flag_hints[序号]` 对上。
+
+    输入容忍三种形态：list[str]、list[dict{hint|text|desc}]、纯字符串（按行拆）。
+    空项保留为 ``""``（**不能压缩**——否则第 2、4 条有提示时序号全错位）。
+    """
+    if raw is None:
+        return []
+    items: list = []
+    if isinstance(raw, str):
+        items = [ln for ln in raw.splitlines()]
+    elif isinstance(raw, (list, tuple)):
+        items = list(raw)
+    else:
+        return []
+    out: list[str] = []
+    for it in items[:_CHALLENGE_FLAG_HINTS_MAX]:
+        if isinstance(it, dict):
+            text = str(it.get("hint") or it.get("text") or it.get("desc") or "")
+        else:
+            text = str(it or "")
+        out.append(text.strip()[:_CHALLENGE_FLAG_HINT_MAX])
+    # 尾部空项无信息，去掉（但中间的空项必须留着对齐序号）
+    while out and not out[-1]:
+        out.pop()
+    return out
+
+
 def register_challenge(bb, project_id: str, name: str = "", *,
                        description: str = "", tags: list | None = None,
                        thread_id: str = "", author: str = "human",
@@ -328,6 +370,7 @@ def register_challenge(bb, project_id: str, name: str = "", *,
                        brief: str = "", entry_hint: str = "",
                        direction: str = "", flag_format: str = "",
                        flag_count: int | None = None,
+                       flag_hints: list | str | None = None,
                        entries: list | None = None,
                        title: str = "") -> dict:
     """登记/复用一道 CTF 题目（challenge-asset，2026-10-14；题目表单 v47）。
@@ -347,6 +390,9 @@ def register_challenge(bb, project_id: str, name: str = "", *,
     - ``tags`` → ``meta.tags``（自由标签，可多个）
     - ``flag_format`` → ``meta.flag_format``（规范化成 ``flag{}``；**提示不是约束**）
     - ``flag_count`` → ``meta.flag_count``（默认 1；多 flag 题目决定「部分完成」态）
+    - ``flag_hints`` → ``meta.flag_hints``（**每条 flag 各一句提示**，按序号对齐
+      flag_count；空串占位表示「这条题面没给提示」。确认一条 flag 时会把对应
+      提示一并告诉子 agent，让它自己判断该不该收尾）
     - ``entries`` → 逐条建**子资产**（见下）
     - ``thread_id`` → ``meta.thread_id``（来源线程，反向可查「这题是谁建的」）
     - ``meta.kind = "challenge"`` 恒定写入
@@ -401,6 +447,9 @@ def register_challenge(bb, project_id: str, name: str = "", *,
         except (TypeError, ValueError):
             n = 1
         meta["flag_count"] = max(1, min(n, 50))
+    hints = _normalize_flag_hints(flag_hints)
+    if hints:
+        meta["flag_hints"] = hints
     tid = (thread_id or "").strip()
     if tid:
         meta["thread_id"] = tid
@@ -433,7 +482,8 @@ def register_challenge(bb, project_id: str, name: str = "", *,
                                 "value": r.get("value"), "created": r.get("created")})
     return {**result, "entries": created_entries,
             "flag_count": int(meta.get("flag_count") or 1),
-            "flag_format": str(meta.get("flag_format") or "")}
+            "flag_format": str(meta.get("flag_format") or ""),
+            "flag_hints": list(meta.get("flag_hints") or [])}
 
 
 # ---------- 批量导入（cyberspace-mapping M1，2026-09-23） ----------

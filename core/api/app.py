@@ -259,6 +259,14 @@ class ExpertSaveIn(BaseModel):
     「拒删」退化成普通专家（2026-10-21 实测：UI 保存一次后 DELETE 返 200）。
     这类「表单未暴露字段」一律要加进 `_dump_expert_yaml` 并显式带值，
     否则全字段覆写就是静默的数据丢失。
+
+    ``intent_free`` 同理（2026-10-21 实测同类回归）：它只由 `worker.yaml` 声明、
+    设置页也没有对应控件，但 `core/chat/runtime.py` 真的消费它（免「意图先行
+    闸」与「发现必挂意图」）。**当时没有走这条通道，UI 保存一次就把
+    `worker.yaml` 的 `intent_free: true` 抹掉了**——worker 从此每次调工具都被
+    要求先声明意图。凡是「yaml 有、表单没有、代码在读」的键都属于这个家族，
+    新增时两处（`_expert_view` 读 + `_dump_expert_yaml` 写）必须同时加，
+    漏了读端等于前端拿不到值、也就无法原样回传。
     """
     name: str | None = None
     description: str | None = None
@@ -273,6 +281,9 @@ class ExpertSaveIn(BaseModel):
     max_steps: int | None = None
     # 受保护标记（仅 _generalist）。缺省 None = 不落键；True = 拒删。
     protected: bool | None = None
+    # 免意图闸（仅 worker）。缺省 None = 不落键；True = 跳过意图先行闸与
+    # 「发现必挂意图」。None 与 False 都表示「落键无意义」，序列化端只落 true。
+    intent_free: bool | None = None
     variants: dict[str, dict[str, Any]] | None = None
 
 
@@ -417,6 +428,10 @@ class ChallengeIn(BaseModel):
     tags: list[str] = Field(default_factory=list, max_length=12)
     flag_format: str = Field("", max_length=40)   # flag{} / ctf{} …（提示不是约束）
     flag_count: int | None = Field(None, ge=1, le=50)
+    # 每条 flag 各一句题面提示（按序号对齐 flag_count，2026-10-21）。
+    # 「需要 xxx 管理员后台密码为 flag」「分析流量得到 xxx 版本，版本号为 flag」
+    # 这类句子是 agent 判断「这条是不是我的方向」的唯一依据。
+    flag_hints: list[str] = Field(default_factory=list, max_length=50)
     entries: list[dict] = Field(default_factory=list, max_length=50)  # 入口点子资产
     thread_id: str = ""          # 可选：建完就把该线程绑到这道题上
 
@@ -432,6 +447,7 @@ class ChallengePatchIn(BaseModel):
     tags: list[str] | None = Field(None, max_length=12)
     flag_format: str | None = Field(None, max_length=40)
     flag_count: int | None = Field(None, ge=1, le=50)
+    flag_hints: list[str] | None = Field(None, max_length=50)
 
 
 class ChallengeFlagIn(BaseModel):
@@ -439,6 +455,9 @@ class ChallengeFlagIn(BaseModel):
     flag: str = Field(min_length=1, max_length=2000)
     source: str = Field("", max_length=2000)
     verdict: str = Field("accepted")   # accepted / pending / rejected
+    # 这条对应题面第几条 flag 的提示（0 基；-1=未指定，确认时按顺序推断）。
+    # 有它才能把「题面要求」一并告诉正在跑的 agent（flag-hint，2026-10-21）。
+    hint_index: int = Field(-1, ge=-1, le=49)
 
 
 class ChallengeFlagDecideIn(BaseModel):
@@ -893,14 +912,34 @@ def _load_mcp_config() -> dict:
     return {}
 
 
-def _pack_history_backup(path: Path) -> Path | None:
+def _pack_history_backup(path: Path, *, min_interval: float | None = None) -> Path | None:
     """写入前留修改历史：.history/<UTC时间戳>_<文件名>（设置页可编辑文件的回滚依据）。
-    返回备份路径（原文件不存在则无备份）。"""
+    返回备份路径（原文件不存在则无备份）。
+
+    ``min_interval``（秒）：与上一个历史版本间隔不足时**跳过备份**。自动保存
+    （改动即存）会把每次击键变成一次 PUT，不设闸的话 `.history` 会被同一段
+    编辑刷出上百个版本，把「历史」退化成「撤销栈」——回滚面板里全是中间态，
+    真正想找回的「昨天那一版」反而被挤出视野。只在 auto 保存路径上传入该值；
+    手动保存 / 回滚仍走不节流分支（它们本就是低频的、值得留痕的语义动作）。
+    """
     if not path.is_file():
         return None
     with pack_write_lock():  # 同秒 .n 避让与 packs 写锁同一临界区，防并发备份互相覆盖
         hist = path.parent / ".history"
         hist.mkdir(parents=True, exist_ok=True)
+        if min_interval is not None:
+            # 拿「最新一个版本的 mtime」做闸，而不是内存时间戳：进程重启 / 多客户端
+            # 同时编辑都不会让闸失效（真相在盘上）。取整个目录最新而非只看本文件的
+            # 版本，因为目录里还有别的专家的备份，混着来对闸无意义——所以只比本文件的。
+            newest = 0.0
+            pat = re.compile(
+                rf"(?:{_HIST_TS}(?:\.\d+)?_{re.escape(path.name)}"
+                rf"|{re.escape(path.name)}\.{_HIST_TS}\.bak)$")
+            for f in hist.iterdir():
+                if f.is_file() and pat.fullmatch(f.name):
+                    newest = max(newest, f.stat().st_mtime)
+            if newest and (time.time() - newest) < min_interval:
+                return None
         ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         dest = hist / f"{ts}_{path.name}"
         n = 1
@@ -913,6 +952,63 @@ def _pack_history_backup(path: Path) -> Path | None:
 
 # 历史版本两种命名：API 写入用 <ts>[.n]_<file>；import_kb owners 覆盖用 <file>.<ts>.bak
 _HIST_TS = r"\d{8}T\d{6}Z"
+
+# 「改动即存」的历史节流窗口（秒）：自动保存路径下，同一文件两条历史版本至少间隔
+# 这么久。60s 的依据——回滚面板的粒度是「一次编辑会话」，而一次连续输入（含中途
+# 停顿想一下）通常在 1 分钟内；窗口内不落新版本也不会丢数据，因为被跳过的中间态
+# 本来就只是「上一个版本的半成品」，最终态一定会被写盘（最后一个 PUT 必然过闸或
+# 成为"最新版"本身）。手动保存 / 回滚不受此限。
+_AUTO_HISTORY_MIN_INTERVAL = 60.0
+
+
+def _yaml_flag(value: Any) -> bool:
+    """专家 yaml 里的「三态布尔」读成真布尔（True/False）。
+
+    **不能直接 ``bool(v)``**：`_parse_inline_value` 只把整数/列表/null 转成
+    Python 类型，其余原样返回**字符串**——所以盘上写 ``protected: false``
+    读出来是字符串 `"false"`，`bool("false") is True`，语义整个反过来。
+    这个坑在序列化端已规避（只落 `true`、不落 `false`），但读端同样必须
+    按字面量解析，否则将来谁手改一次 yaml 就静默反转语义。
+
+    约定：`true`/`yes`/`1`/`on` → True；`false`/`no`/`0`/`off`/`none`/`null`
+    及一切空值 → False；真布尔原样返回。其余无法判定的按 False（保守：
+    拒删/免闸这类能力不该因为一个拼错的词就被打开）。
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    s = str(value).strip().lower()
+    return s in {"true", "yes", "1", "on"}
+
+
+def _leading_comments(text: str) -> str:
+    """取文件**头部连续注释块**（空行与 `#` 行，直到第一个数据行）。
+
+    用途：全字段覆写时保留专家 yaml 顶部的说明注释。`_dump_expert_yaml` 是按
+    结构化字段重新拼出整个文件的，注释没有对应的模型字段，天然会被丢掉——
+    `triage.yaml` 就因此丢过一段「删文件会让 doctor 报两条 error」的告警注释。
+
+    自动保存（2026-10-21「改动即存」）把这个缺陷从「点保存才发生」放大成
+    「在设置页打一个字就发生」，所以必须补上。只取**头部连续块**而非全文所有
+    注释：字段之间的行内注释位置依赖排版，重新拼装后放回去也是错位，不如不动
+    （那种情况仍会丢，但至少顶部的「文件是什么、为什么存在」不会丢）。
+
+    返回带结尾换行的块（没有注释则返回空串），可直接拼在正文前。
+    """
+    head: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            head.append(line.rstrip())
+            continue
+        break
+    # 去掉块尾的空行（它们不属于注释，拼回去会多出空白）
+    while head and not head[-1].strip():
+        head.pop()
+    if not head:
+        return ""
+    return "\n".join(head) + "\n"
 
 
 def _trash_move(src: Path) -> Path:
@@ -1083,6 +1179,113 @@ def _running_intents_by_challenge(proj, challenge_ids: list[str]) -> dict[str, i
     return counts
 
 
+def _solved_notice(proj, challenge_id: str, flag_row: dict, *,
+                   is_controller: bool) -> str:
+    """拼「人工确认了一条 flag」通知正文（flag-hint，2026-10-21 重写）。
+
+    **必须把「已拿到哪条 flag + 它对应的题面提示」原样交给 agent，由它自己
+    判断该不该收尾**（用户裁决）：
+    - 多 flag 题（如 6 条）确认第 1 条时，题目**远未解出**。旧实现只要
+      `verdict == "accepted"` 就发「这题已经拿到正确 flag，不用再探索了」，
+      子 agent 收到就收尾——正在找的第 2~6 条全被放弃。用户看到的正是
+      「确认一条 flag，子进程就被取消」。
+    - 而一条 flag 的原文（`flag{1a2b}`）对「这条是不是我在找的方向」几乎
+      没有指示性。题面通常给的是「需要 xxxx 管理员后台密码为 flag」「分析
+      流量得到 xxx 版本，版本号为 flag」——**这类提示才是指路的那句话**。
+      所以必须把提示一起发过去，让 agent 自己比对：是 → 收尾；不是 →
+      继续干，别重复提交这一条。
+
+    因此本函数不再写「不用再探索了」，改为**陈述事实 + 给判据**：
+    已确认哪些条（含提示）、还差几条、你该怎么判断、哪些情况别做。
+    """
+    name = challenge_id
+    try:
+        asset = proj.bb.get_asset(challenge_id) or {}
+        name = str(asset.get("value") or asset.get("name") or challenge_id)
+    except Exception:  # noqa: BLE001
+        pass
+    token = str((flag_row or {}).get("flag") or "").strip()
+    # 台账全貌：已确认清单（带提示）+ 配额 + 是否真的解出
+    st: dict = {}
+    briefs: list[dict] = []
+    try:
+        from core.blackboard.challenge_flags import (
+            accepted_flag_briefs, challenge_state)
+        st = challenge_state(proj.bb, proj.id, challenge_id)
+        briefs = accepted_flag_briefs(proj.bb, proj.id, challenge_id)
+    except Exception:  # noqa: BLE001 —— 读不到台账就退回最简文案
+        log.exception("拼通知正文：读台账失败 challenge=%s", challenge_id)
+    quota = int(st.get("quota") or 0)
+    got = int(st.get("accepted") or 0)
+    solved = bool(st.get("solved"))
+    remaining = max(0, quota - got)
+
+    head = [f"〔人工确认〕题目「{name}」的 flag 台账有更新。", ""]
+    if briefs:
+        head.append(f"**已确认 {got}/{quota} 条**（人工核对过，这些不用再找了）：")
+        for b in briefs:
+            line = f"  - 第 {b['index']} 条：`{b['flag']}`"
+            if b.get("hint"):
+                line += f"\n    题面要求：{b['hint']}"
+            head.append(line)
+    else:
+        head.append(f"- 刚确认：`{token}`")
+    if not solved and remaining:
+        head.append(f"- **还差 {remaining} 条**，本题尚未解出。")
+    elif solved:
+        head.append("- **本题已解出**（已确认条数达到配额）。")
+    head.append("")
+
+    if solved:
+        if is_controller:
+            return "\n".join(head + [
+                "**这一轮请尽快收尾**，按下面顺序做完就停：",
+                "1. 立刻**停止派新方向**（不要再 ctf_dispatch / call_expert）；",
+                "2. 把手上已识别的结论写回（已解出的路径、验证过的证据、"
+                "未登记的发现）——这些是复盘材料，别让它们随轮次消失；",
+                "3. 用一句话说明「本题已解出，收工」。",
+                "",
+                "已经在跑的方向不必等它们跑完，也不要为了「收齐」再等一轮。",
+            ])
+        return "\n".join(head + [
+            "**你正在跑的方向不必再做完了**——人工已经确认全部答案，继续深挖"
+            "是重复劳动。按下面顺序做完就停：",
+            "1. **不要再启动新的探测/扫描/脚本**，把当前这一步收个尾就够"
+            "（正在跑的长命令可以不等它结束）；",
+            "2. 把**手上已有的中间结论写回**（已走通的路径、验证过的证据、"
+            "还没登记成 finding 的发现）——这些是复盘材料，别让它们随轮次消失；",
+            "3. 用一句话说明「本题已解出，我的方向到此为止」并结束。",
+            "",
+            "不需要为了「做完整」再补一轮，也不要重新验证已经确认的 flag。",
+        ])
+
+    # ---- 未解出：**不收工**，让 agent 自己按提示判断方向 ----
+    # 这段是本轮修复的核心。绝不能写「不用再探索了」——题目还要继续做。
+    judge = [
+        "**先判断：上面已确认的那条，是不是你正在找的方向？**",
+        "判断依据是那一条后面的「题面要求」，不是 flag 原文——flag 串本身"
+        "看不出方向。",
+        "",
+        "① **是你的方向**（你正在做的就是要拿这条）→ 这条已经拿到，"
+        "**不要重复提交同一串**（`ctf_submit_flag` 会拒收）。"
+        "把已走通的路径与证据写回，然后**转向本题还没拿到的其他面**，"
+        "别在已经完成的方向上继续深挖。",
+        "② **不是你的方向**（你在攻别的面）→ **照原计划继续做**，"
+        "本条通知不影响你。你要找的是剩下的 "
+        f"{remaining} 条之一。",
+        "③ **拿不准** → 继续做手上的事；不要为了「对齐」先停下来问。",
+        "",
+        "无论哪种情况：**不要因为这条通知就整体收尾**——本题还差 "
+        f"{remaining} 条。",
+    ]
+    if is_controller:
+        judge.append("")
+        judge.append(
+            "作为主控：已确认的方向**不要再派 Worker**；其余方向照常派。"
+            "等台账拿满配额（或你判断已经无面可攻）再 `ctf_conclude` 收尾。")
+    return "\n".join(head + judge)
+
+
 def _challenge_summary(proj, rows: list[dict]) -> list[dict]:
     """给题目行附「附件子资产数 / 发现数 / 意图数 / 附件清单 / flag 与状态」。
 
@@ -1147,6 +1350,10 @@ def _challenge_summary(proj, rows: list[dict]) -> list[dict]:
             "tags": list(meta.get("tags") or []),
             "flag_format": str(meta.get("flag_format") or ""),
             "flag_count": int(st.get("quota") or meta.get("flag_count") or 1),
+            # 每条 flag 的题面提示（flag-hint，2026-10-21）。前端编辑表单要回填、
+            # 台账弹层要按行显示「这条对应哪句题面」——否则确认完一条之后，
+            # 人和 agent 都只能看到一串 flag 原文，看不出它是哪个方向来的。
+            "flag_hints": [str(x or "") for x in (meta.get("flag_hints") or [])],
             "state": str(st.get("state") or "untouched"),
             "solved": bool(st.get("solved")),
             "accepted_flags": int(st.get("accepted") or 0),
@@ -1947,9 +2154,41 @@ def create_app(
     # 请求体留痕（diagnostics-request-body，2026-10-17）：把 LLM 层转储回调接到
     # 诊断存储（按项目/会话写 JSONL，开关在 config/llm_dump.json，默认关）。
     # 进程级单例；关闭时 sink 首行即返回，零文件开销。
+    def _llm_failover_sink(kind: str, payload: dict, project_id: str,
+                           session_id: str) -> None:
+        """兜底记录 → 项目黑板事件（provider-failover，2026-10-21）。
+
+        归属口径必须**分别对齐两条链**，否则诊断页「定位会话」点不动：
+        chat 线程 = `session_id=None` + `payload.thread_id` + `author=chat-<tid12>`
+        （同 `ChatTurn._emit`）；任务链 = `session_id=<sid>` + `author=<sid>`。
+        项目没打开时直接返回——记录已在 `logs/llm_failover.jsonl` 里，不会丢。
+        """
+        proj = app.state.projects.get(project_id)
+        if proj is None:
+            return
+        sid = session_id or ""
+        is_chat = False
+        if sid:
+            try:
+                from core.chat import store as chat_store
+                is_chat = chat_store.get_thread(proj.bb, sid) is not None
+            except Exception:  # noqa: BLE001 —— 归属失败按任务链处理
+                is_chat = False
+        if is_chat:
+            proj.bb.append_event(project_id, kind, {**payload, "thread_id": sid},
+                                 session_id=None, author=f"chat-{sid[-12:]}")
+        else:
+            proj.bb.append_event(project_id, kind, payload,
+                                 session_id=sid or None, author=sid or "llm")
+
     from core.diagnostics import requests as request_log
     from core.llm.dump import set_sink as set_llm_dump_sink
     set_llm_dump_sink(request_log.store)
+    # 跨供应商兜底记录（provider-failover，2026-10-21）：LLM 层不知道项目，靠
+    # `core.llm.dump.scope()` 归属；这里把它接成项目黑板事件，诊断页「模型兜底」
+    # 页签与审计事件流读同一条。JSONL 出口在模块内部无条件写，与本回调无关。
+    from core.diagnostics import llm_failover as failover_log
+    failover_log.set_sink(_llm_failover_sink)
     # 研究工作台反编译服务（pid -> DecompilerService，项目级复用）；
     # rev_service_factory 供测试注入假后端（签名 factory(proj) -> service）
     app.state.rev_services: dict[str, Any] = {}
@@ -4687,6 +4926,7 @@ def create_app(
                 brief=body.brief, entry_hint=body.entry_hint,
                 direction=body.direction, tags=body.tags,
                 flag_format=body.flag_format, flag_count=body.flag_count,
+                flag_hints=body.flag_hints,
                 entries=body.entries, author="human")
         except ValueError as e:
             raise HTTPException(422, str(e)) from e
@@ -4734,6 +4974,11 @@ def create_app(
                 patch["flag_format"] = _normalize_flag_format(body.flag_format)
             if body.flag_count is not None:
                 patch["flag_count"] = max(1, min(int(body.flag_count), 50))
+            if body.flag_hints is not None:
+                from core.blackboard.assets import _normalize_flag_hints
+                hints = _normalize_flag_hints(body.flag_hints)
+                # 空列表 = 清空该键（与「空串=清该键」同口径）
+                patch["flag_hints"] = hints
             if body.tags is not None:
                 patch["tags"] = [str(t).strip() for t in body.tags
                                  if str(t).strip()]
@@ -4756,8 +5001,13 @@ def create_app(
         if row is None or row.get("type") != CHALLENGE_TYPE:
             raise HTTPException(404, f"题目不存在: {asset_id}")
         running = _running_intents_by_challenge(proj, [asset_id]).get(asset_id, 0)
+        # `flag_hints` 与 `state` 同返回：台账弹层要按行显示「这条对应哪句题面」，
+        # 而提示是**题目级**的（meta.flag_hints），不是 flag 行自带的（flag-hint，
+        # 2026-10-21）。少这一个字段，前端只能显示裸 flag 串。
+        meta = dict(row.get("meta") or {})
         return {"challenge_id": asset_id,
                 "flags": list_flags(proj.bb, pid, asset_id),
+                "flag_hints": [str(x or "") for x in (meta.get("flag_hints") or [])],
                 "state": challenge_state(proj.bb, pid, asset_id, running=running)}
 
     @app.post("/api/challenges/{asset_id}/flags", status_code=201)
@@ -4774,9 +5024,21 @@ def create_app(
         try:
             r = record_flag(proj.bb, pid, asset_id, body.flag,
                             source=body.source, judged_by="human",
-                            verdict=body.verdict, author="human")
+                            verdict=body.verdict, author="human",
+                            hint_index=body.hint_index)
         except ValueError as e:
             raise HTTPException(422, str(e)) from e
+        # 人工录入 accepted = 人工确认（默认值就是 accepted）。**必须与台账里点
+        # 「确认有效」同口径通知**（flag-hint，2026-10-21）：此前这条路径一条通知
+        # 都不发，于是「同样是人工确认一条 flag」，点按钮会通知、手工录入不会，
+        # 正在跑的 agent 完全不知道台账变了。
+        if str(body.verdict or "") == "accepted" and not r.get("rejected"):
+            try:
+                _notify_project_chat_turns(
+                    pid, asset_id=asset_id, flag_row=r.get("row") or {},
+                    reason="人工录入 flag")
+            except Exception:  # noqa: BLE001 —— 通知失败不该让录入失败
+                log.exception("人工录入 flag 后通知失败 asset=%s", asset_id)
         return r
 
     @app.patch("/api/challenges/{asset_id}/flags/{flag_id}")
@@ -4797,9 +5059,12 @@ def create_app(
         - 用户看到的是「一堆线程突然红了」，而不是「主控说：这题解出了，我收工」。
 
         现在改为**投递一条通知**（`core/chat/inbox.py`），模型在下一个步边界读到
-        「这题已拿到正确 flag，尽快收尾」，自己决定：停派新方向、把手上的东西
-        写回、给一句总结。**语义从「外部强制终止」变成「外部告知事实」**——终止
-        权仍归模型，因为它比外部更清楚自己此刻在哪个方向、拿到了什么。
+        事实后自己决定怎么收尾。**语义从「外部强制终止」变成「外部告知事实」**
+        ——终止权仍归模型，因为它比外部更清楚自己此刻在哪个方向、拿到了什么。
+
+        通知正文**按台账实际状态分叉**（flag-hint，2026-10-21）：真解出（拿满配额）
+        才说「收工」；只是 1/N 时说「已确认哪几条（含题面提示）、还差几条」，由 agent
+        自己比对方向。详见 `_solved_notice`。
 
         `rejected` 不投递（题目还没解出，该继续跑）。
         """
@@ -4812,59 +5077,22 @@ def create_app(
         except ValueError as e:
             raise HTTPException(422, str(e)) from e
         if str(body.verdict or "") == "accepted":
+            # **通知的触发条件是「台账变了」而不是「这次是 accepted」**
+            # （flag-hint，2026-10-21 修正）。
+            #
+            # 旧实现只判 `verdict == "accepted"` 就投递「这题已解出，不用再
+            # 探索了」——多 flag 题（如 6 条）确认第 1 条时，题目才 1/6，
+            # 子 agent 却收到「答案已确认、别再探索」，于是把正在找的第 2~6 条
+            # 全放弃。用户看到的正是「确认一条 flag，子进程就被取消」。
+            #
+            # 现在文案由 `_solved_notice` 按台账实际状态分叉：
+            #   * 已解出（accepted >= quota）→ 收工；
+            #   * 未解出 → 告知「已确认哪几条（含题面提示）、还差几条」，
+            #     由 agent 自己判断「这条是不是我的方向」，是才转向、不是就继续。
             _notify_project_chat_turns(
                 pid, asset_id=asset_id, flag_row=row,
                 reason="人工已确认 flag")
         return row
-
-    def _solved_notice(proj, challenge_id: str, flag_row: dict, *,
-                       is_controller: bool) -> str:
-        """拼「这题已解出，尽快收工」通知正文。
-
-        **文案必须按角色分叉**（2026-10-20 修正）：原文案是写给主控的
-        （「不要再 ctf_dispatch / call_expert」），可这条通知现在也会投给
-        **子专家与 ARTEX Worker**——它们手上根本没有这两个工具。让一个 worker
-        去「停止 ctf_dispatch」等于给它一条无法执行、也无法自检的指令，模型只能
-        猜，常见结果是它继续把手上那步跑完（用户看到的「还在跑」）。
-
-        worker 该做的是**停探索、写回、收尾**：它正在跑的那条方向已经不需要
-        再深挖了，手上的中间结论才是要保住的东西。
-        """
-        name = challenge_id
-        try:
-            asset = proj.bb.get_asset(challenge_id) or {}
-            name = str(asset.get("value") or asset.get("name") or challenge_id)
-        except Exception:  # noqa: BLE001
-            pass
-        token = str((flag_row or {}).get("flag") or "").strip()
-        head = [
-            "〔人工确认〕这道题已经拿到正确 flag，**不用再探索了**。",
-            "",
-            f"- 题目：{name}",
-            f"- 已确认 flag：`{token}`",
-            "",
-        ]
-        if is_controller:
-            return "\n".join(head + [
-                "**这一轮请尽快收尾**，按下面顺序做完就停：",
-                "1. 立刻**停止派新方向**（不要再 ctf_dispatch / call_expert）；",
-                "2. 把手上已识别的结论写回（已解出的路径、验证过的证据、未登记的"
-                "发现）——这些是复盘材料，别让它们随轮次消失；",
-                "3. 用一句话说明「本题已解出，收工」。",
-                "",
-                "已经在跑的方向不必等它们跑完，也不要为了「收齐」再等一轮。",
-            ])
-        return "\n".join(head + [
-            "**你正在跑的方向不必再做完了**——人工已经确认答案，继续深挖是重复"
-            "劳动。按下面顺序做完就停：",
-            "1. **不要再启动新的探测/扫描/脚本**，把当前这一步收个尾就够"
-            "（正在跑的长命令可以不等它结束）；",
-            "2. 把**手上已有的中间结论写回**（已走通的路径、验证过的证据、"
-            "还没登记成 finding 的发现）——这些是复盘材料，别让它们随轮次消失；",
-            "3. 用一句话说明「本题已解出，我的方向到此为止」并结束。",
-            "",
-            "不需要为了「做完整」再补一轮，也不要重新验证已经确认的 flag。",
-        ])
 
     def _notify_project_chat_turns(pid: str, text: str | None = None, *,
                                    asset_id: str | None = None,
@@ -8666,13 +8894,18 @@ def create_app(
         proj = _project(pid)
         from core.blackboard.artex_intents import list_intents
         rows = list_intents(proj.bb, pid, limit=1000)
+        # **counts 必须与 active 同口径按 task 过滤**（artex-kpi-scope，2026-10-21）：
+        # 此前 counts 统计**整个项目**，而 active 按 task 过滤，前端又用
+        # `graph.nodes.length`（本任务 Intent 数）当分母、`counts.completed`（全项目）
+        # 当分子 → 「总 Intent 12 / 完成 0%」这种分子分母不同源的数字。
+        # 多任务并行时更明显：A 任务的完成数会把 B 任务的进度顶上去。
+        scoped = [row for row in rows
+                  if not task_id or row.get("task_id") == task_id]
         counts: dict[str, int] = {}
-        for row in rows:
+        for row in scoped:
             counts[row["status"]] = counts.get(row["status"], 0) + 1
         engine = app.state.artex_engines.get(pid)
-        active = [row for row in rows if row["status"] in {"claimed", "running"}]
-        if task_id:
-            active = [row for row in active if row.get("task_id") == task_id]
+        active = [row for row in scoped if row["status"] in {"claimed", "running"}]
         return {"project_id": pid, "running": bool(engine and engine.running),
                 "active_workers": len(active), "counts": counts,
                 "active": active, "task_id": task_id}
@@ -9212,7 +9445,12 @@ def create_app(
                 "tools_controller": is_controller,
                 "mcp_servers": raw.get("mcp_servers"),
                 "max_steps": raw.get("max_steps"),
-                "protected": bool(raw.get("protected")),
+                "protected": _yaml_flag(raw.get("protected")),
+                # 表单没有这俩的控件，但**必须回传**：全字段覆写的语义是
+                # 「请求体即文件最终态」，前端拿不到就带不回去，一保存就丢。
+                # （已踩两次：protected 让 _generalist 可被删、intent_free
+                # 让 worker 重新被意图闸卡住。）
+                "intent_free": _yaml_flag(raw.get("intent_free")),
                 "variants": variants,
                 "file": f"experts/{name}.yaml"}
 
@@ -9284,11 +9522,16 @@ def create_app(
         for key in ("name", "description", "tracks", "persona", "skills",
                     "knowledge", "tools", "mcp_servers", "max_steps"):
             _emit(key, getattr(body, key), lines)
-        # protected 只落 `true`（缺省/False 不落键）。解析端 _parse_inline_value
-        # 把 "false" 读成字符串 "false"（真值为 True），落 false 会反转语义；
-        # 而「取消受保护」没有入口，不落键才是正确表达。
+        # protected / intent_free 只落 `true`（缺省/False 不落键）。解析端
+        # _parse_inline_value 把 "false" 读成字符串 "false"（真值为 True），
+        # 落 false 会反转语义；而这两个标记都没有「关闭」的 UI 入口
+        # （protected 只能靠改文件取消，intent_free 亦然），不落键才是
+        # 「未启用」的正确表达。顺序沿用历史文件（protected 在前），
+        # 免得同一份 yaml 每保存一次就因键序抖动刷出无意义 diff。
         if body.protected:
             lines.append("protected: true")
+        if body.intent_free:
+            lines.append("intent_free: true")
         for vt in sorted(body.variants or {}):
             for field in sorted(body.variants[vt] or {}):
                 _emit(f"variant_{vt}_{field}", body.variants[vt][field], lines)
@@ -9341,24 +9584,56 @@ def create_app(
         return {"status": "ok", "id": eid, "file": f"experts/{eid}.yaml"}
 
     @app.put("/api/experts/{expert_id}")
-    def update_expert(expert_id: str, body: ExpertSaveIn):
+    def update_expert(expert_id: str, body: ExpertSaveIn,
+                      auto: bool = Query(False, description="改动即存（自动保存）")):
         """全字段覆写（表单即最终态）。_generalist 可编辑不可删。
 
-        ``protected`` 是**文件属性而非表单字段**：请求体没带时继承原值，不能被
-        全字段覆写静默抹掉（2026-10-21 实测：UI 保存一次后 `_generalist` 的
-        `protected: true` 消失，DELETE 从 409 变 200，兜底专家可被删）。"""
+        ``protected`` / ``intent_free`` 是**文件属性而非表单字段**：请求体没带时
+        继承原值，不能被全字段覆写静默抹掉（2026-10-21 实测两次：UI 保存一次后
+        `_generalist` 的 `protected: true` 消失，DELETE 从 409 变 200；`worker.yaml`
+        的 `intent_free: true` 消失，worker 每次调工具又被要求先声明意图）。
+
+        ``auto=true``（设置页「改动即存」，2026-10-21 用户要求去掉保存按钮）：
+        相比手动保存加两道闸，**语义完全一致、只是不为无意义的写入留痕**：
+        1) 内容与原文件逐字节相同 → 直接返回 ``changed=false``，不备份、不写盘
+           （否则取消勾选又勾回来、输入后删回原样都会刷出一个「新版本」）；
+        2) 内容真的变了也按 ``_AUTO_HISTORY_MIN_INTERVAL`` 节流备份——自动保存
+           下每次击键都是一次 PUT，不节流会把 `.history` 从「版本历史」变成
+           「撤销栈」，回滚面板里全是中间态，真正想找回的旧版本反而被淹没。
+        """
         path = _experts_base() / f"{expert_id}.yaml"
         _validate_expert_body(body)
         with pack_write_lock():
             if not path.is_file():
                 raise HTTPException(404, f"专家不存在: {expert_id}")
-            _pack_history_backup(path)
+            current = path.read_text(encoding="utf-8")
             payload = body
-            if body.protected is None:
-                kept = bool(_parse_expert_yaml(path).get("protected"))
-                payload = body.model_copy(update={"protected": kept})
-            path.write_text(_dump_expert_yaml(payload), encoding="utf-8")
-        return {"status": "ok", "id": expert_id, "file": f"experts/{expert_id}.yaml"}
+            # 表单未暴露的标记字段：请求里是 None 才继承（显式传 false 尊重调用方）。
+            # 用 _yaml_flag 而非 bool()：盘上若被手改成 `false`，bool("false") 是
+            # True，会把「已关闭」的标记当开启再写回去。
+            if body.protected is None or body.intent_free is None:
+                raw = _parse_expert_yaml(path)
+                inherit: dict[str, Any] = {}
+                if body.protected is None:
+                    inherit["protected"] = _yaml_flag(raw.get("protected"))
+                if body.intent_free is None:
+                    inherit["intent_free"] = _yaml_flag(raw.get("intent_free"))
+                payload = body.model_copy(update=inherit)
+            text = _dump_expert_yaml(payload)
+            # 顶部说明注释必须拼回去（`_dump_expert_yaml` 按字段重建文件，注释
+            # 没有对应字段，否则打一个字就被抹掉）。只保留头部连续块，见
+            # `_leading_comments` 里为什么不保留全文注释。
+            head = _leading_comments(current)
+            if head:
+                text = head + text
+            if auto and text == current:
+                return {"status": "ok", "id": expert_id,
+                        "file": f"experts/{expert_id}.yaml", "changed": False}
+            _pack_history_backup(
+                path, min_interval=_AUTO_HISTORY_MIN_INTERVAL if auto else None)
+            path.write_text(text, encoding="utf-8")
+        return {"status": "ok", "id": expert_id,
+                "file": f"experts/{expert_id}.yaml", "changed": True}
 
     @app.delete("/api/experts/{expert_id}")
     def delete_expert(expert_id: str):
@@ -9367,7 +9642,10 @@ def create_app(
         with pack_write_lock():
             if not path.is_file():
                 raise HTTPException(404, f"专家不存在: {expert_id}")
-            if _parse_expert_yaml(path).get("protected"):
+            # 必须走 _yaml_flag 而不是裸真值判断：盘上若写 `protected: false`，
+            # 解析出来是字符串 "false"（真值），会把「不受保护」读成「拒删」，
+            # 专家就永远删不掉了。与 update_expert 的继承逻辑同口径。
+            if _yaml_flag(_parse_expert_yaml(path).get("protected")):
                 raise HTTPException(409, f"受保护专家不可删除: {expert_id}")
             dest = _trash_move(path)
         return {"status": "ok", "id": expert_id, "trash": dest.name}
@@ -10350,6 +10628,27 @@ def create_app(
         rows = query_failures(_project(pid).bb, pid, kinds=kinds, name=name,
                               author=author, limit=limit)
         return {"failures": rows}
+
+    @app.get("/api/projects/{pid}/diagnostics/llm-failover")
+    def diag_llm_failover(pid: str, kind: str | None = None,
+                          category: str | None = None,
+                          provider: str | None = None,
+                          limit: int = 200):
+        """跨供应商兜底记录（provider-failover，2026-10-21）。
+
+        回答一个此前无法回答的问题：**「刚才等了那么久最后报错」到底发生了什么**。
+        三类事件：``llm.provider_failed``（每家失败一条，带 category/status/耗时）、
+        ``llm.failover``（换家 from→to）、``llm.failover.exhausted``（全链耗尽）。
+
+        ``summary`` 用**未过滤**的全量算（类别分布/换家次数/真正停下次数）——
+        过滤只看 rows，否则选了某个类别后分布图就只剩一格。
+        """
+        from core.diagnostics.llm_failover import KINDS, query_failover, summary
+        bb = _project(pid).bb
+        rows = query_failover(bb, pid, kinds=(kind,) if kind in KINDS else None,
+                              category=category, provider=provider, limit=limit)
+        all_rows = query_failover(bb, pid, limit=500)
+        return {"rows": rows, "summary": summary(all_rows), "kinds": list(KINDS)}
 
     @app.get("/api/projects/{pid}/diagnostics/skills")
     def diag_skill_usage(pid: str, limit: int = 200):

@@ -14,7 +14,7 @@ packs/
 │  │                      #   phases/<phase>.yaml（阶段剧本）/ dimensions.yaml（测试维度）
 │  ├─ <方向>/             # kb 知识方向 web/binary/crypto/forensics/misc/cloud（资料树，不进 registry）
 │  │                      #   2026-10-14 树状化：二级=中文类目模块（如 web/漏洞分类），
-│  │                      #   三级=模块内类目；赛事专题/题目知识/ctf-<x>/ 为上游快照原件
+│  │                      #   三级=模块内类目；2026-10-21 英文快照（原赛事专题/题目知识/）已消化删除
 │  ├─ 安全红线/
 │  │  ├─ 轨红线/<track>.md        # 全轨全量注入（永久强制）
 │  │  ├─ 平台规则/<tag>.md        # owners（资产 meta.owner 命中才注入；渗透独有）

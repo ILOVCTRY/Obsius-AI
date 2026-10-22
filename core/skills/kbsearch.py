@@ -22,6 +22,18 @@ ATTACHMENT_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 INDEX_SUFFIXES = TEXT_SUFFIXES | ATTACHMENT_SUFFIXES
 _INDEX_LOCK = threading.RLock()
 _SCHEMA_VERSION = "2"
+#: 已完成建表/WAL 切换的库路径（进程级）。`journal_mode=WAL` 与 `CREATE TABLE
+#: IF NOT EXISTS` 都是幂等的持久化操作，每连接重跑只会把 open+close 从 3ms 拖到
+#: 400ms+（见 `_connect` 注释）。测试里每个 tmp_path 一个库，key 天然隔离。
+_SCHEMA_READY: set[str] = set()
+
+#: `search()` 内隐式 sync 的节流窗口（秒）。知识库是人手改的文件，30 秒内的
+#: 变更延迟不可感知；而 sync 要遍历 800+ 文件并开一次连接，实测 730ms——
+#: 对「动手前必做」的 kb_search 来说，这 0.7s 就是模型不爱用它的现实理由。
+#: **显式 `sync()` 调用不受此限**（写库方要立即生效时照常全量同步）。
+_SYNC_TTL_S = 30.0
+#: (db_path, 方向元组) → 上次 sync 完成时间。
+_LAST_SYNC: dict[tuple[str, tuple[str, ...]], float] = {}
 
 
 def default_index_path(packs_root: str | Path) -> Path:
@@ -114,22 +126,32 @@ class KbSearchIndex:
         con = sqlite3.connect(self.db_path, timeout=60.0)
         con.row_factory = sqlite3.Row
         con.execute("PRAGMA busy_timeout=60000")
-        con.execute("PRAGMA journal_mode=WAL")
-        con.executescript("""
-        CREATE TABLE IF NOT EXISTS kb_documents (
-            path TEXT PRIMARY KEY, cap TEXT NOT NULL, source TEXT NOT NULL,
-            relpath TEXT NOT NULL, layer INTEGER NOT NULL, kind TEXT NOT NULL,
-            title TEXT NOT NULL, summary TEXT NOT NULL, tags TEXT NOT NULL,
-            content TEXT NOT NULL, sha256 TEXT NOT NULL, mtime_ns INTEGER NOT NULL,
-            size INTEGER NOT NULL, is_attachment INTEGER NOT NULL DEFAULT 0,
-            indexed_at REAL NOT NULL
-        );
-        CREATE VIRTUAL TABLE IF NOT EXISTS kb_documents_fts USING fts5(
-            path UNINDEXED, title, summary, tags, content,
-            tokenize='unicode61'
-        );
-        CREATE TABLE IF NOT EXISTS kb_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-        """)
+        # **建表/切 WAL 每个进程只做一次**（2026-10-21 性能修复）：`journal_mode=WAL`
+        # 是**持久化**在库文件里的设置，`CREATE TABLE IF NOT EXISTS` 也是幂等的，
+        # 每连接重跑一遍毫无收益，却要为写事务拿锁、生成 WAL，导致 `close()` 时
+        # checkpoint 一次——实测单次 open+close 从 3ms 涨到 400~470ms。而
+        # `search()` 一次要开两个连接（sync 一个、查询一个），光这一项就吃掉近 1s，
+        # 是「kb_search 要 1.4s」的主因。
+        key = str(self.db_path)
+        first = key not in _SCHEMA_READY
+        if first:
+            con.execute("PRAGMA journal_mode=WAL")
+            con.executescript("""
+            CREATE TABLE IF NOT EXISTS kb_documents (
+                path TEXT PRIMARY KEY, cap TEXT NOT NULL, source TEXT NOT NULL,
+                relpath TEXT NOT NULL, layer INTEGER NOT NULL, kind TEXT NOT NULL,
+                title TEXT NOT NULL, summary TEXT NOT NULL, tags TEXT NOT NULL,
+                content TEXT NOT NULL, sha256 TEXT NOT NULL, mtime_ns INTEGER NOT NULL,
+                size INTEGER NOT NULL, is_attachment INTEGER NOT NULL DEFAULT 0,
+                indexed_at REAL NOT NULL
+            );
+            CREATE VIRTUAL TABLE IF NOT EXISTS kb_documents_fts USING fts5(
+                path UNINDEXED, title, summary, tags, content,
+                tokenize='unicode61'
+            );
+            CREATE TABLE IF NOT EXISTS kb_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            """)
+            _SCHEMA_READY.add(key)
         version = con.execute("SELECT value FROM kb_meta WHERE key='schema_version'").fetchone()
         if version is None or version[0] != _SCHEMA_VERSION:
             # The source tree is authoritative.  A version bump must invalidate
@@ -143,8 +165,32 @@ class KbSearchIndex:
         return con
 
     def sync(self, capabilities: list[str] | None = None) -> dict[str, int]:
+        """显式全量同步（写库方在改动后调用，永远真的扫盘）。"""
         with _INDEX_LOCK:
-            return self._sync_locked(capabilities)
+            out = self._sync_locked(capabilities)
+            if capabilities:
+                _LAST_SYNC[(str(self.db_path), tuple(sorted(capabilities)))] = time.time()
+            return out
+
+    def _sync_throttled(self, capabilities: list[str] | None) -> None:
+        """`search()` 用的隐式同步：TTL 内直接跳过。
+
+        为什么只在隐式路径节流：显式 `sync()` 是「我刚改了库，立刻生效」的语义，
+        节流会让它变成空操作（测试里「写文件 → sync → 断言新增」会直接红）。
+        而 `search()` 只是「顺手保证索引不太旧」，30 秒的陈旧度对人工编辑的
+        知识库没有影响。
+        """
+        if not capabilities:
+            return
+        key = (str(self.db_path), tuple(sorted(capabilities)))
+        if time.time() - _LAST_SYNC.get(key, 0.0) < _SYNC_TTL_S:
+            return
+        with _INDEX_LOCK:
+            # 双检：并发进来的第二个调用者不该再扫一遍
+            if time.time() - _LAST_SYNC.get(key, 0.0) < _SYNC_TTL_S:
+                return
+            self._sync_locked(capabilities)
+            _LAST_SYNC[key] = time.time()
 
     def _sync_locked(self, capabilities: list[str] | None = None) -> dict[str, int]:
         # **空方向保护（2026-10-21）**：`capabilities` 为空/None 时
@@ -230,7 +276,7 @@ class KbSearchIndex:
 
     def search(self, query: str, *, capabilities: list[str] | None = None,
                limit: int = 50, tag: str | None = None) -> list[dict[str, Any]]:
-        self.sync(capabilities)
+        self._sync_throttled(capabilities)
         ascii_terms, cjk_terms = query_tokens(query)
         terms = ascii_terms + cjk_terms
         if not terms:
@@ -297,6 +343,18 @@ class KbSearchIndex:
                 # ASCII 词元是硬约束（用户明确打的技术词，必须命中）。
                 rows = self._coverage_rows(con, query, ascii_terms, cjk_terms,
                                            caps, tag, limit)
+            elif 0 < len(rows) < self._FALLBACK_MERGE_BELOW and cjk_terms:
+                # **少量命中也要降级**（2026-10-21）：严格 AND 只要非零就短路，
+                # 曾让「zip 附件 分诊 文件类型」只返回 1 条（文件上传漏洞，完全
+                # 不对口）——因为那一条恰好同时含 4 个词元。模型看到 1 条不相关
+                # 结果就认为「库里没有」，从此不再查。降级结果**追加在后面**：
+                # 严格命中置信度更高，保留原顺序，只补召回。
+                extra = self._coverage_rows(
+                    con, query, ascii_terms, cjk_terms, caps, tag, limit,
+                    min_coverage=self._MERGE_COVERAGE_MIN, min_hits=1)
+                seen = {r["path"] for r in rows}
+                rows = list(rows) + [r for r in extra if r["path"] not in seen]
+                rows = rows[:max(1, limit)]
         finally:
             con.close()
         out = []
@@ -313,6 +371,18 @@ class KbSearchIndex:
                         "is_attachment": bool(row["is_attachment"])})
         return out
 
+    #: 严格 AND 命中数低于该值时，**同时**跑覆盖率降级并追加结果（2026-10-21）。
+    #: 取 3 的实测依据：分诊类查询（「zip 附件 分诊 文件类型」）严格 AND 只中 1 条
+    #: 且完全不对口，而降到 1 条时模型会判定「库里没有」直接放弃；≥3 条时命中
+    #: 通常已经覆盖真实意图，再追加只会引入噪声。
+    _FALLBACK_MERGE_BELOW = 3
+
+    #: 合并路径的覆盖率下限（比 ``_COVERAGE_MIN`` 松）。理由：合并发生在严格 AND
+    #: **已有**结果之后，高置信项已在最前，这里只补「部分命中」的候选；仍用 0.34
+    #: 会把「伪加密 压缩包」这种两词查询卡死（只中一个词 = 0.5 能过，但四词查询
+    #: 只中一个 = 0.25 过不去，而分诊查询恰恰多是三四个词）。
+    _MERGE_COVERAGE_MIN = 0.15
+
     #: 降级检索时词元权重覆盖率下限：命中词元的 IDF 权重之和 ≥ 全部候选权重
     #: 的这个比例才入选。0.34 来自实测——自然语言问句里通常 1/3 是虚词噪声，
     #: 再高会把「文件上传绕过」这类真查询挤掉，再低则泛词重新污染结果。
@@ -326,25 +396,45 @@ class KbSearchIndex:
     def _coverage_rows(self, con: sqlite3.Connection, query: str,
                        ascii_terms: list[str], cjk_terms: list[str],
                        caps: set[str], tag: str | None,
-                       limit: int) -> list[sqlite3.Row]:
+                       limit: int, *,
+                       min_coverage: float | None = None,
+                       min_hits: int | None = None) -> list[sqlite3.Row]:
         """IDF 加权覆盖率降级检索（严格 AND 零结果时使用）。
 
         ASCII 词元恒作硬约束；中文词元按 df 加权，泛词（df > 60% 语料）剔除，
         语料里完全不存在的词元（跨词边界 2-gram）自然被 df=0 排除。
         双门槛：命中权重占比 ≥ ``_COVERAGE_MIN`` **且** 命中词元个数占比
-        ≥ ``_HIT_RATIO_MIN``——前者防泛词刷权重，后者防「只中一个词」蒙对。"""
+        ≥ ``_HIT_RATIO_MIN``——前者防泛词刷权重，后者防「只中一个词」蒙对。
+
+        ``min_coverage`` / ``min_hits`` 供**合并路径**放宽用：那时严格 AND 已有
+        结果排在前面，这里只补召回，不需要再守「必须中大半词元」——两个词的
+        查询守 0.6 等于要求全中，合并就退化成重复查询（实测「伪加密 压缩包」
+        只回 1 条就是这个原因）。"""
         cap_list = sorted(caps)
         cap_sql = (" AND d.cap IN (" + ",".join("?" for _ in cap_list) + ")"
                    if cap_list else "")
         tag_sql = " AND lower(d.tags) LIKE ?" if tag else ""
         tag_params: list[Any] = ["%" + tag.lower() + "%"] if tag else []
 
-        def _df(term: str) -> int:
-            n = con.execute(
-                "SELECT count(*) FROM kb_documents d WHERE lower(d.content) LIKE ?"
+        # **一次扫描算完全部词元的 df**（2026-10-21 性能修复）：中文没有 FTS 支持，
+        # 每个 df 查询都是一次全表 LIKE 扫描（31MB × 6 域）。旧实现对每个词元各查
+        # 一次、且在 live/weights 两处重复查，6 个词元 = 十几次全表扫描 → 单次检索
+        # 1.2~2.2s。而 kb_search 正要被提升为「动手前必做」，2s 的工具调用本身就是
+        # 模型不爱用它的理由。改成一条 SELECT 里用 SUM(CASE…) 一次扫完，词元数
+        # 不再影响扫描次数。
+        _all_terms = list(dict.fromkeys(list(ascii_terms) + list(cjk_terms)))
+        _df_map: dict[str, int] = {}
+        if _all_terms:
+            _exprs = ", ".join(
+                "SUM(CASE WHEN lower(d.content) LIKE ? THEN 1 ELSE 0 END)"
+                for _ in _all_terms)
+            _row = con.execute(
+                "SELECT " + _exprs + " FROM kb_documents d WHERE 1=1"
                 + cap_sql + tag_sql,
-                ["%" + term + "%"] + cap_list + tag_params).fetchone()[0]
-            return int(n or 0)
+                ["%" + t + "%" for t in _all_terms] + cap_list + tag_params
+            ).fetchone()
+            _df_map = {t: int(_row[i] or 0) for i, t in enumerate(_all_terms)}
+        _df = lambda t: _df_map.get(t, 0)  # noqa: E731 —— 之后走内存映射，不再触库
 
         total_docs = con.execute("SELECT count(*) FROM kb_documents d WHERE 1=1"
                                  + cap_sql + tag_sql,
@@ -363,7 +453,11 @@ class KbSearchIndex:
         weights += [(t, math.log(1 + total_docs / max(1, _df(t)))) for t in live]
         total_weight = sum(w for _, w in weights) or 1.0
         score_terms = [t for t, _ in weights]
-        need_hits = max(1, math.ceil(len(score_terms) * self._HIT_RATIO_MIN))
+        if min_hits is None:
+            need_hits = max(1, math.ceil(len(score_terms) * self._HIT_RATIO_MIN))
+        else:
+            need_hits = max(1, min_hits)
+        need_cov = self._COVERAGE_MIN if min_coverage is None else min_coverage
 
         score_expr = "+".join(
             f"(CASE WHEN lower(d.content) LIKE ? THEN {w:.5f} ELSE 0 END)"
@@ -397,5 +491,5 @@ class KbSearchIndex:
                   + cap_list + tag_params + [max(1, limit)])
         rows = list(con.execute(sql, params))
         return [r for r in rows
-                if (r["cov"] or 0) / total_weight >= self._COVERAGE_MIN
+                if (r["cov"] or 0) / total_weight >= need_cov
                 and (r["hits"] or 0) >= need_hits]

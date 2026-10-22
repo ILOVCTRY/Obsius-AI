@@ -181,6 +181,21 @@ def hook_block_timer(mu, address, size, user_data):
 
 **CTF 里通常只需置标志让固件自己轮询**，不必真的劫持 PC 到 ISR。真要向量中断，就 `context_save()` → 写 `PC`/`LR`/`xPSR` → 模拟 ISR → `context_restore()`。
 
+### 4.2 按访问类型分流 `UC_HOOK_MEM_INVALID`
+
+**判据**：固件跑飞后报 `UC_ERR_READ_UNMAPPED`，但读地址看起来合法——先分清是**取指**越界还是**数据**越界。`UC_HOOK_MEM_INVALID` 的 `access` 参数区分 `UC_MEM_FETCH_UNMAPPED` / `READ_UNMAPPED` / `WRITE_UNMAPPED` / `*_PROT`，按类型分流才能定位：
+
+| `access` | 含义 | 处置 |
+|---|---|---|
+| `UC_MEM_FETCH_UNMAPPED` | 跳到了未映射地址 | 真的跑飞了，`emu_stop()` 并 dump 最近轨迹 |
+| `UC_MEM_READ_UNMAPPED` | 读了没建模的外设 | 补进 MMIO 表，别整页 `mem_map` 糊过去 |
+| `UC_MEM_WRITE_UNMAPPED` | 写了没建模的寄存器 | 记录值再返回 `True`，否则固件状态机停住 |
+| `UC_MEM_READ_PROT` / `WRITE_PROT` | 页映射了但权限不对 | `mem_protect(addr & ~0xfff, 0x1000, UC_PROT_ALL)` 后返回 `True` 放行 |
+
+**不成立**：整页 `mem_map(base, 0x1000)` 之后所有访问都「成功」，看起来跑得更远，实际是固件读到了全 0 的假寄存器——**症状从崩溃变成死循环或错误分支**，更难查。宁可让未建模的地址继续 fault。
+
+**GPIO / NVIC 的最小模型**：每个外设一个 dict，只存「固件会读回的位」，写时合并、读时按位语义返回。中断控制器只需 `pending` 位图 + `enable` 位图，两者按位与非零即视为该 IRQ 触发。
+
 ## 5. 快照与爆破
 
 每个候选重建 `Uc` 比快照恢复慢 10-100 倍。

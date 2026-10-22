@@ -325,14 +325,15 @@ def diagnose(packs_root: str | Path,
     # 分节形态都算有结构；refs/ 子树豁免（上游快照原文不动是既有约定）；短条目/
     # 存根不检。沉淀口径段（已验证路径/坑/…）要求只约束 agent 新建侧
     # （proposals._validate_agent_kb），不强制存量手册改标题。
-    # 2026-10-14 树状化重构：refs/ 已拆入各类目，上游原件现居
-    # 「赛事专题/题目知识」（豁免项由 refs 段改为赛事专题段）；
-    # 同属上游原料集合的「载荷与字典/工具手册」（CTF常用脚本及工具__*、工具使用__*
-    # 扁平命名收编）一并豁免。
+    # 2026-10-14 树状化重构：refs/ 已拆入各类目。
+    # 2026-10-21 英文快照消化：`赛事专题/题目知识/` 已整体删除，该段豁免随之取消
+    # ——赛事专题下只剩中文的判据库/靶场复盘/WP撰写，属正常知识文档，照常体检。
+    # 仍豁免「载荷与字典/工具手册」（CTF常用脚本及工具__*、工具使用__*
+    # 扁平命名收编的上游原料）。
     if kb_root_dir.is_dir():
         for md in sorted(kb_root_dir.rglob("*.md")):
             if ".history" in md.parts or "kb-trash" in md.parts \
-                    or "refs" in md.parts or "赛事专题" in md.parts \
+                    or "refs" in md.parts \
                     or "载荷与字典" in md.parts or "工具手册" in md.parts:
                 continue
             try:
@@ -358,7 +359,7 @@ def diagnose(packs_root: str | Path,
         _missing_idx: list[tuple[int, str]] = []
         for md in sorted(kb_root_dir.rglob("*.md")):
             if ".history" in md.parts or "kb-trash" in md.parts \
-                    or "赛事专题" in md.parts or "载荷与字典" in md.parts \
+                    or "载荷与字典" in md.parts \
                     or "工具手册" in md.parts or md.name.endswith(".idx.md"):
                 continue
             try:

@@ -36,7 +36,7 @@ mode: self-contained
 | **LLM 提示注入** | 有 LLM 服务、聊天机器人 | 直接注入 / 越狱 / 上下文污染 / 工具调用劫持 / 系统提示泄露 | `misc/AI安全/LLM 攻击（提示词与工具层面）.md` |
 | **对抗样本** | 模型文件、扰动图 | 对抗扰动 / 成员推理 / 模型抽取 | `misc/AI安全/对抗机器学习与后门分析.md`、`model-attacks.md` |
 | **DNS 隧道** | 有 DNS 交互 | 子域编码 / TXT 记录外带 / 时序编码 | `misc/协议异常/协议异常与 DNS 利用.md` |
-| **无线 SDR** | IQ 文件、`.wav` 射频录制 | 调制识别 / 解调 / 协议解析 | `misc/赛事专题/题目知识/ctf-misc/CTF Misc - RF、SDR、IQ Signal Processing.md` |
+| **无线 SDR** | IQ 文件、`.wav` 射频录制 | 调制识别 / 解调 / 协议解析 | `misc/射频信号/射频与 SDR 信号处理.md` |
 | **Linux 提权杂项** | CTF 向本地提权 | SUID / 定时任务 / 内核漏洞 / 环境变量 | `misc/系统杂项/Linux 提权与服务滥用.md` |
 
 ## 2. 判据速查
