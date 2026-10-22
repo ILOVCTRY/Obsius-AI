@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { api } from "@/lib/api"
 import type {
-  AgentTool, Expert, LlmProvider, McpServer, SkillDef,
+  AgentTool, Expert, ExpertBody, LlmProvider, McpServer, SkillDef,
 } from "@/lib/types"
 import { capLabel, trackLabel, type Taxonomy } from "@/lib/taxonomy"
 import { Badge } from "@/components/ui/badge"
@@ -45,6 +45,14 @@ function packsChanged() {
   window.dispatchEvent(new Event("packs-changed"))
 }
 
+/** 自动保存路径专用：packs-changed 会让 DoctorBar 重跑整棵 packs 的 doctor 体检
+ *  （磁盘扫描级开销）。改动即存下一次输入会触发多次，必须并流到「停手 2s 后一次」。 */
+let packsChangedTimer: number | null = null
+function packsChangedSoon() {
+  if (packsChangedTimer != null) window.clearTimeout(packsChangedTimer)
+  packsChangedTimer = window.setTimeout(() => { packsChangedTimer = null; packsChanged() }, 2000)
+}
+
 // doctor 跳转指令（跨 tab/轨选中具体专家或技能）
 interface ExpertFocus { id: string; n: number }
 interface SkillFocus { name: string; n: number }
@@ -52,10 +60,6 @@ interface SkillFocus { name: string; n: number }
 // 设置页（DESIGN.md §12 页面 6-9）：专家池（packs/experts/ 单文件池）/ 技能库（packs/kb/skills 扁平）/
 // 安全红线（轨红线/平台规则/评级）/ 模型 / MCP。
 // 修改经 core API 写 packs 文件（写入前留 .history）；改动在下次开窗生效，在跑会话不受影响。
-
-function Saved({ saved }: { saved: boolean }) {
-  return <span className={cn("text-[10px] transition-opacity", saved ? "text-primary opacity-100" : "opacity-0")}>已保存 ✓</span>
-}
 
 // 勾选清单三态：null = 全量（不限制，后端不落键）；[] = 一个都不启用；非空 = 勾选清单。
 // null 必须保留——兜底/主控专家靠它表达「全量」，读成 [] 再保存会把能力清空。
@@ -152,6 +156,68 @@ function CheckList({ title, items, selected, onChange, groupOrder }: {
 /** 技能展示分组顺序（与 core/skills/taxonomy.SKILL_GROUP_ORDER 同口径） */
 const SKILL_GROUP_ORDER = ["分诊", "Web 攻击", "二进制与逆向", "红队后渗透",
                            "云与容器", "侦察", "蓝图与建模", "其他"]
+
+/** 专家表单草稿：专家页所有可编辑字段的本地副本（自动保存的提交源）。
+ *
+ *  单独建模而不是一堆 useState，是因为自动保存必须**原子地**算出「这一笔改动的
+ *  完整快照」——全字段覆写要求每次提交都带上所有字段，分散的 state 在连打时会
+ *  各自落后一拍，拼出来的 yaml 就是几个不同时刻的混合体。 */
+interface ExpertDraft {
+  name: string
+  description: string
+  persona: string
+  tracks: string[]
+  skills: string[] | null
+  tools: string[] | null
+  mcpServers: string[] | null
+  steps: string
+}
+const EMPTY_DRAFT: ExpertDraft = {
+  name: "", description: "", persona: "", tracks: [],
+  skills: null, tools: null, mcpServers: null, steps: "",
+}
+
+function draftFrom(e: Expert): ExpertDraft {
+  return {
+    // 显示名等于 id 时视为「未命名」，表单留空（否则用户会看到一个没改过的 id 文本）
+    name: e.name && e.name !== e.id ? e.name : "",
+    description: e.description ?? "",
+    persona: e.persona ?? "",
+    tracks: e.tracks ?? [],
+    // null 必须原样保留：null = 全量（后端不落键），[] = 一个都不启用。
+    // 读成 [] 再保存会把「未限制」写成「全部禁用」。
+    skills: e.skills ?? null,
+    tools: e.tools ?? null,
+    mcpServers: e.mcp_servers ?? null,
+    steps: e.max_steps != null ? String(e.max_steps) : "",
+  }
+}
+
+/** 草稿 → 请求体（全字段覆写：空值 = null 不落键）。 */
+function bodyFrom(d: ExpertDraft, e: Expert): ExpertBody {
+  const stepsTrim = d.steps.trim()
+  return {
+    name: d.name.trim() || null,
+    description: d.description.trim() || null,
+    persona: d.persona.trim() || null,
+    tracks: d.tracks.length ? d.tracks : null,
+    // 能力白名单三件套按草稿原样提交：null = 不限制（后端不落键）；
+    // [] = 明确一个都不启用（后端落 `key: []`）；非空 = 勾选清单。
+    skills: d.skills,
+    // kb 方向两态（null/[] 都=不限），表单不编辑但必须原样回传，否则覆写会清空。
+    knowledge: e.knowledge ?? null,
+    // task_types 已退役（2026-10-21）：不提交——全字段覆写时后端不再序列化该键，
+    // 存量 yaml 里的旧值随之被清掉（这是刻意行为）。
+    // 工具白名单：勾选即开关（controller-tool-select，2026-10-20）。控制器与子专家
+    // 同口径——null = 不落键（控制器此时回落代码默认面），[] = 明确一个都不开。
+    tools: d.tools,
+    mcp_servers: d.mcpServers,
+    max_steps: stepsTrim ? Number(stepsTrim) : null,
+    // 轨变体只读展示，但必须原样回传——否则全字段覆写会把 variant_<轨>_<字段> 抹掉。
+    variants: Object.keys(e.variants ?? {}).length ? e.variants : null,
+  }
+}
+
 /** MCP server 的 domain（config/mcp.json 的 domains）→ 中文类别 */
 const MCP_DOMAIN_LABEL: Record<string, string> = {
   pentest: "渗透测试", reverse: "逆向", binary: "二进制",
@@ -303,19 +369,16 @@ export function SettingsView({ nav, pid }: {
 function ExpertsPane({ tax, focus }: { tax: Taxonomy | null; focus: ExpertFocus | null }) {
   const [experts, setExperts] = useState<Expert[]>([])
   const [selected, setSelected] = useState<string | null>(null)
-  const [displayName, setDisplayName] = useState("")   // 中文显示名；留空 = 用专家 id
-  const [description, setDescription] = useState("")
-  const [persona, setPersona] = useState("")
-  const [trackSel, setTrackSel] = useState<string[]>([]) // 空 = null = 服务全轨
-  const [skills, setSkills] = useState<string[] | null>(null)
+  const [draft, setDraft] = useState<ExpertDraft>(EMPTY_DRAFT)
+  // 表单从磁盘重灌的触发器：只在「选中项变了」或「显式重新加载」时递增。
+  // **不能拿 `cur` 当依赖**——自动保存会更新左列表（对象换了引用），依赖 cur 的
+  // effect 会在打字过程中把表单重置回盘上内容，表现为「输入框自己跳字」。
+  const [resync, setResync] = useState(0)
   const [skillCatalog, setSkillCatalog] = useState<SkillDef[]>([])
-  const [tools, setTools] = useState<string[] | null>(null)
   const [toolCatalog, setToolCatalog] = useState<AgentTool[]>([])
   const [toolGroups, setToolGroups] = useState<string[]>([])
-  const [mcpServers, setMcpServers] = useState<string[] | null>(null)
   const [mcpCatalog, setMcpCatalog] = useState<McpServer[]>([])
-  const [steps, setSteps] = useState("")
-  const [saved, setSaved] = useState(false)
+  const [saveState, setSaveState] = useState<SaveState>("idle")
   const [err, setErr] = useState<string | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
   const [confirmDel, setConfirmDel] = useState<string | null>(null)
@@ -329,6 +392,8 @@ function ExpertsPane({ tax, focus }: { tax: Taxonomy | null; focus: ExpertFocus 
       const pool = es.filter((e) => e.kind !== "virtual")
       setExperts(pool)
       setSelected((cur) => cur && pool.some((e) => e.id === cur) ? cur : (pool[0]?.id ?? null))
+      // 列表换了 → 表单要按盘上最新内容重灌（保存/回滚/新建/删除后都必须）
+      setResync((n) => n + 1)
     }).catch(() => {})
     return () => { alive = false }
   }, [])
@@ -339,12 +404,151 @@ function ExpertsPane({ tax, focus }: { tax: Taxonomy | null; focus: ExpertFocus 
     api.mcpServers().then((r) => setMcpCatalog(r.servers)).catch(() => {})
   }, [])
 
-  // doctor 跳转：选中指定专家
+  const cur = experts.find((e) => e.id === selected)
+  const curRef = useRef<Expert | undefined>(cur)
+  curRef.current = cur
+  const selectedRef = useRef<string | null>(selected)
+  selectedRef.current = selected
+  // 切专家的统一入口（会先冲出待写改动）；handler 在下面定义，这里经 ref 调用
+  const selectRef = useRef<(id: string) => void>(() => {})
+
+  // doctor 跳转：选中指定专家（走 select 以便顺手落盘上一家的待写改动）
   useEffect(() => {
-    if (focus) setSelected(focus.id)
+    if (focus && focus.id !== selectedRef.current) selectRef.current(focus.id)
   }, [focus])
 
-  const cur = experts.find((e) => e.id === selected)
+  // ---- 自动保存（2026-10-21 用户要求去掉「保存」按钮：改动即存）----
+  //
+  // 与 `LlmPane` 同一套纪律（串行链 + 本地状态是唯一真相 + 不回写表单），另加三条
+  // 专家页特有的约束：
+  //  1) **草稿在 ref 里同步推进**：`setDraft` 是异步的，输入连打时读 state 会拿到
+  //     上一个字符的快照，落盘内容永远慢一拍。所有改动都先算进 `draftRef` 再 enqueue。
+  //  2) **切换专家 / 卸载前必须 flush**：否则「敲完最后一个字立刻点另一个专家」或
+  //     「直接关掉设置页」会丢掉最后 <400ms 的输入。
+  //  3) **非法输入整次不落盘**：全字段覆写没有「只跳过这个字段」的余地，`max_steps`
+  //     填了非正整数就别提交，明确说"未保存"而不是偷偷写个别的值。
+  const draftRef = useRef<ExpertDraft>(EMPTY_DRAFT)
+  const chainRef = useRef<Promise<void>>(Promise.resolve())
+  const timerRef = useRef<number | null>(null)
+  const savedTimer = useRef<number | null>(null)
+  const scheduled = useRef<{ id: string; body: ExpertBody; seq: number } | null>(null)
+  // 改动序号：用于判断「这次落盘之后用户又改了吗」。不判的话，请求在飞期间继续打字，
+  // 响应回来会把「已保存 ✓」盖在**还有待写改动**的界面上——用户以为存了其实没有。
+  const seqRef = useRef(0)
+  // 待写草稿（专家 id → 最新草稿 + 它的改动序号）。
+  // 快速 A→B→A 切换时，A 的 PUT 可能还在路上，此刻「从盘上重灌」读到的是**旧值**，
+  // 界面会显示上一版内容、再被下一个请求覆盖——所以「有更新的草稿还没落盘」时，
+  // 表单要读草稿而不是读盘。带 seq 是为了只清理**自己那一笔**：A 在飞期间用户又改了
+  // A，响应回来不能把新草稿一起删掉。
+  const pendingDraftRef = useRef<Map<string, { seq: number; draft: ExpertDraft }>>(new Map())
+
+  const send = useCallback(async (id: string, body: ExpertBody, seq: number) => {
+    // 只有「当前编辑对象」的状态变化才值得显示在顶部；切到别家之后，A 的响应回来
+    // 不该改 B 的徽标。
+    const isCurrent = () => selectedRef.current === id
+    if (isCurrent()) setSaveState("saving")
+    try {
+      await api.updateExpert(id, body, true)
+      // 这一笔已经落盘 → 若草稿没再被更新过（seq 仍是这一笔），就不再算「待写」，
+      // 之后重灌读盘即可；被更新过则保留，等下一笔落盘再清。
+      const pend = pendingDraftRef.current.get(id)
+      const superseded = pend != null && pend.seq !== seq
+      if (!superseded) pendingDraftRef.current.delete(id)
+      // 落盘期间又改了 → 保持 pending，别盖「已保存」
+      if (!superseded && isCurrent()) {
+        setSaveState("saved")
+        if (savedTimer.current != null) window.clearTimeout(savedTimer.current)
+        savedTimer.current = window.setTimeout(() => setSaveState("idle"), 1600)
+      }
+      // 左列表的显示名/轨标签要跟着变，但**不回写表单**（回写会打断正在打的字），
+      // 也不整表重拉（重拉会让 cur 换引用，触发无谓重渲染）。
+      setExperts((es) => es.map((e) => (e.id === id
+        ? { ...e, name: body.name, description: body.description, persona: body.persona,
+            tracks: body.tracks ?? [], max_steps: body.max_steps }
+        : e)))
+      packsChangedSoon()
+    } catch (e) {
+      // 校验失败（422：未知技能 / 未知方向 / 步数）要显式暴露，不能静默。
+      // 失败时保留待写草稿：用户切回来还能看到并改掉那个非法值。
+      if (isCurrent()) {
+        setErr(String(e))
+        setSaveState("idle")
+      }
+    }
+  }, [])
+
+  const queue = useCallback((id: string, body: ExpertBody, seq: number) => {
+    chainRef.current = chainRef.current.then(() => send(id, body, seq))
+  }, [send])
+
+  /** 把攒着的改动立刻发出去（停止防抖计时）。 */
+  const flush = useCallback(() => {
+    if (timerRef.current != null) { window.clearTimeout(timerRef.current); timerRef.current = null }
+    const p = scheduled.current
+    scheduled.current = null
+    if (p) queue(p.id, p.body, p.seq)
+  }, [queue])
+  const flushRef = useRef(flush)
+  flushRef.current = flush
+
+  /** 改动 → 记入草稿 → 防抖落盘。`immediate` 用于切换前/卸载前的强制冲出。 */
+  const commit = useCallback((next: ExpertDraft, immediate = false) => {
+    const e = curRef.current
+    if (!e) return
+    draftRef.current = next
+    setDraft(next)
+    const stepsTrim = next.steps.trim()
+    if (stepsTrim && !/^\d+$/.test(stepsTrim)) {
+      // 非法步数：**整次不落盘**（全字段覆写必须带一个合法的 max_steps，不能只跳过它）
+      if (timerRef.current != null) { window.clearTimeout(timerRef.current); timerRef.current = null }
+      scheduled.current = null
+      setSaveState("idle")
+      setErr("最大步数必须是正整数——本次改动未保存")
+      return
+    }
+    setErr(null)
+    const seq = ++seqRef.current
+    pendingDraftRef.current.set(e.id, { seq, draft: next })
+    scheduled.current = { id: e.id, body: bodyFrom(next, e), seq }
+    if (timerRef.current != null) window.clearTimeout(timerRef.current)
+    if (immediate) { flush(); return }
+    setSaveState("pending")
+    timerRef.current = window.setTimeout(() => {
+      timerRef.current = null
+      const p = scheduled.current
+      scheduled.current = null
+      if (p) queue(p.id, p.body, p.seq)
+    }, 400)
+  }, [flush, queue])
+
+  const edit = useCallback((patch: Partial<ExpertDraft>) => {
+    commit({ ...draftRef.current, ...patch })
+  }, [commit])
+
+  /** 切换选中项：先把上一家待写的改动冲出去，再切。 */
+  const select = useCallback((id: string) => {
+    if (id === selectedRef.current) return
+    flush()
+    setSelected(id)
+  }, [flush])
+  selectRef.current = select
+
+  // 卸载（关掉设置页 / 切 tab）时冲出待写改动，别把最后几个字留在内存里
+  useEffect(() => () => flushRef.current(), [])
+
+  // 表单重灌：选中项变了，或显式 reload（保存/回滚/新建/删除之后）。
+  // 有未落盘草稿时读草稿——盘上还是旧的，读盘会让界面回退到上一版。
+  useEffect(() => {
+    const e = experts.find((x) => x.id === selected)
+    if (!e) return
+    const d = pendingDraftRef.current.get(e.id)?.draft ?? draftFrom(e)
+    draftRef.current = d
+    setDraft(d)
+    setErr(null)
+    setSaveState("idle")
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, resync])
+
 
   /** 控制器专属工具（不在 AGENT_TOOLS 目录里，后端随 tools_runtime 下发）。
    *  它们是走专用 dispatch 分支的工具：`todo_write`/`call_expert` 走 `_dispatch`
@@ -396,64 +600,21 @@ function ExpertsPane({ tax, focus }: { tax: Taxonomy | null; focus: ExpertFocus 
     return toolCatalog.map((t) => ({ id: t.name, label: t.name, detail: t.description, group: t.group }))
   }, [toolCatalog, cur?.tools_runtime])
 
-  useEffect(() => {
-    if (!cur) return
-    setDisplayName(cur.name && cur.name !== cur.id ? cur.name : "")
-    setDescription(cur.description ?? "")
-    setPersona(cur.persona ?? "")
-    setTrackSel(cur.tracks ?? [])
-    // null 必须原样保留：null = 全量（后端不落键），[] = 一个都不启用。
-    // 读成 [] 再保存会把「未限制」写成「全部禁用」。
-    setSkills(cur.skills ?? null)
-    setTools(cur.tools ?? null)
-    setMcpServers(cur.mcp_servers ?? null)
-    setSteps(cur.max_steps != null ? String(cur.max_steps) : "")
-    setSaved(false)
-    setErr(null)
-  }, [cur])
-
   const toggleTrack = (t: string) =>
-    setTrackSel((ts) => ts.includes(t) ? ts.filter((x) => x !== t) : [...ts, t])
-
-  const save = async () => {
-    if (!cur) return
-    const stepsTrim = steps.trim()
-    try {
-      // 全字段覆写（表单即最终态）：空值=null 不落键。
-      // 能力白名单三件套按 state 原样提交：null = 不限制（后端不落键）；
-      // [] = 明确一个都不启用（后端落 `key: []`）；非空 = 勾选清单。
-      await api.updateExpert(cur.id, {
-        name: displayName.trim() || null,
-        description: description.trim() || null,
-        persona: persona.trim() || null,
-        tracks: trackSel.length ? trackSel : null,
-        skills,
-        // kb 方向两态（null/[] 都=不限），表单不编辑但必须原样回传，否则覆写会清空。
-        knowledge: cur.knowledge ?? null,
-        // task_types 已退役（2026-10-21）：不提交——全字段覆写时后端不再序列化
-        // 该键，存量 yaml 里的旧值随之被清掉（这是刻意行为）。
-        // 工具白名单：勾选即开关（controller-tool-select，2026-10-20）。
-        // 控制器与子专家同口径——null = 不落键（控制器此时回落代码默认面），
-        // [] = 明确一个都不开，非空 = 勾选清单。
-        tools,
-        mcp_servers: mcpServers,
-        max_steps: stepsTrim ? Number(stepsTrim) : null,
-        // 轨变体只读展示，但必须原样回传——否则全字段覆写会把 variant_<轨>_<字段> 抹掉。
-        variants: Object.keys(cur.variants ?? {}).length ? cur.variants : null,
-      })
-      setSaved(true)
-      setTimeout(() => setSaved(false), 1500)
-      packsChanged()
-      reload()
-    } catch (e) {
-      setErr(String(e))
-    }
-  }
+    edit({ tracks: draftRef.current.tracks.includes(t)
+      ? draftRef.current.tracks.filter((x) => x !== t)
+      : [...draftRef.current.tracks, t] })
 
   const doDelete = async () => {
     if (!confirmDel) return
     setBusy(true)
     setErr(null)
+    // 删的就是当前这家：待写的自动保存要**丢弃**而不是冲出——冲出会与 DELETE 抢同一
+    // 个文件（PUT 落在 DELETE 之后就是 404，落在之前则白写一次再被删）。
+    if (confirmDel === selectedRef.current) {
+      if (timerRef.current != null) { window.clearTimeout(timerRef.current); timerRef.current = null }
+      scheduled.current = null
+    }
     try {
       await api.deleteExpert(confirmDel)
       setSelected((c) => c === confirmDel ? null : c)
@@ -479,7 +640,7 @@ function ExpertsPane({ tax, focus }: { tax: Taxonomy | null; focus: ExpertFocus 
                    selected === e.id && "bg-primary/10 text-primary")}>
               <button
                 className="min-w-0 flex-1 truncate rounded px-2 py-1.5 text-left font-mono hover:bg-accent/40"
-                onClick={() => setSelected(e.id)}
+                onClick={() => select(e.id)}
                 title={`${e.id}${e.description ? ` · ${e.description}` : ""}`}>
                 {e.name || e.id}
                 <span className="ml-1 text-[9px] text-muted-foreground">
@@ -504,20 +665,28 @@ function ExpertsPane({ tax, focus }: { tax: Taxonomy | null; focus: ExpertFocus 
               {cur.protected && <span className="text-[10px] text-muted-foreground">受保护（拒删，可编辑）</span>}
               <span className="flex-1" />
               {err && <span className="text-[10px] text-(--status-error)">{err}</span>}
-              <Saved saved={saved} />
+              {/* 没有「保存」按钮了（2026-10-21 用户要求改动即存）：这行小字是唯一的
+                  落盘反馈。三态覆盖「正在敲但还没发」「请求在飞」「已落盘」。 */}
+              <span className={cn("text-[10px] transition-opacity",
+                saveState === "pending" && "text-muted-foreground",
+                saveState === "saving" && "text-muted-foreground",
+                saveState === "saved" && "text-primary")}>
+                {saveState === "pending" ? "待保存…"
+                  : saveState === "saving" ? "保存中…"
+                  : saveState === "saved" ? "已保存 ✓" : "改动即存"}
+              </span>
               {cur.file && <HistoryButton file={cur.file} onRolledBack={reload} />}
-              <Button size="sm" onClick={save}>保存</Button>
             </div>
             <label className="text-[10px] text-muted-foreground">显示名（可中文；留空 = 用专家 id {cur.id}；界面各处展示用）</label>
-            <Input value={displayName} onChange={(e) => setDisplayName(e.target.value)} className="text-xs"
+            <Input value={draft.name} onChange={(e) => edit({ name: e.target.value })} className="text-xs"
                    placeholder={`如：${cur.id.replace(/^_/, "")}`} />
             <label className="text-[10px] text-muted-foreground">职责 description（编排开窗目录与组队列表的一句话说明）</label>
-            <Input value={description} onChange={(e) => setDescription(e.target.value)} className="text-xs"
+            <Input value={draft.description} onChange={(e) => edit({ description: e.target.value })} className="text-xs"
                    placeholder="如：外网打点与入口利用" />
             <label className="text-[10px] text-muted-foreground">人设 persona（注入系统提示；轨变体可按轨覆写）</label>
             {/* shrink-0：本列是 flex-col，textarea 默认 flex-shrink:1 会被压回 min-h-16，
                 表现为「拖拽句柄拖大了又弹回去」。resize-y 显式声明可纵向拖拽。 */}
-            <Textarea value={persona} onChange={(e) => setPersona(e.target.value)}
+            <Textarea value={draft.persona} onChange={(e) => edit({ persona: e.target.value })}
                       className="min-h-16 shrink-0 resize-y text-xs" />
             <div>
               <label className="text-[10px] text-muted-foreground">服务轨 tracks（不选 = 全轨通用）</label>
@@ -526,7 +695,7 @@ function ExpertsPane({ tax, focus }: { tax: Taxonomy | null; focus: ExpertFocus 
                   <button key={t.name}
                           onClick={() => toggleTrack(t.name)}
                           className={cn("rounded border px-2 py-0.5 text-[11px]",
-                            trackSel.includes(t.name)
+                            draft.tracks.includes(t.name)
                               ? "border-primary/50 bg-primary/10 text-primary"
                               : "text-muted-foreground hover:bg-accent/50")}>
                     {t.label || trackLabel(t.name)}
@@ -536,7 +705,7 @@ function ExpertsPane({ tax, focus }: { tax: Taxonomy | null; focus: ExpertFocus 
             </div>
             <CheckList title="技能白名单（勾选启动）"
                        items={skillCatalog.map((s) => ({ id: s.name, label: s.name, detail: s.description, group: s.group }))}
-                       selected={skills} onChange={setSkills} groupOrder={SKILL_GROUP_ORDER} />
+                       selected={draft.skills} onChange={(v) => edit({ skills: v })} groupOrder={SKILL_GROUP_ORDER} />
             <p className="text-[10px] text-muted-foreground">
               kb 方向 knowledge（两态：空 = 不限方向；保存时原样保留，改方向请直接编辑 yaml）
               ：<code className="font-mono">{cur.knowledge?.length ? cur.knowledge.join(", ") : "不限"}</code>
@@ -551,7 +720,7 @@ function ExpertsPane({ tax, focus }: { tax: Taxonomy | null; focus: ExpertFocus 
                 否则这些工具永远勾不到，勾选又退化成固定清单。 */}
             <CheckList title="工具白名单（勾选启动）"
                        items={toolItems}
-                       selected={tools} onChange={setTools} groupOrder={toolGroups} />
+                       selected={draft.tools} onChange={(v) => edit({ tools: v })} groupOrder={toolGroups} />
             {cur.tools_controller && (
               <p className="text-[10px] leading-relaxed text-muted-foreground">
                 这是控制器类智能体：上方清单已并入后端下发的专属工具
@@ -559,7 +728,7 @@ function ExpertsPane({ tax, focus }: { tax: Taxonomy | null; focus: ExpertFocus 
                 <code className="font-mono">ctf_dispatch/review/inspect</code> /
                 <code className="font-mono">todo_write</code> /
                 <code className="font-mono">call_expert</code>）。
-                勾选后保存即生效；<code className="font-mono">declare_intent</code> 等
+                勾选即时生效；<code className="font-mono">declare_intent</code> 等
                 计划/控制原语恒放行、不受勾选影响。
                 <code className="font-mono">propose_pack_edit</code> 另受项目级
                 kb 迭代开关门禁——勾了但项目开关关闭时仍不会下发。
@@ -575,9 +744,9 @@ function ExpertsPane({ tax, focus }: { tax: Taxonomy | null; focus: ExpertFocus 
                            ? (MCP_DOMAIN_LABEL[s.domains[0]] ?? s.domains[0])
                            : "其他",
                        }))}
-                       selected={mcpServers} onChange={setMcpServers} groupOrder={MCP_DOMAIN_ORDER} />
+                       selected={draft.mcpServers} onChange={(v) => edit({ mcpServers: v })} groupOrder={MCP_DOMAIN_ORDER} />
             <label className="text-[10px] text-muted-foreground">最大步数 max_steps（正整数；留空 = 不设）</label>
-            <Input value={steps} onChange={(e) => setSteps(e.target.value)} className="w-48 font-mono text-xs" inputMode="numeric" placeholder="200" />
+            <Input value={draft.steps} onChange={(e) => edit({ steps: e.target.value })} className="w-48 font-mono text-xs" inputMode="numeric" placeholder="200" />
             {Object.keys(cur.variants ?? {}).length > 0 && (
               <div className="rounded border bg-card/40 p-2">
                 <p className="mb-1 text-[10px] text-muted-foreground">轨变体 variants（只读——yaml 中以 variant_&lt;轨&gt;_&lt;字段&gt; 平铺键维护）</p>
@@ -592,7 +761,7 @@ function ExpertsPane({ tax, focus }: { tax: Taxonomy | null; focus: ExpertFocus 
         ) : <p className="text-xs text-muted-foreground">选择左侧专家</p>}
       </div>
       <ExpertCreateDialog open={createOpen} onOpenChange={setCreateOpen}
-                          onCreated={(id) => { setSelected(id); reload() }} />
+                          onCreated={(id) => { flush(); setSelected(id); reload() }} />
       <AlertDialog open={confirmDel !== null} onOpenChange={(v) => !v && setConfirmDel(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -614,14 +783,31 @@ function ExpertsPane({ tax, focus }: { tax: Taxonomy | null; focus: ExpertFocus 
   )
 }
 
-// ---------- LLM 供应商：增删改 + 获取模型 + 勾选保存（首个=默认） ----------
+// ---------- LLM 供应商：增删改 + 获取模型（改动即存，首个启用=默认） ----------
+//
+// 2026-10-21 Nan 要求：**去掉「保存配置」按钮，每次操作直接落盘**。自动保存要守住
+// 三条语义，否则比手点保存更容易坏：
+//  1) **串行队列 + 只落最后一份快照**：连点两次启停会发两个 PUT，乱序返回会把新值
+//     写成旧值；用 ref 里的 promise 链保证顺序，被更新改动取代的中间快照直接跳过
+//     （最新快照已包含全部累积改动）。
+//  2) **本地状态是唯一真相，成功后不回写整表**：回写 `r.providers` 会带来两个坑——
+//     在飞的改动被上一笔响应覆盖（开关回弹）；以及 `ProviderDialog` 的 `initial`
+//     换了引用会触发它的重置 effect，把用户正在填的表单冲掉。
+//  3) **保住后端的硬约束**：`save()` 拒绝「一个启用供应商都没有」和「默认供应商
+//     已停用/不存在」，这两条在 UI 层就先拦/先顺延，否则会出现「界面变了、盘上没变」。
+/** 落盘状态三态 + pending：
+ *  - `pending`：改动已进草稿、还在防抖计时里（用户可能继续打字）
+ *  - `saving` ：请求在飞
+ *  - `saved`  ：已落盘（1.6s 后回 idle）
+ *  - `idle`   ：无待写改动（徽标文案回落「改动即存」） */
+type SaveState = "idle" | "pending" | "saving" | "saved"
 
 function LlmPane() {
   const [providers, setProviders] = useState<LlmProvider[]>([])
   const [def, setDef] = useState<{ provider: string; model: string } | null>(null)
   // 可选默认供应商（全局默认 = 它的第一个模型；未设置 = 第一个启用供应商）
   const [defaultProvider, setDefaultProvider] = useState<string | null>(null)
-  const [saved, setSaved] = useState(false)
+  const [saveState, setSaveState] = useState<SaveState>("idle")
   const [error, setError] = useState<string | null>(null)
   const [helpOpen, setHelpOpen] = useState(false)
   // 弹窗目标（2026-10-04 编辑改弹窗）：null=关闭 / -1=新增 / >=0=编辑该索引的供应商
@@ -629,31 +815,97 @@ function LlmPane() {
   // 行内「测试」结果（按供应商索引）：测该供应商首个模型是否可用
   const [rowTest, setRowTest] = useState<Record<number, string>>({})
 
+  const saveChain = useRef<Promise<void>>(Promise.resolve())
+  const saveSeq = useRef(0)
+  const savedTimer = useRef<number | null>(null)
+
   useEffect(() => {
     api.llmProviders().then((r) => {
       setProviders(r.providers)
       setDef(r.default)
       setDefaultProvider(r.default_provider ?? null)
     }).catch(() => {})
+    return () => { if (savedTimer.current != null) window.clearTimeout(savedTimer.current) }
   }, [])
 
-  const patch = (i: number, p: Partial<LlmProvider>) =>
-    setProviders((ps) => ps.map((s, j) => j === i ? { ...s, ...p } : s))
-
-  const move = (i: number, delta: number) =>
-    setProviders((ps) => {
-      const j = i + delta
-      if (j < 0 || j >= ps.length) return ps
-      const next = [...ps]
-      ;[next[i], next[j]] = [next[j], next[i]]
-      return next
+  /** 排队落盘：`next` 显式传入（setState 异步，别在保存里读 state）。 */
+  const persist = useCallback((next: LlmProvider[], defProvider: string | null) => {
+    const seq = ++saveSeq.current
+    setSaveState("saving")
+    setError(null)
+    saveChain.current = saveChain.current.then(async () => {
+      if (seq !== saveSeq.current) return  // 已被更新的改动取代，只落最后一份快照
+      try {
+        const r = await api.saveLlmProviders(
+          next.map(({ has_key: _h, ...rest }) => rest),
+          defProvider ?? undefined)
+        if (seq !== saveSeq.current) return
+        setDef(r.default)
+        setSaveState("saved")
+        if (savedTimer.current != null) window.clearTimeout(savedTimer.current)
+        savedTimer.current = window.setTimeout(() => setSaveState("idle"), 1600)
+      } catch (e) {
+        if (seq !== saveSeq.current) return
+        setError(String(e))
+        setSaveState("idle")
+      }
     })
+  }, [])
+
+  /** 先改 UI 再排队写盘——所有改动都必须走这里，别单独 setProviders。 */
+  const commit = (next: LlmProvider[], defProvider: string | null = defaultProvider) => {
+    setProviders(next)
+    persist(next, defProvider)
+  }
+
+  /** 默认供应商顺延：原默认被停用/删除/改名时，落到剩下的第一个启用供应商。 */
+  const nextDefault = (list: LlmProvider[]) => list.find((p) => p.enabled)?.name ?? null
+
+  const toggleEnabled = (i: number, enabled: boolean) => {
+    const p = providers[i]
+    if (!enabled && p.enabled && providers.filter((x) => x.enabled).length <= 1) {
+      setError("至少保留一个启用供应商，否则 Agent 无模型可用")
+      return
+    }
+    const next = providers.map((s, j) => (j === i ? { ...s, enabled } : s))
+    const dp = !enabled && p.name === defaultProvider
+      ? nextDefault(next) : defaultProvider
+    setDefaultProvider(dp)
+    commit(next, dp)
+  }
+
+  const move = (i: number, delta: number) => {
+    const j = i + delta
+    if (j < 0 || j >= providers.length) return
+    const next = [...providers]
+    ;[next[i], next[j]] = [next[j], next[i]]
+    commit(next)
+  }
+
+  const removeProvider = (i: number) => {
+    if (providers.length <= 1) {
+      setError("至少保留一个启用供应商，否则 Agent 无模型可用")
+      return
+    }
+    const next = providers.filter((_, j) => j !== i)
+    const dp = providers[i].name === defaultProvider ? nextDefault(next) : defaultProvider
+    setDefaultProvider(dp)
+    commit(next, dp)
+  }
 
   // 弹窗保存：editIdx<0 或 null 时新增（追加末尾），否则覆写该索引
-  const saveProvider = (p: LlmProvider) =>
-    setProviders((ps) => (editIdx != null && editIdx >= 0
-      ? ps.map((x, j) => (j === editIdx ? p : x))
-      : [...ps, p]))
+  const saveProvider = (p: LlmProvider) => {
+    const idx = editIdx != null && editIdx >= 0 ? editIdx : null
+    // 本次填了 key 就标记「已配置」，否则行内「测试」会拿空 key 走 base_url 分支
+    const saved: LlmProvider = { ...p, has_key: p.has_key || !!p.api_key?.trim() }
+    const next = idx == null
+      ? [...providers, saved]
+      : providers.map((x, j) => (j === idx ? saved : x))
+    // 改名会打断 default_provider 的名字绑定（后端按名命中）→ 跟着改，否则保存被拒
+    const dp = idx != null && providers[idx].name === defaultProvider ? saved.name : defaultProvider
+    setDefaultProvider(dp)
+    commit(next, dp)
+  }
 
   // 行内「测试」：测该供应商首个模型是否可用（未加模型则提示）
   const testProvider = async (i: number) => {
@@ -672,30 +924,21 @@ function LlmPane() {
     }
   }
 
-  const save = async () => {
-    setError(null)
-    try {
-      const r = await api.saveLlmProviders(
-        providers.map(({ has_key: _h, ...rest }) => rest),
-        defaultProvider ?? undefined)
-      setProviders(r.providers)
-      setDef(r.default)
-      setDefaultProvider(r.default_provider ?? null)
-      setSaved(true)
-      setTimeout(() => setSaved(false), 1500)
-    } catch (e) {
-      setError(String(e))
-    }
-  }
-
   const defaultModel = def ? `${def.provider} / ${def.model}` : "未设置"
   return (
     <div className="llm-page">
       <div className="llm-overview">
         <div><span className="eyebrow">MODEL ROUTING / PROVIDERS</span><h2>模型供应商</h2><p>管理连接、模型优先级和会话默认路由。</p></div>
-        <div className="llm-overview-actions"><div className="llm-file-label">config/providers.json</div><Saved saved={saved} /><Button size="sm" onClick={save}>保存配置</Button></div>
+        {/* 没有「保存配置」按钮了：这行小字是唯一的落盘反馈（改动即存） */}
+        <div className="llm-overview-actions">
+          <div className="llm-file-label">config/providers.json</div>
+          <span className={cn("llm-save-state", saveState === "saving" && "is-saving",
+            saveState === "saved" && "is-saved")}>
+            {saveState === "saving" ? "保存中…" : saveState === "saved" ? "已保存 ✓" : "改动即存"}
+          </span>
+        </div>
       </div>
-      <div className="llm-default-card"><div className="llm-default-mark">◎</div><div><span className="llm-kicker">全局默认模型</span><strong>{defaultModel}</strong><small>用于新建会话、编排器和分类器</small></div><label className="llm-default-select"><span>默认供应商</span><select value={defaultProvider ?? ""} onChange={(e) => setDefaultProvider(e.target.value || null)}><option value="">自动选择</option>{providers.filter((p) => p.enabled).map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}</select></label></div>
+      <div className="llm-default-card"><div className="llm-default-mark">◎</div><div><span className="llm-kicker">全局默认模型</span><strong>{defaultModel}</strong><small>用于新建会话、编排器和分类器</small></div><label className="llm-default-select"><span>默认供应商</span><select value={defaultProvider ?? ""} onChange={(e) => { const v = e.target.value || null; setDefaultProvider(v); persist(providers, v) }}><option value="">自动选择</option>{providers.filter((p) => p.enabled).map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}</select></label></div>
       {error && <div className="llm-error">{error}</div>}
       <ScrollArea className="llm-scroll"><div className="llm-provider-list">
         {providers.map((p, i) => <div key={i} className={cn("llm-provider-card", !p.enabled && "is-disabled", p.name === defaultProvider && "is-default")}>
@@ -722,13 +965,13 @@ function LlmPane() {
             )}
             <button className="llm-row-act" onClick={() => void testProvider(i)}>测试</button>
             <button className="llm-row-act" onClick={() => setEditIdx(i)}>编辑</button>
-            <label className="llm-switch"><input type="checkbox" checked={p.enabled} onChange={(e) => patch(i, { enabled: e.target.checked })} /><span /></label>
-            <button className="llm-delete" onClick={() => setProviders((ps) => ps.filter((_, j) => j !== i))}>删除</button>
+            <label className="llm-switch"><input type="checkbox" checked={p.enabled} onChange={(e) => toggleEnabled(i, e.target.checked)} /><span /></label>
+            <button className="llm-delete" onClick={() => removeProvider(i)}>删除</button>
           </div>
         </div>)}
         <Button size="sm" variant="outline" className="llm-add-provider" onClick={() => setEditIdx(-1)}>+ 添加供应商</Button>
       </div></ScrollArea>
-      <button className="llm-help-toggle" onClick={() => setHelpOpen((open) => !open)}>配置说明 {helpOpen ? "⌃" : "⌄"}</button>{helpOpen && <div className="llm-help"><p>第一个启用供应商的第一个模型会作为自动默认模型。</p><p>API 密钥只显示配置状态，不会回显真实值。</p><p>上下文 K 用于控制会话历史预算和摘要压缩阈值，留空使用默认值。</p></div>}
+      <button className="llm-help-toggle" onClick={() => setHelpOpen((open) => !open)}>配置说明 {helpOpen ? "⌃" : "⌄"}</button>{helpOpen && <div className="llm-help"><p>所有改动（启停 / 排序 / 增删 / 编辑 / 默认供应商）立即写入 config/providers.json，无需手动保存。</p><p>第一个启用供应商的第一个模型会作为自动默认模型。</p><p>API 密钥只显示配置状态，不会回显真实值。</p><p>上下文 K 用于控制会话历史预算和摘要压缩阈值，留空使用默认值。</p></div>}
       <ProviderDialog
         open={editIdx !== null}
         onOpenChange={(v) => { if (!v) setEditIdx(null) }}

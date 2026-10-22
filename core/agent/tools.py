@@ -3846,6 +3846,235 @@ class ToolDispatcher:
             pass
         return body
 
+    # ---------- 渗透测试与情报联动（intel-pentest-link，2026-10-22） ----------
+
+    def _tool_intel_vulns(self, date: str = "", days: int = 1,
+                          only_poc: bool = True, limit: int = 30,
+                          keyword: str = "") -> str:
+        """查今日情报里的漏洞（情报模块全局库 `config/intel/intel.db`）。
+
+        为什么单独一个工具而不复用 kb_search：情报库是 SQLite 表（按抓取日期索引），
+        知识库是 md 文件树——两者的检索语义完全不同，塞进 kb_search 会让那个工具
+        的返回口径分叉（path 是 kb_open 的 module 参数，情报行没有 path）。
+        """
+        from datetime import date as _date, timedelta
+
+        try:
+            n = max(1, min(int(limit or 30), 200))
+        except (TypeError, ValueError):
+            n = 30
+        try:
+            span = max(1, min(int(days or 1), 30))
+        except (TypeError, ValueError):
+            span = 1
+        # 日期窗：date 省略 = 情报库最近一次抓取日（不是「今天」——库可能今天还没抓，
+        # 说「今日无数据」比假装有更诚实）
+        until = (date or "").strip()[:10]
+        try:
+            from core.intel import shared as intel_shared
+            store = intel_shared.get_shared()
+        except Exception as e:  # noqa: BLE001 —— 建库失败要说清楚，不静默空
+            return (f"[错误] 情报库不可用: {e}（情报模块未初始化或 config/intel 不可写）")
+        if not until:
+            try:
+                latest = store.latest_article_date()
+            except Exception:  # noqa: BLE001
+                latest = ""
+            until = latest or _date.today().isoformat()
+        try:
+            since_d = _date.fromisoformat(until) - timedelta(days=span - 1)
+        except ValueError:
+            return f"[错误] date 格式非法: {date!r}（要 YYYY-MM-DD）"
+        since = since_d.isoformat()
+        try:
+            rows = store.recent_vulns(since=since, until=until,
+                                      only_poc=bool(only_poc), limit=n * 3)
+        except Exception as e:  # noqa: BLE001
+            return f"[错误] 情报查询失败: {e}"
+        kw = (keyword or "").strip().lower()
+        if kw:
+            rows = [r for r in rows
+                    if kw in f"{r.get('title','')} {r.get('summary','')}".lower()]
+        rows = rows[:n]
+        scope_desc = f"{since} ~ {until}" if since != until else until
+        if not rows:
+            extra = "（only_poc=true 时只回有公开 PoC 的条目，可传 only_poc=false 放宽）" \
+                if only_poc else ""
+            return (f"[无命中] 情报库 {scope_desc} 没有符合条件的漏洞条目{extra}。"
+                    "不要据此臆测漏洞——先确认情报模块已抓取（情报面板「立即抓取」），"
+                    "或改用 only_poc=false / 放宽 days 再看。")
+        head = (f"[intel_vulns] 抓取窗 {scope_desc}｜only_poc={bool(only_poc)}"
+                f"｜命中 {len(rows)} 条")
+        if kw:
+            head += f"｜keyword={kw}"
+        lines = [head]
+        for i, r in enumerate(rows, 1):
+            cve = _cve_of(r)
+            tag = cve or "无 CVE 号"
+            lines.append(f"{i}. [{tag}] {str(r.get('title') or '')[:160]}")
+            if r.get("poc_url"):
+                lines.append(f"   PoC: {r['poc_url']}")
+            if r.get("direction"):
+                lines.append(f"   方向: {r['direction']}｜分值 {r.get('score', 0)}"
+                             f"｜在野利用 {'是' if r.get('is_priority') else '未知'}")
+            smy = str(r.get("summary") or "").strip()
+            if smy:
+                lines.append(f"   摘要: {smy[:300]}")
+        lines.append(
+            "→ 下一步：从标题/摘要里认出**产品/组件指纹**（product/app/body 关键字），"
+            "再用 fofa_search(query=<指纹>, owner_tag=<平台>) 圈同类资产；"
+            "认不出指纹的条目跳过，不要硬猜产品名去打。")
+        self.last_progress_step = self._step
+        return "\n".join(lines)
+
+    def _tool_fofa_search(self, query: str, owner_tag: str = "", size: int = 50,
+                          page: int = 1, import_rows: bool = False) -> str:
+        """FOFA 查询 + 资产范围约束 + 可选批量登记（intel-pentest-link）。
+
+        范围两段（见 core/asset_scope.py）：`fofa:` 片段进查询语句（圈候选），
+        域名/IP 行做结果校验（剔误命中）。**结果校验在导入之前**——不能先登记再删，
+        那会把范围外资产留在黑板里被后续派活扫到。
+        """
+        from core import fofa as fofa_mod
+        from core import asset_scope as scope_mod
+
+        q = str(query or "").strip()
+        if not q:
+            return "[拒绝] query 不能为空（传指纹/语法，如 product=\"致远OA\"）"
+        try:
+            n = max(1, min(int(size or 50), 1000))
+        except (TypeError, ValueError):
+            n = 50
+        try:
+            pg = max(1, int(page or 1))
+        except (TypeError, ValueError):
+            pg = 1
+
+        tag = str(owner_tag or "").strip().lower()
+        scope = scope_mod.AssetScope()
+        if tag:
+            if not self.packs_root:
+                return "[错误] 本会话未配置知识库（packs_root 缺失），无法读资产范围"
+            scope = scope_mod.load_asset_scope(self.packs_root, tag)
+            if scope.empty:
+                avail = scope_mod.list_asset_scope_tags(self.packs_root)
+                return (f"[拒绝] 平台 {tag!r} 没有可用的资产范围"
+                        f"（packs/kb/安全红线/资产范围/{tag}.md 缺失或全为空）。"
+                        f"可用标签: {', '.join(avail) or '（无）'}。"
+                        "**范围不明时不要查**——先补范围文件，或去掉 owner_tag "
+                        "并自己在 query 里写死范围（如 org=\"...\"）。")
+            final_q = scope_mod.build_fofa_query(scope, q)
+        else:
+            final_q = q
+
+        try:
+            client = fofa_mod.FofaClient.from_config(fofa_mod.CONFIG_PATH)
+        except Exception as e:  # noqa: BLE001
+            return f"[错误] 读取 FOFA 配置失败: {e}"
+        if not client.configured:
+            return ("[错误] FOFA 未配置 key——先在「网络空间测绘」设置里填入 key 并保存。"
+                    "（工具不读环境变量，只认 config/fofa.json）")
+        try:
+            res = client.search(final_q, size=n, page=pg)
+        except fofa_mod.QuotaExhausted as e:
+            # 配额耗尽是**必须停**的信号（继续请求可能封号），故不重试、不降级
+            return f"[拒绝] {e}"
+        except (fofa_mod.ConfigError, fofa_mod.AuthError) as e:
+            return f"[错误] FOFA 配置问题: {e}"
+        except fofa_mod.FofaError as e:
+            return f"[错误] FOFA 查询失败: {e}"
+
+        rows = res.get("rows") or []
+        in_scope: list[dict] = []
+        out_scope: list[dict] = []
+        if tag and scope.has_filter:
+            for r in rows:
+                anchor = str(r.get("host") or r.get("domain") or r.get("ip") or "")
+                (in_scope if scope_mod.match_host(scope, anchor) else out_scope).append(r)
+        else:
+            in_scope = list(rows)
+
+        lines = [f"[fofa_search] query={final_q[:300]}"]
+        lines.append(f"total={res.get('total')} page={pg} size={n} "
+                     f"返回={len(rows)} 范围内={len(in_scope)} 范围外={len(out_scope)}")
+        if tag:
+            src = "；".join(scope.notes[:2]) if scope.notes else ""
+            lines.append(f"范围来源: 资产范围/{tag}.md"
+                         f"（域名 {len(scope.domains)} 条 / 网段 {len(scope.cidrs)} 条"
+                         f" / fofa 片段 {len(scope.fofa)} 条）"
+                         + (f"｜{src}" if src else ""))
+            if out_scope:
+                lines.append(f"⚠ {len(out_scope)} 条**不在范围内**，已排除不导入"
+                             "（若其中有你确信属于该平台的资产，先去补范围文件，"
+                             "不要绕过范围直接 bb_add_asset）")
+        shown = in_scope[:60]
+        for i, r in enumerate(shown, 1):
+            host = str(r.get("host") or "")
+            ip, port = str(r.get("ip") or ""), str(r.get("port") or "")
+            title = str(r.get("title") or "")[:80]
+            prods = "、".join((r.get("products") or [])[:3])
+            lines.append(f"{i}. {host or (ip + (':' + port if port else ''))}"
+                         f"{('｜' + title) if title else ''}"
+                         f"{('｜' + prods) if prods else ''}")
+        if len(in_scope) > len(shown):
+            lines.append(f"…其余 {len(in_scope) - len(shown)} 条未列出（收窄 query 或分页）")
+
+        imported = None
+        if import_rows and in_scope:
+            imported = self._import_fofa_rows(in_scope, tag or "fofa")
+            lines.append(imported)
+        elif import_rows:
+            lines.append("（范围内 0 条，无可导入）")
+        else:
+            lines.append("（未导入；确认这些是目标后传 import_rows=true 再查一次，"
+                         "或按需 bb_add_asset 逐条登记）")
+        try:
+            self.bb.append_event(
+                self.project_id, "fofa.search",
+                {"query": final_q[:300], "owner_tag": tag, "total": res.get("total"),
+                 "rows": len(rows), "in_scope": len(in_scope),
+                 "imported": bool(import_rows), "step": self._step},
+                session_id=self.session_id, author=self.author)
+        except Exception:  # noqa: BLE001
+            pass
+        self.last_progress_step = self._step
+        return "\n".join(lines)
+
+    def _import_fofa_rows(self, rows: list[dict], source: str) -> str:
+        """把 FOFA 行经 `import_assets` 单一入口批量登记（与前端测绘页同路径）。"""
+        from core.blackboard.assets import import_assets
+
+        norm = []
+        for r in rows:
+            norm.append({
+                "ip": str(r.get("ip") or "").strip(),
+                "port": str(r.get("port") or "").strip(),
+                "host": str(r.get("host") or "").strip(),
+                "domain": str(r.get("domain") or "").strip(),
+                "title": str(r.get("title") or "").strip(),
+                "products": list(r.get("products") or []),
+                "protocol": str(r.get("protocol") or "").strip(),
+            })
+        try:
+            s = import_assets(self.bb, self.project_id, norm, source,
+                              author=self.author)
+        except Exception as e:  # noqa: BLE001 —— 导入失败不该吞掉上面的查询结果
+            return f"[错误] 批量导入失败: {e}（查询结果已在上面，可改 import_rows=false 后手工登记）"
+        return (f"已导入: 总 {s.get('total', 0)} 行 → 新建 {s.get('created', 0)}、"
+                f"合并 {s.get('merged', 0)}、跳过 {s.get('skipped', 0)}、"
+                f"失败 {s.get('failed', 0)}（batch={s.get('batch_id', '')}）")
+
+
+def _cve_of(row: dict) -> str:
+    """从情报行里取 CVE 号（标题优先、URL 兜底）。取不到返回空串。"""
+    import re as _re
+    pat = _re.compile(r"CVE-\d{4}-\d{4,7}", _re.I)
+    for key in ("title", "url", "summary"):
+        m = pat.search(str(row.get(key) or ""))
+        if m:
+            return m.group(0).upper()
+    return ""
+
 
 # tool.call 成败判定：失败回填的已知前缀（bb_query 空结果返回 JSON "[]" 也以 "[" 开头，
 # 故不能用 startswith("[") 一刀切；[无命中] 是合法空检索结果，不算失败）

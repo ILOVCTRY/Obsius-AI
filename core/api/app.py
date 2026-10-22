@@ -855,6 +855,8 @@ class ChatThreadIn(BaseModel):
     # 联网搜索开关（v43，web-search-toggle）：建线程即开；主控开 = spawn 的
     # 子代理默认继承（call_expert / ARTEX Worker）。缺省关。
     web_search: bool = False
+    # 线程级思考强度（v48，thinking-effort，2026-10-21）：七档，''=跟随供应商配置
+    thinking_effort: str | None = None
 
 
 class ChatMessageIn(BaseModel):
@@ -1351,6 +1353,15 @@ class WebSearchIn(BaseModel):
     enabled: bool = True
 
 
+class EffortIn(BaseModel):
+    """线程级思考强度（v48，thinking-effort，2026-10-21）。
+
+    七档：minimal/low/medium/high/xhigh/max/ultra；``""`` = 清除覆写回跟随供应商。
+    非法值 422 不落盘——档位是有限集合，静默接受坏值会让 UI 显示与实际下发不一致。
+    """
+    effort: str = ""
+
+
 class TickIn(BaseModel):
     allowed_roles: list[str] | None = None
     max_sessions: int = 4
@@ -1703,8 +1714,8 @@ def create_app(
             return None
         try:
             row = proj.bb.conn.execute(
-                "SELECT provider, model FROM chat_threads WHERE agent_id=?"
-                " ORDER BY rowid DESC LIMIT 1",
+                "SELECT provider, model, thinking_effort FROM chat_threads"
+                " WHERE agent_id=? ORDER BY rowid DESC LIMIT 1",
                 (ARTEX_CONTROLLER_ID,)).fetchone()
         except Exception:  # noqa: BLE001 —— 读库失败不该阻断引擎启动
             log.exception("读取 ARTEX 主控线程模型失败 pid=%s", pid)
@@ -1712,7 +1723,8 @@ def create_app(
         if row is None:
             return None
         # provider 空 = 该主控跟随全局 → 返回 None，调用方仍走 _llms()（同款口径）
-        llm_obj, err = _thread_llm(row["provider"] or "", row["model"] or "")
+        llm_obj, err = _thread_llm(row["provider"] or "", row["model"] or "",
+                                   row["thinking_effort"] or "")
         if err:
             log.warning("ARTEX 主控模型覆写构建失败，回退全局 executor: pid=%s %s",
                         pid, err)
@@ -1954,6 +1966,14 @@ def create_app(
     # 情报面板（E9，全局模块）：惰性建 IntelStore（首访问情报端点才落 config/intel/）；
     # intel_getter / intel_llm 为测试注入口（None = urllib 真抓 / classifier 路由）
     app.state.intel_dir = str(intel_dir)
+    # 工具层（`intel_vulns`）与 API 层必须读**同一份** intel.db：`create_app` 可传
+    # 自定义 intel_dir（测试/多实例），工具层默认走 config/intel——不对齐就会出现
+    # 「情报面板看得到、Agent 查不到」（intel-pentest-link，2026-10-22）。
+    try:
+        from core.intel import shared as _intel_shared
+        _intel_shared.set_default_dir(intel_dir)
+    except Exception:  # noqa: BLE001 —— 对齐失败不该阻断应用装配
+        log.exception("情报目录与工具层对齐失败（工具将回落默认 config/intel）")
     app.state.intel: IntelStore | None = None
     app.state.intel_getter = None
     app.state.intel_llm = None
@@ -10474,19 +10494,42 @@ def create_app(
         _chat_running_reconcile(proj)  # 运行期自愈：轮次线程已死则就地归位 idle
         return chat_store.list_threads(proj.bb, pid, agent_id=agent_id)
 
-    def _thread_llm(provider: str, model: str):
-        """线程级模型覆写构建（v37）：返回 (llm, 失败原因)。
+    def _thread_llm(provider: str, model: str, effort: str = ""):
+        """线程级模型覆写构建（v37 + v48 thinking-effort）：返回 (llm, 失败原因)。
 
         provider 空 → (None, "") 表示「跟随全局 executor」，调用方回退 ``_llms()``。
         构建失败**不抛**：设置接口据此 422 不落盘，发送轮次则静默回退全局
         （配置事后被删/停用不能把线程卡死——与项目 executor 覆写同口径）。
+
+        ``effort`` 必须在**构建时**传入，不能构建完再改属性——`ProviderStore.build()`
+        默认用 `with_fallback()` 包一层 `FallbackProvider`，它的 `__getattr__` 只把属性
+        透传给**当前**供应商实例，事后赋值会写在包装器自己身上，真正出网的
+        provider 一点都改不到（静默无效，最难查的那种）。
+
+        空 provider 但**只有 effort 覆写**时也要建实例：用户可能只想调深度、
+        继续用全局默认模型。此时按全局 executor 那家重新 build 一次并带上 effort。
         """
         provider = (provider or "").strip()
+        effort = (effort or "").strip().lower()
         if not provider:
-            return None, ""
+            if not effort:
+                return None, ""
+            # 只覆盖强度：沿用全局 executor 的供应商/模型，重新构建一遍带 effort
+            try:
+                t = ModelRouter().target_for("executor")
+                if t is None:
+                    return app.state.llm_store.build(thinking_effort=effort), ""
+                # t[0] 可能为 None（llm.json 里写裸模型名 = 走默认供应商），
+                # 此时 build 的第一个参数必须传 None 而不是空串——空串会被
+                # ProviderStore.get("") 当成「找个叫空的供应商」而抛错。
+                return app.state.llm_store.build(
+                    t[0], t[1], thinking_effort=effort), ""
+            except Exception as e:  # noqa: BLE001
+                return None, str(e)
         try:
             return app.state.llm_store.build(
-                provider, (model or "").strip() or None), ""
+                provider, (model or "").strip() or None,
+                thinking_effort=effort or None), ""
         except Exception as e:  # noqa: BLE001
             return None, str(e)
 
@@ -10504,8 +10547,26 @@ def create_app(
                                         title=body.title or "",
                                         provider=body.provider or "",
                                         model=body.model or "",
+                                        thinking_effort=body.thinking_effort or "",
                                         challenge_asset_id=body.challenge_asset_id or "",
                                         web_search=bool(body.web_search))
+
+    @app.put("/api/chat/threads/{tid}/effort")
+    def chat_thread_set_effort(tid: str, body: EffortIn):
+        """线程级思考强度（v48，thinking-effort，2026-10-21）。
+
+        工作台 composer 模型浮层下半部滑块的落点：七档，空=清除覆写跟随供应商。
+        下一轮生效（与模型/联网开关同口径）。坏值 422 不落盘。
+        """
+        from core.llm.effort import GEARS
+        from core.chat import store as chat_store
+        proj = _project(_pid_of_chat(tid))
+        if chat_store.get_thread(proj.bb, tid) is None:
+            raise HTTPException(404, f"线程不存在: {tid}")
+        effort = (body.effort or "").strip().lower()
+        if effort and effort not in GEARS:
+            raise HTTPException(422, f"未知思考强度：{effort}（可选 {'/'.join(GEARS)}）")
+        return chat_store.update_thread(proj.bb, tid, thinking_effort=effort)
 
     @app.put("/api/chat/threads/{tid}/web-search")
     def chat_thread_set_web_search(tid: str, body: WebSearchIn):
@@ -10688,7 +10749,8 @@ def create_app(
         # 全局 executor（配置事后被删/停用不能把线程卡死）。无覆写才要求全局就绪
         # ——否则「全局没配但线程指定了可用模型」会被误判 503。
         ov_llm, ov_err = _thread_llm(thread.get("provider") or "",
-                                     thread.get("model") or "")
+                                     thread.get("model") or "",
+                                     thread.get("thinking_effort") or "")
         if ov_llm is not None:
             exec_llm, plan_llm = ov_llm, None
         else:

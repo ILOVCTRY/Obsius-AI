@@ -1,1 +1,0 @@
-{"servers": [{"name": "fir-proxy", "url": "", "transport": "stdio", "command": "no-such-bin", "args": [], "enabled": true, "domains": ["pentest"], "env": {"CYBERSTRIKE_API": "http://127.0.0.1:9999"}}, {"name": "some-other", "url": "", "transport": "stdio", "command": "no-such-bin", "args": [], "enabled": true, "domains": ["pentest"]}]}

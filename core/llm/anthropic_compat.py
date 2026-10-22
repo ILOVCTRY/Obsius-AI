@@ -14,6 +14,7 @@ from collections.abc import Callable
 from typing import Any
 
 from core.llm import parsing
+from core.llm import effort as effort_mod
 from core.llm.dump import capture_request as dump_request_capture
 from core.llm.provider import (ContextOverflowError, LLMError, LLMResponse,
                                ToolCall, tool_result_content)
@@ -97,6 +98,7 @@ class AnthropicCompatProvider:
         use_x_api_key: bool = True,
         proxy: str | None = None,
         supports_vision: bool = False,  # providers.json `vision: true`（2026-10-19）
+        thinking_effort: str | None = None,  # 七档强度（effort.py）；映射成 budget_tokens
     ):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
@@ -105,6 +107,9 @@ class AnthropicCompatProvider:
         self.api_version = api_version
         self._use_x_api_key = use_x_api_key
         self._enable_thinking = enable_thinking
+        # 思考强度（thinking-effort，2026-10-21）：Anthropic 协议没有 effort 枚举，
+        # 深度靠 thinking.budget_tokens 表达。这里存七档档位，下发时换成预算。
+        self.thinking_effort = effort_mod.normalize(thinking_effort)
         # vision 能力位（2026-10-19）：Anthropic 协议原生支持 image 块，但**是否
         # 真的能看**取决于具体模型/网关，故同样只认显式配置（与 OpenAI 兼容层同口径）。
         self.supports_vision = bool(supports_vision)
@@ -187,8 +192,15 @@ class AnthropicCompatProvider:
             body["temperature"] = temperature
         if self._enable_thinking and not self._thinking_disabled:
             # 思考链路（2026-09-19 直播间终端化）：请求侧显式开启，模型吐 thinking block
-            # → 落 llm.thinking 事件，前端展开看思考全文。budget 8192 平衡质量与耗时。
-            body["thinking"] = {"type": "enabled", "budget_tokens": 8192}
+            # → 落 llm.thinking 事件，前端展开看思考全文。
+            # 预算按档位分级（thinking-effort，2026-10-21）：原先固定 8192，UI 上的
+            # 七档滑块对 Anthropic 通道毫无作用（拖到 max 仍是 8192），等于假控件。
+            # 协议硬约束 budget_tokens < max_tokens：高预算档必须同步抬高本次
+            # max_tokens，否则 2026-09-20 那次「budget 与 max_tokens 倒挂 → 流截断在
+            # 工具参数中间 → worker 崩」会以更大规模复发。
+            budget = effort_mod.budget_for(self.thinking_effort)
+            body["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            body["max_tokens"] = max(body["max_tokens"], budget + 8192)
         # 2026-09-28 全走流式（回调可选）：原「有回调才 stream」让 planner/intel 等
         # 无回调调用走非流式——服务端思考完才回响应头，600s 是总等待上限，长思考
         # （实测 6-10 分钟）必超时；重试= 原样重发同一请求注定再超时，纯浪费 5+ 分钟。

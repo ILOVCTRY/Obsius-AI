@@ -5,7 +5,8 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
-import type { LlmProvider, LlmProviderFormat } from "@/lib/types"
+import type { EffortGearName, LlmProvider, LlmProviderFormat } from "@/lib/types"
+import { EFFORT_GEARS, EFFORT_HINT, EFFORT_LABEL, normalizeGear } from "@/lib/effort"
 import { FORMAT_LABEL, PROVIDER_PRESETS, type ProviderPreset } from "@/lib/providerPresets"
 import { cn } from "@/lib/utils"
 
@@ -37,7 +38,7 @@ export function ProviderDialog({ open, onOpenChange, initial, onSave }: {
   const [apiKey, setApiKey] = useState("")
   const [proxy, setProxy] = useState("")
   const [thinking, setThinking] = useState(false)
-  const [thinkingEffort, setThinkingEffort] = useState<"low" | "medium" | "high">("high")
+  const [thinkingEffort, setThinkingEffort] = useState<EffortGearName>("high")
   // 视觉能力（vision 通道，2026-10-19）：勾选=该供应商的模型能看图 → 附件/截图
   // 走 image 块真送进模型，`view_image` 才出图。不勾则只回元信息 + OCR 引导。
   const [vision, setVision] = useState(false)
@@ -69,7 +70,7 @@ export function ProviderDialog({ open, onOpenChange, initial, onSave }: {
       setName(initial.name); setBaseUrl(initial.base_url); setFormat(initial.format)
       setApiKey(""); setProxy(initial.proxy ?? "")
       setThinking(initial.thinking === true)
-      setThinkingEffort(initial.thinking_effort ?? "high")
+      setThinkingEffort(normalizeGear(initial.thinking_effort))
       setVision(initial.vision === true)
       setModels(initial.models); setCtx(initial.model_context ?? {})
       setHasKey(!!initial.has_key)
@@ -148,8 +149,16 @@ export function ProviderDialog({ open, onOpenChange, initial, onSave }: {
   const save = () => {
     const n = name.trim()
     if (!n) { setErr("请填配置名称"); return }
+    // 与后端 NAME_RE（^[\w][\w.-]{0,63}$，Python \w 含中文）同口径。自动保存时代
+    // 这里必须自己拦：弹窗一关就会立刻落盘，非法名会让整笔 PUT 被拒，用户得重新
+    // 点「编辑」才能改回来。
+    if (!/^[\p{L}\p{N}_][\p{L}\p{N}_.-]{0,63}$/u.test(n)) {
+      setErr("配置名称只能用中英文、数字、下划线、点、连字符（1-64 字）"); return
+    }
     if (!/^https?:\/\//i.test(baseUrl.trim())) { setErr("接口地址须为 http(s) 地址"); return }
     if (!isEdit && preset.needsKey && !apiKey.trim()) { setErr(`${preset.name} 需要 API 密钥`); return }
+    // 后端 _validate 要求每个供应商至少一个模型（少一个就整表 422），先在这里拦
+    if (!models.length) { setErr("至少添加一个模型（可点上方「获取模型」拉取）"); return }
     onSave({
       // 打底展开 initial：表单没暴露的字段（system_in_user 等）不该被「编辑一次」
       // 抹掉——后端 _validate 是白名单，少传即丢字段，system_in_user 与 vision
@@ -235,11 +244,13 @@ export function ProviderDialog({ open, onOpenChange, initial, onSave }: {
             {thinking && (
               <label><span>思考强度</span>
                 <select value={thinkingEffort} className={SELECT_CLS}
-                        onChange={(e) => setThinkingEffort(e.target.value as "low" | "medium" | "high")}
-                        title="GPT Responses / Chat Completions 使用的 reasoning effort">
-                  <option value="low">轻度</option>
-                  <option value="medium">中度</option>
-                  <option value="high">高度</option>
+                        onChange={(e) => setThinkingEffort(e.target.value as EffortGearName)}
+                        title="该供应商的默认思考强度（七档）。会话里可在模型浮层按线程单独覆盖">
+                  {EFFORT_GEARS.map((g) => (
+                    <option key={g} value={g} title={EFFORT_HINT[g]}>
+                      {EFFORT_LABEL[g]}（{g}）
+                    </option>
+                  ))}
                 </select></label>
             )}
             <label className="llm-thinking"

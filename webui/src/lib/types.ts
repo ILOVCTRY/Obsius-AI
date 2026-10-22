@@ -1,5 +1,9 @@
 // core API 数据契约（与 core/api/app.py 响应对齐，宽松可选字段）
 
+/** 思考强度七档（与 lib/effort.ts、core/llm/effort.py 同源，避免循环 import 只取类型） */
+export type EffortGearName =
+  | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
+
 export interface ArtexIntent {
   id: string
   parent_id: string | null
@@ -462,7 +466,7 @@ export interface LlmProvider {
   /** 思考链开关：true=显式开启；null/缺省=不写该字段，跟随网关缺省（ark 默认开） */
   thinking?: boolean | null
   /** GPT 思考强度；开启思考链时发送给 OpenAI 兼容接口 */
-  thinking_effort?: "low" | "medium" | "high" | null
+  thinking_effort?: EffortGearName | null
   /** 供应商专属 HTTP/HTTPS 代理；留空沿用系统代理环境 */
   proxy?: string | null
   /** system 兼容通道（2026-10-17）：该网关丢弃 system 字段时，system 前置于首条 user 消息 */
@@ -570,6 +574,9 @@ export interface ChallengeFlag {
   verdict_reason: string
   author: string
   finding_id: string
+  /** 本行对应题面「第几条 flag」的提示（0 基；-1 = 未指定，确认时按顺序推断）。
+   * 与题目级 `flag_hints[hint_index]` 对齐（flag-hint，2026-10-21） */
+  hint_index: number
   created_at: string
   updated_at: string
 }
@@ -587,6 +594,10 @@ export interface ChallengeSummary extends Asset {
   tags: string[]
   flag_format: string
   flag_count: number
+  /** 每条 flag 的题面提示（`meta.flag_hints`，一行一条，与序号 0 基对齐）。
+   * 确认一条 flag 后要把这句提示告诉 agent——flag 原文本身看不出方向，
+   * 「需要 xxx 管理员后台密码为 flag」这类话才是指路的那句（flag-hint，2026-10-21） */
+  flag_hints: string[]
   state: ChallengeState
   solved: boolean
   accepted_flags: number
@@ -618,6 +629,9 @@ export interface ChallengeCreateBody {
   tags?: string[]
   flag_format?: string
   flag_count?: number
+  /** 每条 flag 的题面提示（一行一条，序号与 flag 一一对应；空行=该序号无提示，
+   * 中间的空行必须保留否则后面全错位）——flag-hint，2026-10-21 */
+  flag_hints?: string[]
   /** 入口点子资产（web 入口 URL / 附件） */
   entries?: { value: string; type?: string; meta?: Record<string, unknown> }[]
   thread_id?: string
@@ -632,11 +646,16 @@ export interface ChallengePatchBody {
   tags?: string[]
   flag_format?: string
   flag_count?: number
+  /** 空数组 = 清空全部提示（后端把空列表当「删键」） */
+  flag_hints?: string[]
 }
 
 export interface ChallengeFlagsResponse {
   challenge_id: string
   flags: ChallengeFlag[]
+  /** 题目级「每条 flag 的题面提示」（`meta.flag_hints`，与 flag 序号 0 基对齐）。
+   * 台账行只有 `hint_index`，提示正文在题目 meta 上，故这里一并返回 */
+  flag_hints: string[]
   state: {
     state: ChallengeState
     solved: boolean
@@ -1365,6 +1384,10 @@ export interface Expert {
   mcp_servers?: string[] | null
   max_steps?: number | null
   protected?: boolean // _generalist 兜底专家，拒删
+  /** 免意图闸（仅 worker）：true = 跳过「意图先行闸」与「发现必挂意图」。
+   *  **设置页没有对应控件**，但后端在 PUT 未带该键时继承盘上原值——
+   *  前端只需原样透传读到的值，不要凭空构造 false（那会显式关掉它）。 */
+  intent_free?: boolean
   variants?: Record<string, Record<string, unknown>> // {track: {field: value}} 轨变体
   file?: string // "experts/<id>.yaml"（HistoryButton 用；virtual 虚拟单例无文件）
   kind?: "virtual" // 对话化编排器 M3：虚拟单例（id=orchestrator，不入 yaml 池、不认领任务）
@@ -2352,6 +2375,11 @@ export interface ChatThread {
   /** 线程级模型覆写（schema v37，2026-10-13）：''=跟随全局 executor 默认 */
   provider?: string
   model?: string
+  /**
+   * 线程级思考强度（schema v48，thinking-effort，2026-10-21）：七档
+   * （minimal/low/medium/high/xhigh/max/ultra）。''=跟随该供应商配置。
+   */
+  thinking_effort?: string
   /** CTF 题目归属（v38，2026-10-14）：绑定 challenge 资产 id */
   challenge_asset_id?: string
   /** 联网搜索开关（v43，web-search-toggle，2026-10-19）：主控开 = spawn 子代理默认继承 */
@@ -2479,6 +2507,37 @@ export interface DiagSkillUsage {
     kb_zero_rate: number | null
   }
   events_scanned: number
+}
+
+/** 跨供应商兜底记录行（provider-failover，2026-10-21）。
+ *
+ *  三类 kind 共用一张表：`llm.provider_failed`（每家失败一条，带 category/status/
+ *  耗时）、`llm.failover`（换家 from→to）、`llm.failover.exhausted`（全链耗尽）。
+ *  category 与后端 `retry.classify_provider_error` 同源。 */
+export interface DiagFailoverRow {
+  id: number
+  project_id: string
+  session_id: string | null
+  kind: "llm.provider_failed" | "llm.failover" | "llm.failover.exhausted"
+  payload: Record<string, unknown>
+  author: string
+  created_at: string
+}
+
+export interface DiagFailoverSummary {
+  /** category → 次数（只在 llm.provider_failed 上累计） */
+  by_category: Record<string, number>
+  by_provider: Record<string, number>
+  /** 换家次数 */
+  switches: number
+  /** 全链耗尽（真正停止）次数 */
+  exhausted: number
+}
+
+export interface DiagFailover {
+  rows: DiagFailoverRow[]
+  summary: DiagFailoverSummary
+  kinds: string[]
 }
 
 /** 请求体留痕开关（diagnostics-request-body，2026-10-17）：进程级开关，默认关。 */

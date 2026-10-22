@@ -9,6 +9,15 @@
 - `vault.py`（E10）— `index_vault(root)`：`rglob("*.md")` 跳 `.obsidian/.trash/.git/.history`，frontmatter 复用 skills.registry，title=fm.title→首个 h1→stem，tags=fm+内联 `#tag`（扫前 4000 字符）去重截 20，content 存原文；`build_tree(notes)` 平铺路径嵌套化（目录在前各自排序）。
 - `fetch.py` — 纯函数抓取层，`RawGetter = (url, timeout) -> (status, text)` **可注入（测试永不触网）**，默认 urllib 出站、**不经执行网关**（平台自身可信出站）。`parse_rss`（RSS 2.0 + Atom 通吃）、`fetch_nvd`（**7 天窗**，perPage=200 不分页）/`fetch_kev`/`fetch_github_advisories`（走 api.github.com/advisories 免 key REST）、`fetch_all`（**单源失败只记 errors 不中断整批**）。**POC 启发式判定在 fetch 层（§16.1 定稿）**：`_poc_signal`/`_poc_url_signal`（NVD "Exploit" tag + 域名白名单，github/gitlab 要求路径含 poc/exploit/CVE 号，排除 `github.com/advisories`/`CVEProject` 等）；三源产出 `has_poc`/`poc_url` 两键；`_enrich` 按 CVE id 把 NVD/GHSA 证据合并到 KEV 条目（**无证据 KEV 保持 has_poc=False 不进简报**；NVD 单 CVE 补查留扩展点未做）。
 - `intel_service.py` — 打分与简报（E9）：`score_articles`（is_priority 恒满分；LLM 批量只喂标题+摘要 150 字符，**任何失败降级 `_rule_score`**）、`compose_brief`、`run_refresh` 管线。**简报漏洞板块只收 has_poc 条目（§16.1）**：`run_refresh` 里 `cves=[a for a in _top(...) if a["has_poc"]][:8]`；复现文章关联在选材层做（`_CVE_RE` 提 CVE 号 + `_REPRO_KWS` 判复现 → `cve_assoc` 挂子行、`repro_extra` 提进板块），`compose_brief`/`_llm_brief` 保持纯渲染（prompt 明令素材未给 POC 证据的 CVE 不得出现、板块空则整段省略）。E10 追加：`infer_direction`、`week_start`、`learning_profile`、`compose_weekly_plan`/`_llm_weekly_plan`（LLM 入参**仅元数据**；失败降级模板，stats.by 标 llm/template）。
+- `shared.py`（intel-pentest-link，2026-10-22）— 情报库的**进程级共享访问**：`get_shared()` 按解析后绝对路径缓存单实例、`set_shared()` 测试注入、`set_default_dir()` 供 `create_app(intel_dir=)` 对齐。**为什么需要**：`intel_vulns` 工具在 `ToolDispatcher` 里跑，而 dispatcher 每个会话线程一个——各建各的 `IntelStore` 会开出几十条连接（每条都跑 PRAGMA+DDL+迁移，且 `_lock` 是实例级不互斥）；工具层又拿不到 `app.state`。**`set_default_dir` 那条必须保留**：不对齐就是「情报面板看得到、Agent 查不到」。
+
+## 工具层入口（intel-pentest-link，2026-10-22）
+
+`IntelStore.recent_vulns(since, until, only_poc, limit)` + `latest_article_date()` 是 `intel_vulns` 工具的数据源：
+- 按 **`fetched_at` 日期窗**过滤（`substr(fetched_at,1,10)` 字符串比较，ISO 字典序==时间序），**不用 `published_at`**——那是漏洞披露日，可能是几年前的，与「今天新进库」不是一回事。
+- `only_poc` 默认 true：没公开 PoC 的漏洞让 agent 现场从零写利用，投入产出比极差且易写成「猜着打」。
+- `latest_article_date()` 让「今天的情报」落到**真实有数据的那天**——库可能今天还没抓，按系统日期查会返回空，模型会误判「今天没有新漏洞」。
+
 
 ## API（在 core/api/app.py，全局无项目前缀）
 

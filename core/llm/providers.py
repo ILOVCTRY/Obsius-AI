@@ -36,6 +36,7 @@ from typing import Any, Callable
 from urllib.parse import urlsplit
 
 from core.llm.anthropic_compat import AnthropicCompatProvider, CLIENT_USER_AGENT
+from core.llm.effort import GEARS as EFFORT_GEARS
 from core.llm.openai_compat import CHAT_COMPLETIONS, RESPONSES, OpenAICompatProvider
 from core.llm.ark import resolve_api_key
 
@@ -244,7 +245,7 @@ class ProviderStore:
         if thinking is not None:
             out["thinking"] = bool(thinking)
         effort = str(p.get("thinking_effort") or "").strip().lower()
-        if effort in {"low", "medium", "high"}:
+        if effort in EFFORT_GEARS:
             out["thinking_effort"] = effort
         # 上下文治理（2026-09-30 ct-7）：同 thinking——显式才落字段，否则设置页
         # 保存一次即被白名单抹掉（此前 thinking 就是这么静默消失的）。三者均为
@@ -339,12 +340,59 @@ class ProviderStore:
             raise ProviderError(
                 f"供应商 {p['name']} 未配置 api_key，且环境/.env 也无 ARK_API_KEY") from e
 
+    def alternate_targets(self, exclude: str | None = None
+                          ) -> list[tuple[str, str | None]]:
+        """其它**启用**供应商的兜底目标（配置顺序 = 设置页顺序），排除主供应商。
+
+        模型取该供应商的第一个（= 它的默认模型）：跨供应商时「同名模型」大多
+        不存在（各家目录不同），拿别家的默认模型才是有意义的兜底。
+        没有模型的条目直接跳过——`build()` 会在 `models[0]` 上炸。
+        """
+        out: list[tuple[str, str | None]] = []
+        for p in self.load():
+            if not p.get("enabled", True):
+                continue
+            name = str(p.get("name") or "")
+            if not name or (exclude and name == exclude):
+                continue
+            models = [str(m) for m in (p.get("models") or []) if str(m).strip()]
+            if not models:
+                continue
+            out.append((name, models[0]))
+        return out
+
     def build(self, name: str | None = None, model: str | None = None,
-              timeout: float | None = None):
+              timeout: float | None = None, *, fallback: bool = True,
+              thinking_effort: str | None = None):
         """构造与供应商兼容格式匹配的 provider 实例。
 
         ``timeout``：覆盖默认 600s（诊断类一次性探测用，避免长挂死 HTTP 请求）。
+
+        ``thinking_effort``（thinking-effort，2026-10-21）：**覆盖**该供应商配置里的
+        思考强度（七档，见 effort.py）。线程级覆写走这条路——强度必须在这里落进
+        实例，不能构造后改属性（`with_fallback` 包装器会把赋值吞在自己身上）。
+
+        ``fallback``（provider-failover，2026-10-21）：默认给实例挂上「其它启用
+        供应商」的兜底链（`core/llm/fallback.py`）——某家重试 11 次仍失败就按序
+        换下一家，全链失败才抛。**探活/自检路径必须传 False**：那里要测的是
+        「这一家通不通」，静默换家会把结论变成假的。
         """
+        primary = self._build_one(name, model, timeout,
+                                  thinking_effort=thinking_effort)
+        if not fallback:
+            return primary
+        try:
+            label = str((self.default() if name is None else self.get(name))["name"])
+        except ProviderError:
+            return primary
+        from core.llm.fallback import with_fallback
+        return with_fallback(primary, self, label=label, timeout=timeout,
+                             thinking_effort=thinking_effort)
+
+    def _build_one(self, name: str | None = None, model: str | None = None,
+                   timeout: float | None = None,
+                   thinking_effort: str | None = None):
+        """单实例构建（不含兜底包装）。"""
         p = self.default() if name is None else self.get(name)
         if not p.get("enabled", True):
             raise ProviderError(f"供应商 {p['name']} 已停用")
@@ -366,9 +414,13 @@ class ProviderStore:
             "proxy": p.get("proxy"),
             # vision 通道（2026-10-19）：两条协议路径都收该能力位
             "supports_vision": bool(p.get("vision")),
+            # 思考强度（thinking-effort，2026-10-21）：两条协议路径都收。
+            # OpenAI 侧映射成 reasoning_effort，Anthropic 侧映射成 thinking 预算
+            # ——原先只有 OpenAI 侧收，导致 UI 上的强度滑块对 Anthropic 网关
+            # （智谱/DeepSeek-Anthropic 等）完全无效。
+            # 显式传入的（线程级覆写）优先于供应商配置。
+            "thinking_effort": thinking_effort or p.get("thinking_effort"),
         }
-        if p.get("format", DEFAULT_FORMAT) != ANTHROPIC_MESSAGES:
-            kwargs["thinking_effort"] = p.get("thinking_effort")
         if timeout is not None:
             kwargs["timeout"] = float(timeout)
         if p.get("format", DEFAULT_FORMAT) == ANTHROPIC_MESSAGES:

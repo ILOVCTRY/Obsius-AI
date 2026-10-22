@@ -1,1 +1,0 @@
-{"x": {"kind": "binary", "search": ["x.exe"], "fallback": [], "domains": ["pentest"]}, "y": {"kind": "python-tool", "pip": ["impacket"], "bin": {"windows": "a", "linux": "b"}}}

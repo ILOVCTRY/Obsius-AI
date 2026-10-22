@@ -1,11 +1,12 @@
 import {
   useCallback, useEffect, useMemo, useRef, useState,
   type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
 } from "react"
 import { createPortal } from "react-dom"
 import {
-  AlertTriangle, Bot, Check, ChevronDown, CircleSlash, Clock3, Cpu, Gauge, Globe,
-  Loader2, Plug, Plus, RefreshCw, Send, Sparkles, Square, Trash2,
+  AlertTriangle, Bot, Check, ChevronDown, ChevronRight, CircleSlash, Clock3, Cpu, Gauge, Globe,
+  Loader2, Plug, Plus, RefreshCw, RotateCcw, Send, Sparkles, Square, Trash2,
   Wrench, X, Zap,
 } from "lucide-react"
 import { api, ApiError } from "@/lib/api"
@@ -27,7 +28,9 @@ import { useCandidateFlags } from "@/lib/useCandidateFlags"
 import { usePendingApprovals } from "@/lib/usePendingApprovals"
 import { mergeTargets, relToWorkdir, targetsFromProse, targetsFromTool, type FileTarget } from "@/lib/fileTargets"
 import type { ActivityStep } from "@/lib/activity"
-import { parseTs } from "@/lib/datetime"
+import { parseTs, fmtDateTime } from "@/lib/datetime"
+import { EFFORT_GEARS, EFFORT_DEFAULT, EFFORT_HINT, EFFORT_LABEL, gearIndex,
+         normalizeGear, type EffortGear } from "@/lib/effort"
 import { cn } from "@/lib/utils"
 import { paneMaxWidth } from "@/lib/paneWidth"
 import { useNavRailSlot } from "@/lib/navRail"
@@ -116,8 +119,14 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
   // modelDraft=新建态（tid=null）的选择，创建线程时随 ChatThreadIn 带上。
   const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null)
   const [modelPopOpen, setModelPopOpen] = useState(false)
+  // 浮层内的供应商/模型列表是否展开（v48）：默认收起，只显示当前模型一行，
+  // 点它才展开——浮层主角是深度滑块，模型列表是次级操作。
+  const [modelListOpen, setModelListOpen] = useState(false)
   const [popProvider, setPopProvider] = useState("")
   const [modelDraft, setModelDraft] = useState<{ provider: string; model: string } | null>(null)
+  // 思考深度草稿（v48，thinking-effort，2026-10-21）：新建态（尚未建线程）时先存
+  // 在这里，建线程一并带上——与 modelDraft 同口径。''=跟随供应商配置。
+  const [effortDraft, setEffortDraft] = useState<string>("")
   // 联网搜索开关（v43，web-search-toggle，2026-10-19）：线程级；新建态草稿
   // （同 modelDraft 口径，创建线程时带上）。开 = 本线程主控 + spawn 子代理
   // 默认可用 web_search（SearXNG/ddgs 双后端）；不进专家工具勾选。
@@ -169,11 +178,14 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
       ? { provider: thread?.provider ?? "", model: thread?.model ?? "" }
       : modelDraft ?? { provider: "", model: "" }),
     [tid, thread?.provider, thread?.model, modelDraft])
-  const modelLabel = activeModel.provider
-    ? (activeModel.model || `${activeModel.provider} 默认`)
-    : "默认模型"
+  // chip 上「供应商 / 模型 / 深度」三段同行（用户要求）。供应商与模型分开渲染而
+  // 不是拼成一个字符串——拼起来整串同色，扫视时分不出哪段是家、哪段是型号。
+  // 空模型名是合法值（= 用该供应商的默认模型），显示「默认」而不是空。
+  const modelName = activeModel.provider ? (activeModel.model || "默认") : "默认模型"
   const openModelPop = () => {
     setPopProvider(activeModel.provider || enabledProviders[0]?.name || "")
+    // 每次打开都收起模型列表：浮层主角是深度滑块，上次展开的列表不该留着
+    setModelListOpen(false)
     setModelPopOpen((v) => !v)
   }
   // 选定即切：已选线程走 PUT（坏值 422 不落盘），新建态先存草稿、创建线程时带上。
@@ -189,6 +201,33 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
       setErr(e instanceof ApiError ? e.message : "切换模型失败")
     }
   }, [tid])
+
+  // 当前生效的思考深度 = 已选线程的覆写 → 未选（新建态）取草稿。
+  // 空值不是「最低」而是「没覆写」——显示上要回落到该供应商配置缺省（high），
+  // 但**不能**把 high 写回去（那会把「跟随供应商」悄悄钉死成「固定 high」）。
+  const activeEffort = tid ? (thread?.thinking_effort ?? "") : effortDraft
+  const effortGear = normalizeGear(activeEffort)
+  const chooseEffort = useCallback(async (gear: string) => {
+    // 拖到中间默认档 = 清除覆写（回跟随供应商）。这是刻意的：用户把滑块拖回
+    // 「高」往往是想恢复默认，而不是想钉死一个刚好等于默认值的手动档。
+    const next = gear === EFFORT_DEFAULT ? "" : gear
+    if (!tid) { setEffortDraft(next); return }
+    // 乐观更新：滑块要跟手（拖完立刻回位），失败再回滚
+    const prev = thread?.thinking_effort ?? ""
+    setThread((cur) => (cur ? { ...cur, thinking_effort: next } : cur))
+    setThreads((ts) => ts.map((x) => (x.id === tid ? { ...x, thinking_effort: next } : x)))
+    try {
+      const t = await api.chatThreadEffort(tid, next)
+      setThread((cur) => (cur ? { ...cur, thinking_effort: t.thinking_effort } : cur))
+      setThreads((ts) => ts.map((x) => (x.id === tid
+        ? { ...x, thinking_effort: t.thinking_effort } : x)))
+    } catch (e) {
+      setThread((cur) => (cur ? { ...cur, thinking_effort: prev } : cur))
+      setThreads((ts) => ts.map((x) => (x.id === tid
+        ? { ...x, thinking_effort: prev } : x)))
+      setErr(e instanceof ApiError ? e.message : "切换思考深度失败")
+    }
+  }, [tid, thread?.thinking_effort])
 
   // ---- 联网搜索开关（v43，web-search-toggle）----
   // 当前生效 = 已选线程的落盘值 → 未选（新建态）取草稿。
@@ -323,7 +362,8 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
     }
     return 0
   }, [events])
-  const { flags: candidateFlags, refresh: refreshCandidates } =
+  const { flags: candidateFlags, quota: flagQuota, accepted: flagAccepted,
+          hints: flagHints, refresh: refreshCandidates } =
     useCandidateFlags(challengeId, flagWake)
   const [decideFlagBusy, setDecideFlagBusy] = useState(false)
   const decideCandidateFlag = useCallback(
@@ -447,6 +487,23 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
       const e = events[i]
       if (e.kind === "chat.retry") {
         const p = e.payload as { thread_id?: string; attempt?: number; total?: number; status?: number }
+        if (p?.thread_id === tid) return p
+      }
+      if (e.kind === "chat.message") {
+        const p = e.payload as { thread_id?: string; role?: string }
+        if (p?.thread_id === tid && p.role === "user") break
+      }
+    }
+    return null
+  }, [events, tid])
+  // 跨供应商兜底（provider-failover，2026-10-21）：某家重试 11 次仍失败会自动换
+  // 下一家，此时 chat.retry 的次数会从 1 重新数——**不解释一句会像回归**（用户只
+  // 看到「又从头重试了」）。这里把本轮最近一次换家摆出来。
+  const liveFailover = useMemo(() => {
+    for (let i = events.length - 1; i >= 0; i--) {
+      const e = events[i]
+      if (e.kind === "llm.failover") {
+        const p = e.payload as { thread_id?: string; from?: string; to?: string; category?: string }
         if (p?.thread_id === tid) return p
       }
       if (e.kind === "chat.message") {
@@ -607,7 +664,7 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
         // （v43；主控开 = spawn 子代理默认继承）
         const t = await api.chatThreadCreate(pid, agentId, undefined,
                                              modelDraft?.provider, modelDraft?.model,
-                                             webSearchDraft)
+                                             webSearchDraft, effortDraft)
         id = t.id; setTid(id)
       }
       const r = await api.chatSend(id, body, refs, readyIds)
@@ -844,8 +901,9 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
                     className="wb-anim">
                     {it.rows.map((r, idx) => {
                       if (r.kind === "thinking") return <ThinkingBlock key={r.id} content={r.content} />
-                      // start 事件时刻：后端串行执行同批 tool_calls，只有真正轮到的那个才有
-                      // start 事件（2026-10-14 修「同批第二个工具恒显静态运行中」）。
+                      // start 事件时刻：**串行**工具只有真正轮到的那个才有 start
+                      // 事件（2026-10-14 修「同批第二个工具恒显静态运行中」）；
+                      // `call_expert` 是并发的，同批会一次性全拿到 start。
                       const started = liveTools.startAtById.get(r.id)
                         ?? liveTools.legacyStarts.find((p) => p.name === r.name
                           && p.args_head === JSON.stringify(r.args ?? {}).slice(0, 300))?.created_at
@@ -855,18 +913,25 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
                       const pendingBackground = (r.result ?? "").startsWith("[后台继续]")
                       const rowDone = !pendingBackground
                         && (r.done || liveTools.byId.get(r.id)?.phase === "done")
-                      // 「排队」判据（2026-10-20 修「真在跑却显示排队中」）：
-                      // **不能靠「窗口里有没有 start 事件」**——events 窗口只有
-                      // HYDRATE_LIMIT=300 条，而流式 chat.thinking.delta 每条带累计
-                      // 全文、实测峰值 76 条/秒（两个子代理同时思考），start 事件
-                      // 几十秒就被挤出窗口 → startAtById 查不到 → 所有在跑的工具
-                      // 全被误判成「排队中」（用户实测：call_expert 已在跑，却显示
-                      // 「排队中 76s」）。真正可靠的判据是**同组内更早的 tool 行是否
-                      // 仍未收尾**：后端串行执行同批 tool_calls，只有前面都收尾了才
-                      // 轮到后面那个；前面没有未完成的 = 当前就是在跑的那个。
-                      const blockedByEarlier = it.rows
-                        .slice(0, idx).some((p) => p.kind === "tool" && !p.done)
-                      const queued = !started && !rowDone && running && blockedByEarlier
+                      // 「排队」判据（2026-10-21 重写，第二版）：
+                      //
+                      // 前两版都错了，根因是**把并发工具当成串行工具**：
+                      // ① 第一版 `queued = !started && !rowDone && running`：`started`
+                      //    靠事件窗口查，而窗口只有 300 条、thinking.delta 峰值 76 条/秒
+                      //    → start 几十秒就被挤出去 → 所有在跑的工具全被判「排队中」。
+                      // ② 第二版改成「同组内更早的 tool 行是否仍未收尾」。这**只对串行
+                      //    工具有效**：`call_expert` 走 `_parallel_expert_dispatch`，
+                      //    同批全部**并发**执行（见该方法 docstring：「只要有专家调用就
+                      //    走并发路径（含单个）」）。三个 call_expert 同时跑、都还没结果
+                      //    → 后两个被「前面还没完成」判成排队中（用户 2026-10-21 实测）。
+                      //
+                      // 正确判据：**`call_expert` 永不排队**（并发派发，start 即开跑）；
+                      // 其余工具才按串行语义看「前面是否还有没跑完的」。
+                      const isExpertCall = r.name === "call_expert"
+                      const blockedByEarlier = !isExpertCall && it.rows
+                        .slice(0, idx).some((p) => p.kind === "tool" && !p.done
+                                            && p.name !== "call_expert")
+                      const queued = !rowDone && running && blockedByEarlier
                       // 计时起点：有 start 用 start；在跑但 start 已滑出窗口 → 退到
                       // 调用发起时刻（r.at）照样计时，别退化成静态「运行中」；本轮
                       // 已停且无 start（孤儿行）不给时刻，不编造。
@@ -904,6 +969,13 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
                   <ToolBlock name={liveToolStart.name ?? "?"}
                     argsHead={liveToolStart.args_head} done={false}
                     startedAt={liveToolStart.created_at} />
+                </div>
+              )}
+              {(running || !!pendingIn) && liveFailover && !liveDelta && (
+                <div className="wb-anim py-0.5 text-[11px] text-(--status-approval)">
+                  🔀 供应商 {liveFailover.from ?? "?"} 失败
+                  {liveFailover.category ? `（${liveFailover.category}）` : ""}
+                  ，已切到 {liveFailover.to ?? "?"} 继续重试
                 </div>
               )}
               {(running || !!pendingIn) && !liveDelta && !liveThinking && !liveToolStart && !hasPendingCall && (
@@ -1091,9 +1163,12 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
 
           {/* 候选 flag 确认卡（ctf-flag-wake）：子代理提交候选后主控会先解释一段，
               这里给人类复制/确认的入口。与审批卡同一区块，但语义独立——
-              审批卡是「要不要执行」，本卡是「这串是不是答案」。 */}
+              审批卡是「要不要执行」，本卡是「这串是不是答案」。
+              quota/accepted/hints 一起传：确认按钮的后果取决于「这题几条 flag」，
+              多 flag 题确认一条只是 1/N、探索继续（flag-hint，2026-10-21）。 */}
           <CandidateFlagCard flags={candidateFlags} onDecide={decideCandidateFlag}
-            busy={decideFlagBusy} />
+            busy={decideFlagBusy} quota={flagQuota} accepted={flagAccepted}
+            hints={flagHints} />
 
           {/* 待审批问答卡（贴 composer；本页即对话页 → 隐藏「和 Agent 聊聊」） */}
           {pendingApprovals.length > 0 && (
@@ -1205,7 +1280,18 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
                   : "当前线程跟随全局默认模型（点击指定）"}
                 onClick={openModelPop}>
                 <Cpu size={11} />
-                <span className="wb-model-name">{modelLabel}</span>
+                {/* 供应商 · 模型 · 深度（用户要求三者同行可见）。供应商用弱色、
+                    模型用等宽字体：整串同色时会变成一坨长文本，扫视时分不出哪段
+                    是家、哪段是型号。 */}
+                {activeModel.provider && (
+                  <span className="wb-model-prov">{activeModel.provider}</span>
+                )}
+                <span className="wb-model-name">{modelName}</span>
+                {/* 思考深度（v48，thinking-effort）：与模型名同行显示，让人一眼看到
+                    「哪个模型 + 多深」。这跟参考图一致，也避免为了看深度再点一次。 */}
+                <span className="wb-model-effort" title={`思考深度：${EFFORT_HINT[effortGear]}`}>
+                  {EFFORT_LABEL[effortGear]}
+                </span>
                 <ChevronDown size={10} className="opacity-70" />
               </button>
               {running ? (
@@ -1221,57 +1307,98 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
             </div>
           </div>
 
-          {/* 模型选择浮层（v37）：供应商 → 展开该供应商模型；顶部「默认模型」= 清覆写。
+          {/* 模型 + 深度浮层（v48，thinking-effort，2026-10-21）：
+              上半部 = 当前模型（点它切供应商/模型）+ 深度名 + 重置；
+              下半部 = 七档滑块，拖动即改本线程思考深度。
               浮层挂在 composer 外层 wrap（.wb-composer 有 overflow:hidden，不能内嵌）。 */}
           {modelPopOpen && (
             <>
               <div className="wb-model-backdrop" onClick={() => setModelPopOpen(false)} />
-              <div className="wb-model-pop">
-                <button type="button"
-                  className={cn("wb-model-opt", !activeModel.provider && "is-current")}
-                  onClick={() => void chooseModel("", "")}>
-                  <span>默认模型（跟随全局）</span>
-                  {!activeModel.provider && <Check size={12} />}
-                </button>
-                <div className="wb-model-label">供应商 / 模型</div>
-                {!enabledProviders.length && (
-                  <div className="wb-model-hint">无启用的供应商（请在设置页配置）</div>
-                )}
-                {enabledProviders.map((p) => (
-                  <div key={p.name}>
-                    <button type="button"
-                      className={cn("wb-model-opt", popProvider === p.name && "is-open")}
-                      onClick={() => setPopProvider(popProvider === p.name ? "" : p.name)}>
-                      <span className="min-w-0 truncate">{p.name}</span>
-                      {activeModel.provider === p.name
-                        ? <span className="wb-model-tag">当前</span>
-                        : <ChevronDown size={11} className={cn("shrink-0 opacity-60",
-                            popProvider === p.name && "rotate-180")} />}
-                    </button>
-                    {popProvider === p.name && (
-                      <div className="wb-model-sub">
-                        {(p.models ?? []).map((m) => (
-                          <button key={m} type="button"
-                            className={cn("wb-model-opt",
-                              activeModel.provider === p.name && activeModel.model === m && "is-current")}
-                            onClick={() => void chooseModel(p.name, m)}>
-                            <span className="wb-model-opt-m min-w-0 truncate">{m}</span>
-                            {activeModel.provider === p.name && activeModel.model === m
-                              && <Check size={12} className="shrink-0" />}
-                          </button>
-                        ))}
-                        <button type="button"
-                          className={cn("wb-model-opt",
-                            activeModel.provider === p.name && !activeModel.model && "is-current")}
-                          onClick={() => void chooseModel(p.name, "")}>
-                          <span className="wb-model-opt-m">供应商默认模型</span>
-                          {activeModel.provider === p.name && !activeModel.model
-                            && <Check size={12} className="shrink-0" />}
-                        </button>
-                      </div>
+              <div className={cn("wb-model-pop", "is-effort")}>
+                {/* ---- 模型行（点它切供应商/模型，用户核心诉求）+ 右侧重置 ---- */}
+                <div className="wb-effort-modelrow">
+                  <button type="button" className="wb-effort-switch"
+                    title={activeModel.provider
+                      ? `当前：${activeModel.provider}/${activeModel.model || "（供应商默认模型）"}——点击切换供应商与模型`
+                      : "当前跟随全局默认模型——点击指定供应商与模型"}
+                    onClick={() => setModelListOpen((v) => !v)}>
+                    <Cpu size={11} className="wb-effort-switch-ico" />
+                    {activeModel.provider && (
+                      <span className="wb-effort-prov">{activeModel.provider}</span>
                     )}
+                    <span className="wb-effort-model">{modelName}</span>
+                    <ChevronRight size={11} className={cn("wb-effort-switch-arrow",
+                      modelListOpen && "is-open")} />
+                  </button>
+                  {/* 重置入口的显示条件必须「模型有覆写 **或** 深度有覆写」——
+                      只判 provider 的话，用户只调了深度（没选供应商）就永远
+                      看不到重置按钮，只能靠再点一次默认档名才知道怎么回去。 */}
+                  {(activeModel.provider || activeEffort) && (
+                    <button type="button" className="wb-effort-reset"
+                      title={activeModel.provider
+                        ? "恢复默认：模型跟随全局、深度跟随供应商配置"
+                        : "恢复默认深度（跟随供应商配置）"}
+                      onClick={() => {
+                        if (activeModel.provider) void chooseModel("", "")
+                        void chooseEffort(EFFORT_DEFAULT)
+                      }}>
+                      <RotateCcw size={11} />
+                    </button>
+                  )}
+                </div>
+
+                {/* ---- 下半部：档位名 + 说明 + 七档轨道 + 可点刻度 ---- */}
+                <EffortSlider value={effortGear} onChange={(g) => void chooseEffort(g)} />
+
+                {/* ---- 供应商/模型列表（默认收起，点上方模型名展开）---- */}
+                {modelListOpen && (
+                  <div className="wb-effort-models">
+                    <button type="button"
+                      className={cn("wb-model-opt", !activeModel.provider && "is-current")}
+                      onClick={() => { void chooseModel("", ""); setModelListOpen(false) }}>
+                      <span>默认模型（跟随全局）</span>
+                      {!activeModel.provider && <Check size={12} />}
+                    </button>
+                    {!enabledProviders.length && (
+                      <div className="wb-model-hint">无启用的供应商（请在设置页配置）</div>
+                    )}
+                    {enabledProviders.map((p) => (
+                      <div key={p.name}>
+                        <button type="button"
+                          className={cn("wb-model-opt", popProvider === p.name && "is-open")}
+                          onClick={() => setPopProvider(popProvider === p.name ? "" : p.name)}>
+                          <span className="min-w-0 truncate">{p.name}</span>
+                          {activeModel.provider === p.name
+                            ? <span className="wb-model-tag">当前</span>
+                            : <ChevronDown size={11} className={cn("shrink-0 opacity-60",
+                                popProvider === p.name && "rotate-180")} />}
+                        </button>
+                        {popProvider === p.name && (
+                          <div className="wb-model-sub">
+                            {(p.models ?? []).map((m) => (
+                              <button key={m} type="button"
+                                className={cn("wb-model-opt",
+                                  activeModel.provider === p.name && activeModel.model === m && "is-current")}
+                                onClick={() => { void chooseModel(p.name, m); setModelListOpen(false) }}>
+                                <span className="wb-model-opt-m min-w-0 truncate">{m}</span>
+                                {activeModel.provider === p.name && activeModel.model === m
+                                  && <Check size={12} className="shrink-0" />}
+                              </button>
+                            ))}
+                            <button type="button"
+                              className={cn("wb-model-opt",
+                                activeModel.provider === p.name && !activeModel.model && "is-current")}
+                              onClick={() => { void chooseModel(p.name, ""); setModelListOpen(false) }}>
+                              <span className="wb-model-opt-m">供应商默认模型</span>
+                              {activeModel.provider === p.name && !activeModel.model
+                                && <Check size={12} className="shrink-0" />}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    ))}
                   </div>
-                ))}
+                )}
               </div>
             </>
           )}
@@ -1455,9 +1582,11 @@ function Hero({ agentName, isOrch }: { agentName?: string; isOrch: boolean }) {
 // 但消息模型不同（ChatMessage[] vs BBEvent[]）故各自实现。
 
 // 活动组内一行：工具调用 或 该步的思考（思考折进行内，摘要也能带上「思考」计数）
-// `at` = 发起该调用的 assistant 消息时刻（2026-10-14）：后端**串行**执行同一批 tool_calls，
-// `chat.tool` 的 start 事件只在真正轮到该工具时才发 → 排队中的工具没有 start 时刻，前端只能
-// 退到「调用发起时刻」计时（显示「排队中 Ns」），否则只能挂一个静态「运行中」。
+// `at` = 发起该调用的 assistant 消息时刻（2026-10-14）：**串行**工具由后端逐个执行，
+// `chat.tool` 的 start 事件只在真正轮到它时才发 → 排队中的工具没有 start 时刻，前端
+// 只能退到「调用发起时刻」计时（显示「排队中 Ns」），否则只能挂一个静态「运行中」。
+// **`call_expert` 例外**：同批全部并发派发（`_parallel_expert_dispatch`），start 即
+// 开跑，永不排队——见渲染处的排队判据（2026-10-21 修正）。
 type GroupRow =
   | { kind: "tool"; id: string; name: string; args?: Record<string, unknown>
       result?: string; done: boolean; at?: string }
@@ -1561,14 +1690,174 @@ function relTargets(targets: FileTarget[], workDir: string | null): FileTarget[]
   })
 }
 
+/** 思考深度滑块（v48，thinking-effort，2026-10-21）。
+ *
+ * 七档**等距吸附**：拖动时实时显示最近的档位名，松手才提交（`onChange`）。
+ * 用 pointer 事件而非 HTML range——range 在 7 档这种「离散 + 要大点击热区」
+ * 的场景下手感很差（拇指宽度跨两个档位，拖起来像坏了一样）。
+ *
+ * 不在这里存本地状态：`value` 完全受控于父级（父级做了乐观更新 + 失败回滚），
+ * 组件自己再存一份会在回滚时与父级打架。
+ *
+ * 布局三行（用户反馈「很粗糙」后的重做，2026-10-22）：
+ *   ① 当前档名 + 一行说明（左对齐，读得顺；不再单独居中占一行重复显示）
+ *   ② 轨道：底色 + 渐隐填充 + 滑钮（带光晕）
+ *   ③ 七个**可点**刻度标签（此前只有 3px 小圆点，用户根本看不出每格是什么档）
+ */
+// 滑钮直径（px）。首尾格的钮心要内缩半个钮宽，否则白点压在圆角外面。
+// 与 index.css 里 `.wb-effort-knob { width/height }` 必须一致；
+// `.wb-effort-rail` 的左右 inset 也用它（CSS 里写死 8px，同步改）。
+const KNOB = 16
+const KNOB_HALF = KNOB / 2
+
+function EffortSlider({ value, onChange }: {
+  value: EffortGear
+  onChange: (g: EffortGear) => void
+}) {
+  const trackRef = useRef<HTMLDivElement>(null)
+  const [dragging, setDragging] = useState(false)
+  // 拖动过程中的预览档位（未提交）。松手前只改显示，不发请求。
+  const [preview, setPreview] = useState<EffortGear | null>(null)
+  const shown = preview ?? value
+  const idx = gearIndex(shown)
+  const pct = idx / (EFFORT_GEARS.length - 1)
+
+  // 换算基准必须与视觉一致：滑钮/刻点定位在内缩 8px 的 rail 上，若这里用
+  // 整条轨道的矩形换算，点最右端会落在第 6 段中点偏左 → 拖到末尾却停在前一档。
+  const gearAt = useCallback((clientX: number): EffortGear => {
+    const el = trackRef.current
+    if (!el) return value
+    const r = el.getBoundingClientRect()
+    const inner = r.width - KNOB
+    if (inner <= 0) return value
+    const ratio = Math.min(1, Math.max(0, (clientX - r.left - KNOB_HALF) / inner))
+    // 四舍五入到最近档：7 档 6 段，0.5 段宽为分界
+    const i = Math.round(ratio * (EFFORT_GEARS.length - 1))
+    return EFFORT_GEARS[Math.min(EFFORT_GEARS.length - 1, Math.max(0, i))]
+  }, [value])
+
+  const startDrag = (e: ReactPointerEvent<HTMLDivElement>) => {
+    // preventDefault 会连带阻止「按下即聚焦」的默认行为——不手动 focus 的话
+    // tabIndex=0 形同虚设，`onKeyDown` 永远收不到事件（键盘用户完全用不了）。
+    // 实测踩过：Home/End/方向键全无反应，而 aria 属性看起来一切正常。
+    e.preventDefault()
+    e.currentTarget.focus()
+    // setPointerCapture 让指针移出轨道后仍能收到 move/up——否则拖快一点就断
+    e.currentTarget.setPointerCapture(e.pointerId)
+    setDragging(true)
+    setPreview(gearAt(e.clientX))
+  }
+  const moveDrag = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (!dragging) return
+    setPreview(gearAt(e.clientX))
+  }
+  const endDrag = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (!dragging) return
+    const g = gearAt(e.clientX)
+    setDragging(false)
+    setPreview(null)
+    if (g !== value) onChange(g)
+  }
+
+  const step = (dir: -1 | 1) => {
+    const next = gearIndex(value) + dir
+    if (next >= 0 && next < EFFORT_GEARS.length) onChange(EFFORT_GEARS[next])
+  }
+
+  return (
+    <div className="wb-effort-slider">
+      {/* ① 当前档：名字在前、说明跟随。左对齐而非居中——居中会让「高 + 默认档位
+          平衡之选」读成两截，左对齐时它是完整一句话。 */}
+      <div className="wb-effort-cur" title={EFFORT_HINT[shown]}>
+        <span className="wb-effort-cur-name">{EFFORT_LABEL[shown]}</span>
+        <span className="wb-effort-hint">{EFFORT_HINT[shown]}</span>
+        <span className="wb-effort-count">{idx + 1}/{EFFORT_GEARS.length}</span>
+      </div>
+
+      {/* ② 轨道 */}
+      <div className={cn("wb-effort-track", dragging && "is-drag")}
+        ref={trackRef}
+        role="slider"
+        tabIndex={0}
+        aria-valuemin={0}
+        aria-valuemax={EFFORT_GEARS.length - 1}
+        aria-valuenow={idx}
+        aria-valuetext={EFFORT_HINT[shown]}
+        aria-label="思考深度"
+        onPointerDown={startDrag}
+        onPointerMove={moveDrag}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+        onKeyDown={(e) => {
+          // 键盘可达：方向键/Home/End，拖不动的人也能调
+          if (e.key === "ArrowLeft" || e.key === "ArrowDown") { e.preventDefault(); step(-1) }
+          else if (e.key === "ArrowRight" || e.key === "ArrowUp") { e.preventDefault(); step(1) }
+          else if (e.key === "Home") { e.preventDefault(); onChange(EFFORT_GEARS[0]) }
+          else if (e.key === "End") {
+            e.preventDefault(); onChange(EFFORT_GEARS[EFFORT_GEARS.length - 1])
+          }
+        }}>
+        {/* 内层 rail 左右各缩 KNOB_HALF：滑钮按 0..100% 定位在 rail 内，
+            首尾两格自然贴住轨道圆角内侧，不会溢出。用嵌套容器而不是 calc
+            ——`calc((100% - 16px) * 1)` 这种「长度乘数字」在实测里没有按预期
+            生效（滑钮跑到了最左），嵌套容器的百分比基准是确定的。 */}
+        <div className="wb-effort-rail">
+          {/* fill 的 left 是 -KNOB_HALF（见 index.css），所以宽度要
+              `2 * KNOB_HALF + pct*100%` 才能从「轨道左端」铺到「滑钮外沿」：
+              起点已经左移了半个钮宽，再加一个钮宽才覆盖到滑钮右侧。
+              `pct*100%` 的基准就是 rail 宽，而 rail 宽 = track 宽 - KNOB，
+              于是两端都不留裸底色——右端那半个钮宽由滑钮自己压住。
+              （不能写成 `calc((100% - 16px) * pct)`：实测那种「长度乘数字」在
+              这个嵌套结构里不按预期生效，滑钮/填充会跑到最左端。） */}
+          <div className="wb-effort-fill"
+            style={{ width: `calc(${KNOB}px + ${pct * 100}%)` }} />
+          <div className="wb-effort-knob" style={{ left: `${pct * 100}%` }} />
+        </div>
+      </div>
+
+      {/* ③ 七档刻度标签：既可点跳档，也是唯一的「每格是什么」的说明。
+          此前只有 3px 圆点，用户看不出档位分布——这就是「粗糙」的主因。
+          用与填充条同一套内缩公式（rail inset + 等分），保证标签与滑钮共线。 */}
+      <div className="wb-effort-ticks">
+        {EFFORT_GEARS.map((g, i) => (
+          <button key={g} type="button"
+            className={cn("wb-effort-tick", i === idx && "is-on", i < idx && "is-past")}
+            style={{ left: `${(i / (EFFORT_GEARS.length - 1)) * 100}%` }}
+            title={EFFORT_HINT[g]}
+            aria-label={`${EFFORT_LABEL[g]}——${EFFORT_HINT[g]}`}
+            aria-current={i === idx ? "true" : undefined}
+            // 点刻度直接跳档；按钮自身不参与 tab 序（滑块本体已可键盘操作，
+            // 再塞 7 个 tab 停靠点会让 Tab 走不动路）
+            tabIndex={-1}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={() => { if (g !== value) onChange(g) }}>
+            {EFFORT_LABEL[g]}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 // 人类消息行（会话流改造 2026-10-03）：单行 `❯ <text>`——去气泡，对齐 cc-haha。
 // m=null 时用 text（乐观上屏的 pendingIn 占位）。
 function HumanNote({ m, text }: { m: ChatMessage | null; text?: string }) {
   const body = text ?? m?.content ?? ""
+  // 发送时刻（2026-10-21 用户需求）：贴在消息正文**后面**，一眼能看出这条是什么
+  // 时候发的——排查「等了多久才被主控读到」「两条插话的先后」时都要用。
+  // 走 fmtDateTime（YYYY-MM-DD HH:mm:ss）：它内部用 parseTs 把后端 naive ISO
+  // 按 UTC 解析再转本地，裸 new Date 会按本地时区算出偏移（本仓既有坑）。
+  // 乐观行（pendingIn，m=null）没有真实时刻——不编造，整段时间戳都不渲染。
+  const at = m?.created_at ? fmtDateTime(m.created_at) : ""
   return (
     <div className="wb-anim py-1 text-[13px] leading-relaxed">
       <span className="mr-1.5 select-none font-mono text-primary">❯</span>
       <span className="whitespace-pre-wrap break-words text-foreground">{body}</span>
+      {at && (
+        <span className="ml-2 shrink-0 select-none font-mono text-[10px] text-muted-foreground/70">
+          {at}
+        </span>
+      )}
     </div>
   )
 }
@@ -1610,7 +1899,7 @@ function ToolBlock({ name, args, argsHead, result, done, live, startedAt, queued
   result?: string; done: boolean
   live?: { ok?: boolean; duration_s?: number; result_head?: string } | null
   startedAt?: string
-  /** 已发起但尚未轮到执行（同批串行排队）——计时改口径为「排队中」，见 GroupRow.at 注释 */
+  /** 已发起但尚未轮到执行（**仅串行工具**会排队；`call_expert` 并发，恒不排队） */
   queued?: boolean
   /** 本轮是否仍在跑：区分「运行中」与「已中断」孤儿行（无计时起点时用） */
   running?: boolean

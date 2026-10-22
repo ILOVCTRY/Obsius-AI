@@ -1441,8 +1441,22 @@
      --glass-settings-side-a（暗 .44→有效 .42；.wb-aside 为 .55×.72≈.40），
      并同 .wb-aside 进糊化名单；
    · 侧栏右缘描边从实色 --theme-raw-a1833752c0 换玻璃发丝线 --border（与
-     .app-nav 边框退透明、改由 .nav-sep 出线同族）。 */
+     .app-nav 边框退透明、改由 .nav-sep 出线同族）。
+   · **实色带必须按 `.pt-9` 门控**（2026-10-21 Nan 报「红色方框圈住的部分颜色太深，
+     与上下都不协调」）：这条带的存在理由是给**首页拖动区**（`pt-9`，子元素从 36px
+     起排）垫不透明底；但项目内有 `.topbar` 占 0–64px，shell 从 64px 起且**不带
+     pt-9**，子元素直接从 0 排——此时满档实色带（oklch .15 ≈ rgb(21,10,13)）
+     没有任何东西要垫，却仍横跨侧栏与内容区，把「渗透测试 / Web」和专家池首行
+     （「＋新建专家」「experts/worker.yaml」）压成一条**比上方 topbar(69,60,63)、
+     下方 wash(45,36,38) 都深得多**的近黑横条。半透明的子面板（侧栏 .42 / 内容
+     一族的 alpha）会把这条带透上来，于是形成上下都不是一族的断层。
+     判据是「有没有拖动区要垫」而不是「是不是设置页」：故 selector 收窄到
+     `.settings-shell.pt-9`，无 pt-9 时 shell 显式透明（否则会露出非玻璃模式那条
+     全不透的 135deg 渐变，玻璃直接失效）。 */
 [data-glass="1"] .settings-shell {
+  background: transparent;
+}
+[data-glass="1"] .settings-shell.pt-9 {
   background: linear-gradient(180deg,
     var(--theme-raw-8fcfcc3618) 0,
     var(--theme-raw-8fcfcc3618) 36px,
@@ -1677,6 +1691,10 @@
 .llm-overview p { margin-top: 4px; color: var(--muted-foreground); font-size: 11px; }
 .llm-overview-actions { display: flex; align-items: center; gap: 10px; }
 .llm-file-label { color: var(--muted-foreground); font-family: var(--font-mono); font-size: 10px; }
+/* 自动保存状态（2026-10-21）：供应商页已无「保存配置」按钮，这枚小胶囊是唯一的落盘反馈 */
+.llm-save-state { display: inline-flex; align-items: center; padding: 2px 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted-foreground); font-size: 10px; line-height: 1.5; white-space: nowrap; transition: color .16s, border-color .16s; }
+.llm-save-state.is-saving { border-style: dashed; }
+.llm-save-state.is-saved { border-color: var(--status-ok); color: var(--status-ok); }
 .llm-default-card { display: flex; align-items: center; gap: 13px; padding: 13px 15px; border: 1px solid var(--theme-raw-49105fe622); border-radius: 8px; background: linear-gradient(90deg, var(--theme-raw-e636578dde), var(--theme-raw-df984e50cd)); }
 .llm-default-mark { display: grid; width: 31px; height: 31px; place-items: center; border: 1px solid var(--theme-raw-f860ee6b2e); border-radius: 50%; color: var(--primary); font-size: 19px; }
 .llm-kicker, .llm-section-title small { display: block; color: var(--muted-foreground); font-size: 9px; letter-spacing: .08em; }
@@ -1906,10 +1924,15 @@
 /* ---- 线程级模型选择（v37，2026-10-13）：发送键左侧按钮 + 供应商/模型浮层 ----
    wrap 只是浮层的定位锚（.wb-composer 自身 overflow:hidden，浮层不能内嵌）。 */
 .wb-composer-wrap { position: relative; }
-.wb-model { display: inline-flex; gap: 5px; align-items: center; max-width: 190px; padding: 4px 9px; border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--muted-foreground); font-size: 10.5px; transition: border-color .16s, color .16s, background .16s; }
+/* max-width 230px（v48 起）：原先 190px 只装模型名，现在还要并排显示思考深度。
+   深度是 shrink-0 且字体更小，模型名先被截——优先级正确（深度是短词，截了就认不出）。 */
+.wb-model { display: inline-flex; gap: 5px; align-items: center; max-width: 280px; padding: 4px 9px; border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--muted-foreground); font-size: 10.5px; transition: border-color .16s, color .16s, background .16s; }
 .wb-model:hover { border-color: var(--theme-raw-9d0441a38a); color: var(--foreground); background: var(--theme-raw-c789243b14); }
 .wb-model.is-active { border-color: var(--theme-raw-69747d9905); background: var(--theme-raw-e636578dde); color: var(--primary); }
 .wb-model-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 供应商与模型分两段着色：整串同色 = 一坨长文本，扫视分不出哪段是家、哪段是型号。 */
+.wb-model-prov { flex-shrink: 0; max-width: 88px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .72; }
+.wb-model-prov::after { content: "/"; margin-left: 1px; opacity: .55; }
 .wb-model-backdrop { position: fixed; z-index: 29; inset: 0; }
 .wb-model-pop { position: absolute; z-index: 30; right: 8px; bottom: calc(100% + 8px); width: 300px; max-height: 320px; overflow: auto; padding: 6px; border: 1px solid var(--theme-raw-49105fe622); border-radius: 10px; background: var(--theme-raw-b0dd1d1377); box-shadow: 0 18px 40px var(--theme-raw-7846e7d7de); }
 .wb-model-label { padding: 7px 8px 3px; color: var(--muted-foreground); font-size: 9px; font-weight: 750; letter-spacing: .13em; text-transform: uppercase; }
@@ -1922,6 +1945,96 @@
 .wb-model-sub { margin-left: 10px; border-left: 1px solid var(--border); padding-left: 4px; }
 .wb-model-tag { flex-shrink: 0; color: var(--muted-foreground); font-size: 9.5px; }
 .wb-model-hint { padding: 6px 8px; color: var(--muted-foreground); font-size: 10.5px; }
+
+/* ---- 思考深度（v48，thinking-effort，2026-10-21；视觉重做 2026-10-22）----
+   composer chip 里模型名后的深度小字 + 浮层（模型行 / 当前档 / 七档滑块）。
+   重做针对用户反馈的「选择挡位的 UI 很粗糙」：
+     ① 档名不再居中独占一行（那样会和下面的刻度标签重复显示同一个词），
+        改成「13px 档名 + 跟随说明 + 3/7 计数」左对齐一行；
+     ② 轨道加内阴影、填充改渐变带右端光晕、滑钮加环与光晕、拖动时放大；
+     ③ 刻度从 3px 小圆点改成**可点标签**——此前用户根本看不出每格是什么档。 */
+.wb-model-effort { flex-shrink: 0; padding-left: 5px; margin-left: 1px; border-left: 1px solid var(--border); color: var(--primary); font-weight: 600; }
+.wb-model-pop.is-effort { width: 292px; padding: 10px 12px 11px; }
+
+/* 模型行：整行可点（切供应商/模型）+ 右侧重置。给 hover 底色是为了让它
+   看起来「能按」——之前是一行纯文字，用户不知道这一行本身是入口。 */
+.wb-effort-modelrow { display: flex; align-items: center; gap: 4px; padding: 0 0 7px; border-bottom: 1px solid var(--border); }
+.wb-effort-switch { display: inline-flex; min-width: 0; flex: 1; align-items: center; gap: 5px; padding: 4px 6px; border: 0; border-radius: 7px; background: transparent; color: var(--foreground); font-size: 11px; cursor: pointer; transition: background .14s, color .14s; }
+.wb-effort-switch:hover { background: var(--theme-raw-e636578dde); }
+.wb-effort-switch-ico { flex-shrink: 0; opacity: .5; }
+/* 供应商做成小药丸：与等宽的模型名并排时，靠底色就能分出「家」和「型号」。
+   这里**不加** `::after` 斜杠——有底色再补分隔符是双重分隔，反而更乱
+   （composer chip 里没有底色，那边才需要斜杠）。 */
+.wb-effort-prov { flex-shrink: 0; max-width: 92px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 5px; border-radius: 4px; background: var(--theme-raw-c789243b14); color: var(--muted-foreground); font-size: 9.5px; }
+.wb-effort-model { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--foreground); font-family: var(--font-mono); font-size: 10.5px; }
+.wb-effort-switch-arrow { flex-shrink: 0; margin-left: auto; opacity: .45; transition: transform .16s, opacity .16s; }
+.wb-effort-switch-arrow.is-open { transform: rotate(90deg); opacity: .9; }
+.wb-effort-reset { display: inline-flex; flex-shrink: 0; align-items: center; justify-content: center; width: 22px; height: 22px; border: 0; border-radius: 6px; background: transparent; color: var(--muted-foreground); cursor: pointer; transition: background .14s, color .14s; }
+.wb-effort-reset:hover { background: var(--theme-raw-e636578dde); color: var(--primary); }
+
+.wb-effort-slider { margin-top: 9px; }
+/* ① 当前档：名字在前、说明跟随、计数靠右。左对齐而非居中——居中会把
+   「高 / 默认档位，平衡之选」读成两截，左对齐时它是完整的一句话。 */
+.wb-effort-cur { display: flex; align-items: baseline; gap: 6px; }
+.wb-effort-cur-name { flex-shrink: 0; color: var(--primary); font-size: 13px; font-weight: 750; letter-spacing: .02em; }
+.wb-effort-hint { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted-foreground); font-size: 9.5px; }
+/* 计数用等宽数字：拖动时 3/7 → 4/7 宽度不变，右侧文字不会左右跳。 */
+.wb-effort-count { flex-shrink: 0; color: var(--muted-foreground); font-family: var(--font-mono); font-size: 9.5px; font-variant-numeric: tabular-nums; opacity: .75; }
+
+/* 凹槽内阴影按主题分档。深色主题靠黑阴影形成「凹进去」的错觉；浅色主题底色
+   本来就浅，同一个黑影会变成一圈脏灰，只能压到 12%。四套暗色共用一档。 */
+:root, [data-theme="cyber-dark"], [data-theme="warm-dark"], [data-theme="rose-dark"] {
+  --well-shadow: inset 0 1px 3px rgb(0 0 0 / 32%);
+}
+[data-theme="light"], [data-theme="rose-light"] {
+  --well-shadow: inset 0 1px 3px rgb(0 0 0 / 12%);
+}
+/* ② 轨道：内阴影压出凹槽感，1px 内描边让边缘不死黑。
+   凹槽阴影必须**跟着明暗走**：深色主题要黑阴影才有「凹进去」的感觉，浅色主题
+   下同一个黑影会变成一圈脏灰。--well-shadow 按主题给（见下），不写死 rgb()。 */
+.wb-effort-track { position: relative; height: 22px; margin-top: 8px; border-radius: 999px; background: var(--theme-raw-49105fe622); box-shadow: var(--well-shadow), inset 0 0 0 1px color-mix(in oklab, var(--foreground) 8%, transparent); cursor: pointer; touch-action: none; outline: none; transition: box-shadow .16s; }
+.wb-effort-track:hover { box-shadow: var(--well-shadow), inset 0 0 0 1px var(--theme-raw-69747d9905); }
+/* 焦点环必须用实色 primary：/25 的弱化色当焦点环等于没提示（a11y 项） */
+.wb-effort-track:focus-visible { box-shadow: 0 0 0 2px var(--primary), var(--well-shadow); }
+.wb-effort-track.is-drag { cursor: grabbing; }
+/* 内层 rail：左右各内缩半个钮宽（滑钮 16px → 8px），与组件里的 KNOB/2 对应。
+   滑钮/刻点按 0..100% 定位在 rail 内，首尾自然贴住圆角内侧。
+   用嵌套容器而不是 `calc((100% - 16px) * ratio)`：实测那种写法没有按预期生效
+   （滑钮跑到了最左端），嵌套容器的百分比基准是确定的。 */
+.wb-effort-rail { position: absolute; inset: 0 8px; }
+/* left / width 由组件 inline style 给出（相对 rail），这里只给底色圆角。
+   渐变从半透明 primary 过渡到实色：单向纯色填充看起来像进度条，渐变才有
+   「越往右越强」的方向感，右端再加一点光晕收口。
+
+   **left 必须是 -8px（= 半个 rail inset）**，不能是 0。rail 为给滑钮让位左右
+   各内缩 8px，fill 若从 rail 左端起步，轨道最左就露出 8px 裸底色——用户看到的
+   「左边留了一点空白」就是这个（右侧同理，只是平时被滑钮盖住）。从 -8px 起步
+   后 fill 的圆头正好压在轨道自己的圆角内侧，两端口径一致。
+   宽度由组件给成 `calc(8px + <pct>%)`：`100%` 的基准就是 rail 宽，而
+   「track 宽 - 16」恰好等于 rail 宽，所以该式等价于「轨道左端 → 滑钮中心」
+   的精确宽度，两端都贴边（滑钮中心外侧那 8px 由滑钮自己盖住）。 */
+.wb-effort-fill { position: absolute; top: 0; bottom: 0; left: -8px; border-radius: 999px; background: linear-gradient(90deg, color-mix(in oklab, var(--primary) 45%, transparent), var(--primary)); box-shadow: 0 0 12px -2px var(--theme-raw-a9e40f0581); transition: width .16s ease; }
+.wb-effort-track.is-drag .wb-effort-fill { transition: none; }
+/* 滑钮/刻点的 left 由组件按「内缩半个钮宽」的公式算出（见 EffortSlider），
+   这里只负责把它自己的中心对齐到那个 x——所以是 translate(-50%, -50%)，
+   不能用 margin-left:-8px（那样首尾两格会各溢出轨道 8px）。
+   白钮 + primary 环 + 外光晕：单靠白点在没有对比的轨道上会「飘」。 */
+.wb-effort-knob { position: absolute; top: 50%; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 4px rgb(0 0 0 / 45%), 0 0 0 1px color-mix(in oklab, var(--primary) 45%, transparent), 0 0 10px -1px var(--theme-raw-a9e40f0581); transform: translate(-50%, -50%); transition: left .16s ease, box-shadow .16s, transform .16s; }
+/* 拖动时放大 + 光晕加强：手指/鼠标离开轨道时反馈「正在拖的就是这个钮」 */
+.wb-effort-track.is-drag .wb-effort-knob { box-shadow: 0 2px 8px rgb(0 0 0 / 55%), 0 0 0 1px var(--primary), 0 0 16px 0 var(--theme-raw-a9e40f0581); transform: translate(-50%, -50%) scale(1.15); transition: box-shadow .16s, transform .16s; }
+
+/* ③ 七档刻度标签：绝对定位按等分百分比落点。容器 margin 左右各 8px，
+   与 rail 的 `inset: 0 8px` 同宽——不同宽的话标签与滑钮会差半个钮宽错位。
+   容器 height 固定、不设 overflow 隐藏：首尾标签的 translateX(-50%) 会探进
+   浮层 padding（那里有 20px 余量），隐藏掉就把「最低 / 极限」切掉半边。 */
+.wb-effort-ticks { position: relative; height: 16px; margin: 3px 8px 0; }
+.wb-effort-tick { position: absolute; top: 0; padding: 1px 2px; border: 0; border-radius: 4px; background: transparent; color: var(--muted-foreground); font-size: 9.5px; line-height: 14px; white-space: nowrap; opacity: .55; transform: translateX(-50%); cursor: pointer; transition: color .14s, opacity .14s, background .14s; }
+.wb-effort-tick:hover { background: var(--theme-raw-c789243b14); color: var(--foreground); opacity: 1; }
+/* is-past（已越过的格）用 primary 但压低透明度，is-on（当前格）实色加粗：
+   三段色阶让「走到哪了」不用看滑钮也能读出来。 */
+.wb-effort-tick.is-past { color: var(--primary); opacity: .68; }
+.wb-effort-tick.is-on { color: var(--primary); font-weight: 750; opacity: 1; }
+.wb-effort-models { max-height: 220px; margin-top: 9px; padding-top: 6px; overflow: auto; border-top: 1px solid var(--border); }
 .wb-panel { overflow: hidden; border: 1px solid var(--theme-raw-aee25a9385); border-radius: 12px; background: var(--theme-raw-f07f607b7e); }
 .wb-panel-inner { max-height: 200px; overflow-y: auto; padding: 10px 12px; }
 .wb-panel-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }

@@ -1,1 +1,0 @@
-hello CTF NOTE_SENTINEL

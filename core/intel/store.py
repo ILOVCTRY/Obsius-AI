@@ -168,6 +168,48 @@ class IntelStore:
             rows = self._conn.execute(sql, args).fetchall()
         return [dict(r) for r in rows]
 
+    def recent_vulns(self, *, since: str = "", until: str = "",
+                     only_poc: bool = False, limit: int = 50) -> list[dict]:
+        """按**抓取日期窗**取漏洞条目（渗透测试与情报联动的入口）。
+
+        与 `list_articles(kind="cve")` 的区别：那个按 `is_priority/score` 排序（简报选材
+        口径），本方法按 **`fetched_at` 日期窗**过滤——「今天收集到的漏洞」问的是时间，
+        不是分数。`published_at` 不用：NVD 的 published 是漏洞披露日，可能是几年前的，
+        与「今天新进库」不是一回事。
+
+        日期口径：`fetched_at` 是 UTC ISO 串（`2026-10-22T03:11:05+00:00`），故只取
+        前 10 字符做字符串比较即可（ISO 8601 字典序 == 时间序）。`since`/`until` 均含端点，
+        空串=不限该端。
+
+        `only_poc=True` 只回有公开 PoC 的条目——**批量验证前的默认口径**：没 PoC 的漏洞
+        让 agent 现场从零写利用，投入产出比极差，且容易写成「猜着打」。
+        """
+        sql = "SELECT * FROM articles WHERE kind='cve'"
+        args: list = []
+        if since:
+            sql += " AND substr(fetched_at,1,10) >= ?"; args.append(str(since)[:10])
+        if until:
+            sql += " AND substr(fetched_at,1,10) <= ?"; args.append(str(until)[:10])
+        if only_poc:
+            sql += " AND has_poc=1"
+        sql += (" ORDER BY has_poc DESC, is_priority DESC, score DESC,"
+                " fetched_at DESC LIMIT ?")
+        args.append(max(1, min(int(limit or 50), 500)))
+        with self._lock:
+            rows = self._conn.execute(sql, args).fetchall()
+        return [dict(r) for r in rows]
+
+    def latest_article_date(self) -> str:
+        """最近一次抓取日（`fetched_at` 前 10 字符）；空库返回 ''。
+
+        工具层用它把「今天的情报」落到**真实有数据的那一天**——库可能今天还没抓，
+        直接按系统日期查会返回空，模型会误以为「今天没有新漏洞」。
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT MAX(substr(fetched_at,1,10)) d FROM articles").fetchone()
+        return str((row["d"] if row else "") or "")
+
     def mark_article(self, article_id: str, *, read: bool | None = None,
                      starred: bool | None = None) -> dict | None:
         with self._lock:

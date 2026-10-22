@@ -54,6 +54,7 @@ def create_thread(bb, project_id: str, agent_id: str, *,
                   title: str = "", parent_thread_id: str | None = None,
                   spawned_task: str = "",
                   provider: str = "", model: str = "",
+                  thinking_effort: str = "",
                   challenge_asset_id: str = "",
                   web_search: bool = False,
                   artex_intent_id: str = "",
@@ -70,12 +71,13 @@ def create_thread(bb, project_id: str, agent_id: str, *,
         bb.conn.execute(
             "INSERT INTO chat_threads(id, project_id, agent_id, title, status,"
             " parent_thread_id, spawned_task, todo, provider, model,"
-            " challenge_asset_id, web_search, artex_intent_id, artex_task_id,"
-            " created_at, updated_at)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " thinking_effort, challenge_asset_id, web_search, artex_intent_id,"
+            " artex_task_id, created_at, updated_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (tid, project_id, agent_id, title[:_TITLE_MAX], "idle",
              parent_thread_id, spawned_task, "[]",
              (provider or "").strip(), (model or "").strip(),
+             (thinking_effort or "").strip().lower(),
              (challenge_asset_id or "").strip(),
              1 if web_search else 0,
              (artex_intent_id or "").strip(),
@@ -111,6 +113,7 @@ def update_thread(bb, thread_id: str, *, title: str | None = None,
                   error: dict[str, Any] | None = None,
                   provider: str | None = None,
                   model: str | None = None,
+                  thinking_effort: str | None = None,
                   challenge_asset_id: str | None = None,
                   artex_task_id: str | None = None,
                   web_search: bool | None = None) -> dict[str, Any] | None:
@@ -138,6 +141,10 @@ def update_thread(bb, thread_id: str, *, title: str | None = None,
     if model is not None:
         sets.append("model=?")
         args.append((model or "").strip())
+    if thinking_effort is not None:
+        # '' = 清除覆写（回跟随供应商配置）；线程级思考强度（v48）
+        sets.append("thinking_effort=?")
+        args.append((thinking_effort or "").strip().lower())
     if status is not None:
         if status not in THREAD_STATUSES:
             raise ValueError(f"非法线程状态: {status}")

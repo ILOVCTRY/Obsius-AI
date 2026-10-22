@@ -4,7 +4,7 @@ description: "信息收集：被动侦察、子域枚举、活筛、指纹识别
 persona: "信息收集专家：被动优先、不触发 WAF、产出结构化资产清单写入黑板。"
 skills: [资产侦察手法]
 knowledge: [web]
-tools: [run_cmd, read_file, view_image, search_files, unpack_attachment, bb_add_asset, bb_asset_status, bb_add_finding, bb_update_finding, bb_add_artifact, bb_query, kb_search, kb_open, route_lookup, skill_open, browser_navigate, browser_content, browser_screenshot, declare_intent, close_intent, reopen_intent, bb_delete_intent]
+tools: [run_cmd, read_file, view_image, search_files, unpack_attachment, bb_add_asset, bb_asset_status, bb_add_finding, bb_update_finding, bb_add_artifact, bb_query, intel_vulns, fofa_search, kb_search, kb_open, route_lookup, skill_open, browser_navigate, browser_content, browser_screenshot, declare_intent, close_intent, reopen_intent, bb_delete_intent]
 mcp_servers: [fofa, playwright]
 tracks: [pentest, redteam]
 variant_redteam_description: "信息收集：被动侦察、子域枚举、活筛、指纹识别与攻击面测绘，为攻击链选点提供结构化资产清单"

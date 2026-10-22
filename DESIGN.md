@@ -500,6 +500,29 @@ events 表全量审计 + EventBus 同步落库、尽力广播；前端按游标�
 
 黑板资产的批量入口，落库恒走 register_asset 单一入口（E6 语义全复用，零旁路）。**M1 文件导入**：`core/assetimport.py` 解析器（表头别名匹配 0.9 优先 / 无表头逐列内容投票 ≥0.8 / 首条文本列兜底 title 0.5；CSV utf-8-sig→gbk 回退恒可用、xlsx openpyxl import-guard 缺失端点 503）→ `import_assets`（assets.py）：quiet=True 静音逐行 asset.new、整批单条 `asset.imported` 汇总事件（带 `batch_id` 预留按批撤销）；行路由 url（主机部域名无既有行先补登）/ host（**FOFA host 常回「ip:port」**——剥端口后 IP 形态有端口→service 无→host；域名→domain 且行带端点时域名+端点双锚点）/ ip+port→service / 仅 ip→host；domain 行先行排序提高 url 挂载率；**DNS 线程池预热**（16 workers 填充批次内缓存 `_DNS_WARM`，finally 即清——不做进程级负缓存，防 DNS 恢复后域名永远挂不上）。**M2 FOFA 中转查询**：`core/fofa.py` 纯客户端（qbase64 + fields 白名单 `ip,port,protocol,host,domain,title,product`〔不含 header/banner/cert 保 1 万档〕+ size clamp 10000〔文档默认最大 1 万；字段白名单不含 header/banner/cert 故不受其 2000 限制〕+ 页×条≤1 万 clamp）；错误四态签名分类——「已用完」QuotaExhausted **熔断绝换端点不重试**（防封号）/「账号无效」ConfigError /「key 不存在」AuthError /「[官方错误信息]」OfficialRetryable 换备用重试；网络错误/HTTP 非 200/非 JSON 也切备用（主 fofoapi.com 备 107.173.248.139）。端点面：GET/PUT /api/fofa/config（key 脱敏前4后4，PUT 空串=不修改防回显误覆盖）、POST /api/fofa/test（info_my 免费）、POST …/fofa/search（结果逐行 existing 三锚点 domain/service/host 标注，熔断 429/配置 400/其余 502）、POST …/assets/import/preview（multipart，不落库）、POST …/assets/import（mapping 二维数组或 dict 行两形态，≤10000 行，source 白名单 xlsx/csv/fofa/manual）。**key 安全**：只存 config/fofa.json（.gitignore），不入库不入日志；**信任边界**：查询语句与 key 明文流经第三方中转——敏感项目慎用（页面常驻注记）。**轨适用**：黑板「测绘」页签 CTF 轨不挂载（2026-09-23 用户反馈：CTF 无资产收集场景；track!=="ctf" 才进 tabs，与 funcs 按能力条件挂载同模式；M4c board_view 指向 mapping 时按既有回退机制落 findings）。
 
+## 渗透测试与情报联动（intel-pentest-link，2026-10-22 实施）
+
+把「今天有什么洞 → 哪些资产可能有这个洞 → 去验证」这条链显式成两个工具 + 一份机器可读范围，接在已有的情报库（E9 `articles` 带 `has_poc`/`poc_url`）与测绘客户端（`core/fofa.py`）之上。
+
+**工作流**：`intel_vulns` 取今日带 PoC 的漏洞 → 模型认产品指纹 → `fofa_search(owner_tag=…)` 圈同类资产 → `import_rows=true` 批量落库 → 外网打点专家逐台按 PoC 最小化验证。**中间那步（CVE → 指纹 → FOFA 语法）刻意留给模型**：认指纹是判断而非查表，代码猜产品名只会猜错。
+
+**两个工具**（`core/agent/tools.py`）：
+- `intel_vulns`：`IntelStore.recent_vulns(since, until, only_poc, limit)`——按 **`fetched_at` 日期窗**过滤（不用 `published_at`：那是披露日，可能是几年前的，与「今天新进库」不是一回事）；`only_poc` 默认 true（无 PoC 现场从零写利用投入产出比极差且易写成「猜着打」）。`date` 省略时用 `latest_article_date()` 落到**真实有数据的那天**——库可能今天还没抓，按系统日期查会返空让模型误判「今天没有新漏洞」。
+- `fofa_search`：`owner_tag` 时套资产范围（查询约束 + 结果过滤），`import_rows` 经 `import_assets` 单一入口批量落库（与前端测绘页同路径）。
+
+**资产范围（`core/asset_scope.py` + `packs/kb/安全红线/资产范围/<tag>.md`）**：与 `scope_policy.py` 严格分家——那个管「本项目允许打哪些目标」（授权），这个管「这个平台收录哪些资产」（选战场），资产最终仍要过 `check_project_scope`。文件每行一条：域名后缀（`*.edu.cn`）/ IP·CIDR / `fofa: <片段>`（查询侧约束）/ `说明:`（人读）。**域名行是结果侧校验、fofa 行是查询侧圈定**，两段串成「先圈后筛」：edu 场景单靠 `org=` 会带出误标主机，单靠后缀圈不全（教育资产不一定以 edu.cn 结尾）。匹配用**后缀边界**（`notedu.cn` 不被 `edu.cn` 命中）；IP 只按 CIDR 判、域名不反查 DNS（纯函数无网络，DNS 还会漂移）。
+
+**三条硬口径**：
+1. **范围缺失 = 拒绝查询**，不是「范围无限」。文件丢了/全空时 `AssetScope.empty` 为真，`fofa_search` 回 `[拒绝]` 并列出可用标签——否则一次手滑就把全网资产当目标。
+2. **先筛后导**。范围外行只计数、不列出、不导入；不能先登记再删（删之前已被后续派活扫到）。
+3. **配额耗尽立即停**。`QuotaExhausted` 回 `[拒绝]` 不重试不降级（继续请求可能封号），与 `fofa.py` 既有熔断口径同源。
+
+**发放面**：只给 `recon` / `external-entry`（yaml `tools`），主控与其它专家拿不到——FOFA 消耗配额，多一条路就多一份重复烧。`flags=plan_pre`（只读侦察，与 kb_search/web_search 同级，不受意图先行闸：侦察第一步就被「先声明意图」卡住会让整条链起不来）。
+
+**接线一致性**：`create_app(intel_dir=)` 会经 `core/intel/shared.set_default_dir()` 把工具层默认情报目录对齐——不对齐就是「情报面板看得到、Agent 查不到」。工具层走 `shared.get_shared()` 进程级单例（每线程一个 dispatcher，各建各的 `IntelStore` 会开出几十条连接且 `_lock` 实例级不互斥）。
+
+**技能交接点**：`资产侦察手法` §2.5（四步工作流表 + 范围红线）、`外网打点入口` §2.5（批量验证纪律：逐台闭环、批量≠并发轰炸、平台无害化边界不因批量放宽）。工具存在但技能不写交接点，模型不会串。
+
 ## 资产树归并、CDN 判定与根状态读时派生（asset-tree-derived-clean M1+M2，2026-09-24 实施）
 
 **树形态**：host(IP) 为根 → domain 子节点 → url/service 再挂。register_asset 为唯一登记入口：domain 自动 DNS 解析挂 host，url/service 的 IP 主机部挂 host，域名主机部只精确挂既有 domain（不猜 DNS、不造行）；同 IP 首域名记 `host.meta.primary_domain`、其余 `meta.alias`。**CDN 判定**（core/blackboard/cdn.py）：共享 CDN IP 上的域名彼此无关——解析命中 CDN 的 domain **保持根行、不建 host、不挂树**；优先级 `meta.cdn` 人工覆盖（True/False）> CNAME 后缀 > IP CIDR；清单= `packs/data/cdn_ranges.json` 随包基线 + `config/cdn.json` 同结构增补，坏文件 ValueError fail-fast；**拿不准默认非 CDN**（不并只是保守，误并才会错绑结论）。DNS 漂移（重报解析到新 IP/CDN）经 `set_asset_parent` 改挂/摘挂并发 `asset.reparent` 事件。

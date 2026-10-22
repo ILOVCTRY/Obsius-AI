@@ -27,6 +27,7 @@ import type {
   FeishuConfig, FeishuTestResult,
   ChatAgent, ChatThread, ChatThreadDetail, ChatMcpServer, ContextUsage,
   DiagFailures, DiagSessions, DiagSystemPrompt,
+  DiagFailover,
   DiagLlmDump, DiagRequestMeta, DiagRequestDetail, DiagRedlineTest,
   DiagSkillUsage,
   Team, TeamMemberInput, TeamPreflight, TeamRun,
@@ -764,10 +765,12 @@ export const api = {
     http<{ status: string; id: string; file: string }>("/api/experts", {
       method: "POST", body: JSON.stringify({ id, ...body }),
     }),
-  updateExpert: (id: string, body: ExpertBody) =>
-    http<{ status: string; id: string; file: string }>(`/api/experts/${id}`, {
-      method: "PUT", body: JSON.stringify(body),
-    }),
+  // auto=true 表示「改动即存」：后端比对内容相同则不写盘、并按窗口节流 .history
+  updateExpert: (id: string, body: ExpertBody, auto = false) =>
+    http<{ status: string; id: string; file: string; changed?: boolean }>(
+      `/api/experts/${id}${auto ? "?auto=1" : ""}`, {
+        method: "PUT", body: JSON.stringify(body),
+      }),
   deleteExpert: (id: string) =>
     http<{ status: string; trash: string }>(`/api/experts/${id}`, { method: "DELETE" }),
   // 场景档（M4a：只读清单，建项页预填组队/看板视图）
@@ -1212,12 +1215,14 @@ export const api = {
     http<ChatThread[]>(
       `/api/projects/${pid}/chat/threads${agentId ? `?agent_id=${encodeURIComponent(agentId)}` : ""}`),
   chatThreadCreate: (pid: string, agentId: string, title?: string,
-                     provider?: string, model?: string, webSearch?: boolean) =>
+                     provider?: string, model?: string, webSearch?: boolean,
+                     effort?: string) =>
     http<ChatThread>(`/api/projects/${pid}/chat/threads`, {
       method: "POST",
       body: JSON.stringify({ agent_id: agentId, title: title ?? null,
                              provider: provider || null, model: model || null,
-                             web_search: !!webSearch }),
+                             web_search: !!webSearch,
+                             thinking_effort: effort || null }),
     }),
   chatThread: (tid: string, afterId = 0) =>
     http<ChatThreadDetail>(`/api/chat/threads/${tid}?after_id=${afterId}`),
@@ -1230,6 +1235,12 @@ export const api = {
     }),
   chatThreadLlmReset: (tid: string) =>
     http<ChatThread>(`/api/chat/threads/${tid}/llm`, { method: "DELETE" }),
+  // 线程级思考强度（v48，thinking-effort，2026-10-21）：七档；'' = 清除覆写
+  // 跟随供应商配置。下一轮生效（与 chatThreadLlm 同口径）。
+  chatThreadEffort: (tid: string, effort: string) =>
+    http<ChatThread>(`/api/chat/threads/${tid}/effort`, {
+      method: "PUT", body: JSON.stringify({ effort }),
+    }),
   // 线程级联网搜索开关（v43，web-search-toggle，2026-10-19）：主控开 =
   // spawn 子代理默认继承；不进专家工具勾选。
   chatThreadWebSearch: (tid: string, enabled: boolean) =>
@@ -1266,6 +1277,18 @@ export const api = {
   // 技能/知识库使用统计（skill-usage，2026-10-21）：注入 vs 真打开、kb 零命中率。
   diagSkills: (pid: string, limit = 200) =>
     http<DiagSkillUsage>(`/api/projects/${pid}/diagnostics/skills?limit=${limit}`),
+  // 跨供应商兜底记录（provider-failover，2026-10-21）：每家失败 / 换家 / 全链耗尽。
+  diagLlmFailover: (pid: string,
+                   opts?: { kind?: string; category?: string; provider?: string; limit?: number }) => {
+    const q = new URLSearchParams()
+    if (opts?.kind) q.set("kind", opts.kind)
+    if (opts?.category) q.set("category", opts.category)
+    if (opts?.provider) q.set("provider", opts.provider)
+    if (opts?.limit) q.set("limit", String(opts.limit))
+    const s = q.toString()
+    return http<DiagFailover>(
+      `/api/projects/${pid}/diagnostics/llm-failover${s ? `?${s}` : ""}`)
+  },
   // 会话系统提示词快照（v39）：该会话最近一次实际下发的完整 system 正文。
   // 无快照 → 后端 404（前端按「尚无快照」提示，不视为错误）。
   diagSystemPrompt: (pid: string, sessionId: string) =>

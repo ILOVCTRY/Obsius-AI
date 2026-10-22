@@ -1062,6 +1062,102 @@ tool(
     },
 )
 
+# ---------- 渗透测试与情报联动（intel-pentest-link，2026-10-22） ----------
+#
+# 两个工具合起来是一条工作流：**今天有什么洞 → 哪些资产可能有这个洞 → 去验证**。
+# 分开注册而不做成一个大工具，是因为中间那步（把 CVE 换成指纹、把指纹换成 FOFA
+# 语法）是模型该做的判断，不是代码该猜的——工具只提供「查」和「圈」两个动作。
+#
+# 发放面刻意收窄（只给侦察/打点专家，不进主控面）：FOFA 查询消耗配额，主控若也
+# 有这条路会各自乱查、重复烧配额；主控要情报时看黑板与派活即可。
+tool(
+    'intel_vulns',
+    group='知识',
+    flags=("plan_pre",),
+    description=(
+        '查**今日情报**里收集到的漏洞（情报模块全局库，与项目黑板无关）。'
+        '默认口径=最近一次抓取日的 CVE 条目，且 `only_poc` 默认 true（只回有公开 PoC 的）'
+        '——没 PoC 的漏洞现场从零写利用投入产出比极差。'
+        '返回每条的 CVE 号、标题、摘要、PoC 链接、命中方向与分值。'
+        '**这是「按情报找目标」的起点**：拿到 CVE 后先判断它对应的产品/组件指纹'
+        '（product/app/body 关键字），再用 fofa_search 圈同类资产。'
+        '情报库为空或当日没抓到数据时明确告知，不要据此臆测漏洞。'
+    ),
+    input_schema={
+        'type': 'object',
+        'properties': {
+            'date': {
+                'type': 'string',
+                'description': '抓取日期 YYYY-MM-DD；省略=最近一次抓取日（推荐省略）',
+            },
+            'days': {
+                'type': 'integer',
+                'description': '回看天数（含 date 当天），默认 1；想连看几天填 3/7',
+            },
+            'only_poc': {
+                'type': 'boolean',
+                'description': 'true（默认）=只回有公开 PoC/在野利用证据的；false=全部 CVE',
+            },
+            'limit': {
+                'type': 'integer',
+                'description': '返回条数上限，默认 30，最大 200',
+            },
+            'keyword': {
+                'type': 'string',
+                'description': '可选：按标题/摘要关键字过滤（如 "致远"、"Spring"、"任意文件读取"）',
+            },
+        },
+        'required': [],
+    },
+)
+
+tool(
+    'fofa_search',
+    group='知识',
+    flags=("plan_pre",),
+    description=(
+        'FOFA 网络空间测绘查询（**消耗配额**，中转第三方，敏感项目慎用）。'
+        '传 `owner_tag`（如 edusrc/osrc/ysrc）时自动套用该平台的**资产范围**'
+        '（`安全红线/资产范围/<tag>.md` 的 fofa 片段 + 域名/IP 后缀），并对结果做范围校验：'
+        '范围内计入 `in_scope`，范围外单独列出**不导入**——避免把不属于该平台的资产圈进来打。'
+        '`query` 是你的指纹/语法（如 `product="致远OA"`、`app="Apache-Solr"`），'
+        '与范围片段按 && 串联；不传 owner_tag 时原样使用 query（此时自己保证范围）。'
+        '`import_rows=true` 时把**范围内**的行经 register_asset 批量登记进黑板'
+        '（同值合并、整批一条汇总事件），回执给 created/merged 计数；默认只查询不落库。'
+        '配额耗尽会直接报错并停止（继续请求可能封号），不要重试。'
+    ),
+    input_schema={
+        'type': 'object',
+        'properties': {
+            'query': {
+                'type': 'string',
+                'description': ('FOFA 查询语法（指纹/产品/标题等），如 product="致远OA"、'
+                                'app="Apache-Solr" && country="CN"；不要写 key 与 qbase64'),
+            },
+            'owner_tag': {
+                'type': 'string',
+                'description': ('平台标签（edusrc/osrc/ysrc…）——套用该平台的资产范围做'
+                                '查询约束与结果校验；省略=不套范围（自己保证 query 已限定）'),
+            },
+            'size': {
+                'type': 'integer',
+                'description': '返回条数，默认 50，最大 1000（每条消耗等量配额，别贪多）',
+            },
+            'page': {
+                'type': 'integer',
+                'description': '页码，默认 1',
+            },
+            'import_rows': {
+                'type': 'boolean',
+                'description': 'true=把范围内结果批量登记进黑板（默认 false 只查询）',
+            },
+        },
+        'required': [
+            'query',
+        ],
+    },
+)
+
 tool(
     'bb_query',
     group='黑板',

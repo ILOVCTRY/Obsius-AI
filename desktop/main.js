@@ -1,4 +1,4 @@
-const { app, BrowserWindow, WebContentsView, ipcMain, Menu, session, shell } = require("electron")
+const { app, BrowserWindow, WebContentsView, ipcMain, Menu, session, shell, nativeTheme } = require("electron")
 const { spawn } = require("child_process")
 const path = require("path")
 const fs = require("fs")
@@ -253,6 +253,37 @@ function setBrowserViewsVisible(visible) {
   }
 }
 
+// ---- 标签页画布底色（2026-10-22 发暗事故）----
+// 这里原先写死成 UI 的深色 `#111419`，但标签页渲染的是**任意外站/文件**，不是平台的
+// 深色主题：Chromium 的纯文本视图（直接打开 .js/.txt/.json）和未自绘背景的网页都是
+// **透明画布**，文字颜色只跟 `prefers-color-scheme` 走。本机该值为浅色 → 文字是黑的
+// → 黑字画在近黑底上，整页「阴暗看不清」（实测底 sum=62、文字 sum≈0，对比度趋近 0；
+// 同一 URL 用 Chrome/Edge 打开是白底黑字）。
+// 修法：画布底色与文字颜色**同源**——取页面自己的 `prefers-color-scheme`（取不到时
+// 退回 `nativeTheme.shouldUseDarkColors`，二者正常一致）。写死任一端都会在另一种系统
+// 配色下翻车：深色系统下白底会变成白底白字，一样看不见。
+const CANVAS_DARK = "#111419"
+const CANVAS_LIGHT = "#ffffff"
+
+async function syncTabCanvas(tab) {
+  if (tab.type !== "browser" || !tab.view) return
+  let dark = nativeTheme.shouldUseDarkColors
+  try {
+    const pageDark = await tab.view.webContents.executeJavaScript(
+      "matchMedia('(prefers-color-scheme: dark)').matches")
+    if (typeof pageDark === "boolean") dark = pageDark
+  } catch (_) { /* 页面未就绪/已销毁：沿用 nativeTheme 判定 */ }
+  const color = dark ? CANVAS_DARK : CANVAS_LIGHT
+  if (tab.canvasColor === color) return
+  tab.canvasColor = color
+  try { tab.view.setBackgroundColor(color) } catch (_) { /* 视图已销毁 */ }
+}
+
+/** 系统配色切换时重算全部标签页画布（只影响透明画布页面，带背景的站不受影响）。 */
+function syncAllTabCanvas() {
+  for (const tab of tabs.values()) void syncTabCanvas(tab)
+}
+
 function createBrowserTab(pid, requestedSid) {
   const id = `browser-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
   const hasHuman = Array.from(tabs.values()).some((tab) => tab.type === "browser" && tab.sid === "human-main")
@@ -260,7 +291,8 @@ function createBrowserTab(pid, requestedSid) {
   const view = new WebContentsView({
     webPreferences: { contextIsolation: true, sandbox: true },
   })
-  view.setBackgroundColor("#111419")
+  // 首帧先用系统判定（避免白闪），dom-ready 后按页面实际配色校正。
+  view.setBackgroundColor(nativeTheme.shouldUseDarkColors ? CANVAS_DARK : CANVAS_LIGHT)
   mainWindow.contentView.addChildView(view)
   const tab = { id, sid, pid, type: "browser", title: "新标签页", url: "about:blank", view, attached: false }
   tabs.set(id, tab); activateTab(id)
@@ -284,6 +316,7 @@ function createBrowserTab(pid, requestedSid) {
   })
   view.webContents.on("dom-ready", async () => {
     try { await view.webContents.executeJavaScript(`window.name = ${JSON.stringify(sid)}`) } catch (_) {}
+    void syncTabCanvas(tab)   // 画布底色按页面实际配色校正（发暗事故）
     await postAttach(tab)
   })
   view.webContents.on("render-process-gone", () => { tab.error = "页面渲染进程已退出"; sendTabs() })
@@ -405,6 +438,11 @@ app.whenReady().then(async () => {
   // application menu out of the content area on every desktop platform.
   Menu.setApplicationMenu(null)
   ipcMain.handle("tabs:list", () => Array.from(tabs.values()).map((tab) => ({ id: tab.id, sid: tab.sid, pid: tab.pid || "", type: tab.type, title: tab.title, url: tab.url })))
+  // 系统配色切换（亮/暗）时重算标签页画布，见 syncTabCanvas 注释。
+  nativeTheme.on("updated", () => {
+    logLine(`系统配色变化 shouldUseDark=${nativeTheme.shouldUseDarkColors} → 重算标签页画布`)
+    syncAllTabCanvas()
+  })
   ipcMain.handle("window:minimize", () => mainWindow?.minimize())
   ipcMain.handle("window:toggle-maximize", () => {
     if (!mainWindow) return false

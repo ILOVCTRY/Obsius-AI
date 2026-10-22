@@ -11,33 +11,51 @@ import type { ChallengeFlag } from "@/lib/types"
  *
  *  `wakeKey` 变化即立即重拉（对话页监听到 `challenge.flag.recorded` 时传事件 id），
  *  让卡片「即弹」而不等下一拍轮询。轮询间隔 3s 与 `usePendingApprovals` 同口径。
+ *
+ *  **顺带返回 `quota` / `accepted` / `hintOf`**（flag-hint，2026-10-21）：卡片的
+ *  确认按钮必须写明后果，而后果取决于「这题有几条 flag」——单 flag 题确认即解出，
+ *  6 flag 题确认只是 1/6、探索会继续。此前卡片一律写「确认 = 该题判为解出」，
+ *  在多 flag 题里是**错的**，用户据此以为题目已完（而 agent 那边还在找剩下的）。
  */
 export function useCandidateFlags(challengeId: string | null | undefined,
                                   wakeKey: string | number = 0) {
   const [flags, setFlags] = useState<ChallengeFlag[]>([])
+  const [quota, setQuota] = useState(1)
+  const [accepted, setAccepted] = useState(0)
+  const [hints, setHints] = useState<string[]>([])
   const [loading, setLoading] = useState(false)
+
+  const apply = useCallback((d: {
+    flags?: ChallengeFlag[]; flag_hints?: string[]
+    state?: { quota?: number; accepted?: number }
+  }) => {
+    setFlags((d.flags ?? []).filter((f) => f.verdict === "pending"))
+    setQuota(Number(d.state?.quota ?? 1) || 1)
+    setAccepted(Number(d.state?.accepted ?? 0) || 0)
+    setHints(Array.isArray(d.flag_hints) ? d.flag_hints : [])
+  }, [])
 
   const refresh = useCallback(() => {
     if (!challengeId) { setFlags([]); return }
     setLoading(true)
     api.challengeFlags(challengeId)
-      .then((d) => setFlags((d.flags ?? []).filter((f) => f.verdict === "pending")))
+      .then(apply)
       .catch(() => { /* 轮询失败静默，下一拍重试 */ })
       .finally(() => setLoading(false))
-  }, [challengeId])
+  }, [challengeId, apply])
 
   useEffect(() => {
     if (!challengeId) { setFlags([]); return }
     let alive = true
     const tick = () => {
       api.challengeFlags(challengeId)
-        .then((d) => { if (alive) setFlags((d.flags ?? []).filter((f) => f.verdict === "pending")) })
+        .then((d) => { if (alive) apply(d) })
         .catch(() => { /* 同上 */ })
     }
     tick()
     const t = setInterval(tick, 3000)
     return () => { alive = false; clearInterval(t) }
-  }, [challengeId, wakeKey])
+  }, [challengeId, wakeKey, apply])
 
-  return { flags, loading, refresh }
+  return { flags, quota, accepted, hints, loading, refresh }
 }

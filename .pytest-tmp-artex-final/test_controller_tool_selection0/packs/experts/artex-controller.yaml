@@ -1,3 +1,0 @@
-name: ARTEX主控
-tracks: [pentest]
-tools: [bb_query, kb_search, artex_plan, artex_status]

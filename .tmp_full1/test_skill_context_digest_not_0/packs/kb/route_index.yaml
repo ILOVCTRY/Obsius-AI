@@ -1,7 +1,0 @@
-entries:
-  - point: 文件上传测试
-    match: [文件上传, upload]
-    kb: web/poc/文件上传.md
-    tags: [demo]
-  - point: 越权检测
-    kb: web/poc/越权.md

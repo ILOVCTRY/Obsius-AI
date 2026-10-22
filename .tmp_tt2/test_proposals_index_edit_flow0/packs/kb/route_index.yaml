@@ -1,8 +1,0 @@
-entries:
-  - point: 他域条目
-    kb: crypto/refs/rsa.md
-  - point: 原条目
-    kb: web/poc/tduck.md
-  - point: 新增条目
-    kb: web/poc/越权检测.md
-    tags: [file-upload-test]

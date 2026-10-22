@@ -1,1 +1,0 @@
-{"impacket": {"kind": "python-tool", "pip": ["impacket"]}, "nmap": {"kind": "binary", "bin": {"windows": "nmap.exe"}}}

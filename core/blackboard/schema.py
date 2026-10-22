@@ -9,7 +9,13 @@
 
 import sqlite3
 
-SCHEMA_VERSION = 47
+SCHEMA_VERSION = 48
+
+# v47→v48（线程级思考强度，thinking-effort，2026-10-21）：chat_threads 幂等补
+# thinking_effort（七档：minimal/low/medium/high/xhigh/max/ultra，''=跟随该供应商
+# 的配置）。工作台 composer 的模型浮层里，模型与强度是**两个独立的线程级覆写**：
+# 同一个模型在不同任务上要的深度不同（扫描要快、逆向要深），把它绑在供应商配置上
+# 就没法按会话调。七档→线上值的归并见 core/llm/effort.py（唯一真源）。
 
 # v46→v47（CTF 题目 flag 台账，challenge-flag-ledger，2026-10-19）：新增
 # challenge_flags 表——flag 从 findings 迁出独立建模。findings 的「正式漏洞
@@ -588,6 +594,12 @@ CREATE TABLE IF NOT EXISTS challenge_flags (
     author          TEXT NOT NULL DEFAULT '',
     session_id      TEXT NOT NULL DEFAULT '',
     finding_id      TEXT NOT NULL DEFAULT '',  -- 关联的过程性 finding（可空，仅留痕）
+    -- v48（flag-hint，2026-10-21）：本行对应题面「第几条 flag」的提示（0 基）。
+    -- -1 = 未指定，确认时按 accepted 顺序推断（人工逐条确认时通常就对）。
+    -- 有它才能把「这条 flag 的题面提示」一并告诉子 agent——它据此判断这条是不是
+    -- 自己正在分析的方向，从而决定收尾还是继续。只给 flag 原文（flag{1a2b}）时
+    -- 它对方向的指示性几乎为零，模型只能猜。
+    hint_index      INTEGER NOT NULL DEFAULT -1,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
     UNIQUE(project_id, challenge_id, flag)
@@ -614,6 +626,7 @@ CREATE TABLE IF NOT EXISTS chat_threads (
     error            TEXT NOT NULL DEFAULT '',      -- JSON：最近一轮失败 {category,message,hint,detail}（v28；''=无）
     provider         TEXT NOT NULL DEFAULT '',      -- 线程级模型供应商覆写（v37；''=跟随全局默认）
     model            TEXT NOT NULL DEFAULT '',      -- 线程级模型 id 覆写（v37；''=该供应商默认模型）
+    thinking_effort  TEXT NOT NULL DEFAULT '',      -- 线程级思考强度（v48；七档，''=跟随供应商配置，见 core/llm/effort.py）
     challenge_asset_id TEXT NOT NULL DEFAULT '',    -- 本线程归属的题目资产 id（v38；''=未绑定，CTF 轨用）
     web_search      INTEGER NOT NULL DEFAULT 0,     -- 联网搜索开关（v43；0=关。主控开=子代理默认继承，见 core/websearch.py）
     artex_intent_id  TEXT NOT NULL DEFAULT '',      -- v46：关联 ARTEX Intent（支撑 Worker trace 检索）
@@ -838,7 +851,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
     - v38→v39：session_system_prompts 由 DDL 的 IF NOT EXISTS 直接建表（诊断页
       「查看系统提示词」快照，无 ALTER，旧库打开即建）。
     - v42→v43：chat_threads 幂等补 web_search（联网搜索开关，0/1，主控开=
-      子代理继承，见文件头版本注释）。历史行默认 0 不回填。"""
+      子代理继承，见文件头版本注释）。历史行默认 0 不回填。
+    - v47→v48：chat_threads 幂等补 thinking_effort（线程级思考强度，''=跟随
+      供应商配置，见文件头版本注释）。历史行保持空值——空 ≠ high，语义是
+      「没覆写」，回填 high 会把「跟随供应商」变成「钉死 high」。"""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(projects)")}
     if "track" not in cols:
         conn.execute("ALTER TABLE projects ADD COLUMN track TEXT NOT NULL DEFAULT ''")
@@ -858,6 +874,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if chat_cols and "model" not in chat_cols:  # v37（线程级模型覆写）
         conn.execute(
             "ALTER TABLE chat_threads ADD COLUMN model TEXT NOT NULL DEFAULT ''")
+    if chat_cols and "thinking_effort" not in chat_cols:  # v48（线程级思考强度）
+        conn.execute(
+            "ALTER TABLE chat_threads ADD COLUMN thinking_effort TEXT NOT NULL DEFAULT ''")
     if chat_cols and "challenge_asset_id" not in chat_cols:  # v38（线程归属题目）
         conn.execute(
             "ALTER TABLE chat_threads ADD COLUMN challenge_asset_id TEXT NOT NULL DEFAULT ''")
@@ -935,6 +954,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if clink_cols and "trace_ref" not in clink_cols:  # v19（物化幂等键）
         conn.execute(
             "ALTER TABLE chain_links ADD COLUMN trace_ref TEXT NOT NULL DEFAULT ''")
+    # v48（flag-hint，2026-10-21）：台账行补 hint_index。旧库该列不存在，
+    # 新建库 DDL 已含——两条路都要幂等，故这里只判存在性再 ALTER。
+    cflag_cols = {r[1] for r in conn.execute("PRAGMA table_info(challenge_flags)")}
+    if cflag_cols and "hint_index" not in cflag_cols:
+        conn.execute(
+            "ALTER TABLE challenge_flags ADD COLUMN hint_index INTEGER NOT NULL DEFAULT -1")
     os_tables = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='orchestrator_state'")}
     if os_tables:

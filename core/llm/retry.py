@@ -2,7 +2,7 @@
 
 import time
 
-from core.llm.provider import LLMError
+from core.llm.provider import ContextOverflowError, LLMError
 
 # 仅把已知的上游暂态状态纳入标准 5xx 重试；鉴权/参数类 5xx 不盲目重放。
 HTTP_5XX_STATUS = frozenset({500, 502, 503, 504})
@@ -104,10 +104,78 @@ def retry_note(done: int, budget: int) -> str:
     return f"（已重试 {done}/{budget} 次）"
 
 
+ABORT_MESSAGE = "已中断"   # sleep_cancellable / 流式中止统一用这条（勿改字面量）
+
+
+def classify_provider_error(e: BaseException) -> str:
+    """异常 → 策略类别（诊断的 ``category`` 字段也用这组值）。
+
+    类别：``aborted / partial / truncated / context / auth / quota / rate_limit /
+    cooldown / channel_block / upstream / network / bad_request / unknown``。
+    """
+    msg = str(e)
+    low = msg.lower()
+    status = int(getattr(e, "status", 0) or 0)
+    if msg == ABORT_MESSAGE or "已中断" in msg:
+        return "aborted"
+    if getattr(e, "partial", False):
+        return "partial"
+    if getattr(e, "truncated", False) or "工具参数流截断" in msg:
+        return "truncated"
+    if isinstance(e, ContextOverflowError) or (
+            status in (400, 413) and ("too long" in low or "input length" in low
+                                      or "context length" in low
+                                      or "maximum context" in low)):
+        return "context"
+    # 冷却 / 渠道校验必须先于 bad_request：两者都是网关塞进 400 的**暂态**故障，
+    # 而且上游文案本身就在喊「try another model」——正是该换供应商的场合。
+    if is_model_cooldown_error(status, msg) or (
+            "per-model cooldown" in low or "on every account" in low
+            or "try another model" in low):
+        return "cooldown"
+    if is_channel_verification_error(status, msg) or (
+            "conversation id missing" in low or "channel verification" in low
+            or "11128" in low or "渠道校验" in msg or "请求被拦截" in msg):
+        return "channel_block"
+    if status == 429 or "429" in msg or "rate limit" in low or "限流" in msg:
+        return "rate_limit"
+    if status in (401, 403) or "unauthorized" in low \
+            or "authentication" in low or "invalid api key" in low:
+        return "auth"
+    if status == 402 or "余额" in msg or "insufficient" in low or "quota" in low:
+        return "quota"
+    if status in (500, 502, 503, 504, 520, 524) or "upstream" in low \
+            or "temporarily unavailable" in low or "service unavailable" in low \
+            or "bad gateway" in low or "gateway timeout" in low or "overloaded" in low:
+        return "upstream"
+    if isinstance(e, (TimeoutError, ConnectionError)) \
+            or "网络错误" in msg or "网络连接失败" in msg or "流式传输中断" in msg \
+            or "connection reset" in low or "connection aborted" in low \
+            or "remote host" in low or "incomplete chunked read" in low \
+            or "peer closed connection" in low:
+        return "network"
+    if status in (400, 413) or "invalidparameter" in low:
+        return "bad_request"
+    return "unknown"
+
+
+# 不值得换供应商的类别（换一家也不会更好，或换了会破坏上层已有的自愈逻辑）：
+#   partial       已吐增量，流不可重放 → 上层走「接着续写」，换家重发会让半截答复重复上屏
+#   truncated     工具参数流截断 → 上层整轮重发（最后一轮降级非流式），换家会绕过该降级
+#   context       输入超限 → 上层强制压缩后重试（reactive compact），换家等于放弃压缩
+#   bad_request   请求本身不合法（非冷却/非渠检）→ 换家同样 400，白等一圈
+#   aborted       人类点了停止
+_NO_FAILOVER = frozenset({"aborted", "partial", "truncated", "context", "bad_request"})
+
+
+def should_failover(e: BaseException) -> bool:
+    """该异常是否值得「换下一个供应商」。"""
+    return classify_provider_error(e) not in _NO_FAILOVER
+
+
 # 可中断退避的轮询粒度。0.2s 让「停止」在体感上是立刻生效（前端 chat.retry
 # 一直转圈时点停止，最多 0.2s 就断），同时不至于空转烧 CPU。
 CANCEL_POLL_SLICE = 0.2
-
 
 def sleep_cancellable(seconds: float, should_cancel=None) -> None:
     """退避等待，期间轮询 ``should_cancel``；命中立即抛 ``LLMError("已中断")``。

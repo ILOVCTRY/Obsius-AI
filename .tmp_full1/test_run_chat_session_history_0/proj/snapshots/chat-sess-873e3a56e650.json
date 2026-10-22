@@ -1,1 +1,0 @@
-{"session_id": "sess-873e3a56e650", "messages": [{"role": "user", "content": "💬 人类引导：\n- 识别下CMS"}, {"role": "assistant", "content": "第一轮：目标站是WordPress。"}, {"role": "user", "content": "💬 人类引导：\n- 那下一步呢"}, {"role": "assistant", "content": "接着上轮：WordPress 建议跑 wpscan。"}]}

@@ -193,8 +193,22 @@ BLOCK_TEMPLATE = """__START__ ---------- 毛玻璃质感 + 背景壁纸（2026-1
      --glass-settings-side-a（暗 .44→有效 .42；.wb-aside 为 .55×.72≈.40），
      并同 .wb-aside 进糊化名单；
    · 侧栏右缘描边从实色 --theme-raw-a1833752c0 换玻璃发丝线 --border（与
-     .app-nav 边框退透明、改由 .nav-sep 出线同族）。 */
+     .app-nav 边框退透明、改由 .nav-sep 出线同族）。
+   · **实色带必须按 `.pt-9` 门控**（2026-10-21 Nan 报「红色方框圈住的部分颜色太深，
+     与上下都不协调」）：这条带的存在理由是给**首页拖动区**（`pt-9`，子元素从 36px
+     起排）垫不透明底；但项目内有 `.topbar` 占 0–64px，shell 从 64px 起且**不带
+     pt-9**，子元素直接从 0 排——此时满档实色带（oklch .15 ≈ rgb(21,10,13)）
+     没有任何东西要垫，却仍横跨侧栏与内容区，把「渗透测试 / Web」和专家池首行
+     （「＋新建专家」「experts/worker.yaml」）压成一条**比上方 topbar(69,60,63)、
+     下方 wash(45,36,38) 都深得多**的近黑横条。半透明的子面板（侧栏 .42 / 内容
+     一族的 alpha）会把这条带透上来，于是形成上下都不是一族的断层。
+     判据是「有没有拖动区要垫」而不是「是不是设置页」：故 selector 收窄到
+     `.settings-shell.pt-9`，无 pt-9 时 shell 显式透明（否则会露出非玻璃模式那条
+     全不透的 135deg 渐变，玻璃直接失效）。 */
 [data-glass="1"] .settings-shell {
+  background: transparent;
+}
+[data-glass="1"] .settings-shell.pt-9 {
   background: linear-gradient(180deg,
     var(--theme-raw-8fcfcc3618) 0,
     var(--theme-raw-8fcfcc3618) 36px,

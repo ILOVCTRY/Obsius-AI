@@ -1,10 +1,12 @@
 import http.client
 import json
+import logging
 import ssl
 import time
 from typing import Any
 
 from core.llm import parsing
+from core.llm import effort as effort_mod
 from core.llm.anthropic_compat import StreamTransport, Transport
 from core.llm.dump import capture_request as dump_request_capture
 from core.llm.provider import (LLMResponse, ToolCall, Usage, LLMError,
@@ -20,6 +22,8 @@ from core.llm.sdk_engine import RawFallback, build_openai_transports
 
 CHAT_COMPLETIONS = "openai-chat-completions"
 RESPONSES = "openai-responses"
+
+log = logging.getLogger(__name__)
 
 # Cloudflare 专有暂态状态：520=边缘代理从源站拿到未知/无效响应，524=已连上源站
 # 但源站在边缘超时窗口内没返回。与标准 5xx 一并纳入统一重试预算（2026-10-07
@@ -75,10 +79,12 @@ class OpenAICompatProvider:
         # 塞图片块被 400 打死整轮。真实能力由网关/模型决定，配置是唯一真源。
         self.supports_vision = bool(supports_vision)
         self._enable_thinking = enable_thinking
-        self.thinking_effort = (str(thinking_effort or "high").strip().lower()
-                                if enable_thinking else "high")
-        if self.thinking_effort not in {"low", "medium", "high"}:
-            self.thinking_effort = "high"
+        # 思考强度（thinking-effort，2026-10-21）：这里收的是**七档 UI 值**
+        # （minimal/low/medium/high/xhigh/max/ultra），下发前经 effort.wire()
+        # 归并成网关认识的三种（low/high/max）。直接收三档是旧行为，
+        # 七档原样下发会被多数网关 400 拒掉——而 400 的补救是「剥掉整个思考链」，
+        # 等于用户拖到 max 反而丢了思考。
+        self.thinking_effort = effort_mod.normalize(thinking_effort)
         self._thinking_disabled = False
         # 网关不支持 stream_options（400 文案含 stream_options）时置位——本实例
         # 不再下发，退化为「流式无 usage」（2026-10-13 缓存命中率）。
@@ -229,9 +235,23 @@ class OpenAICompatProvider:
                 message = str((data or {}).get("error", {}).get("message", "请求失败"))
                 if (self._enable_thinking and not self._thinking_disabled
                         and status == 400 and "reason" in message.lower()):
-                    self._thinking_disabled = True
-                    body.pop("reasoning_effort", None)
-                    body.pop("reasoning", None)
+                    # effort 被拒（thinking-effort，2026-10-21）：先**降一档**重试，
+                    # 降无可降才剥掉整个思考参数。此前一遇 400 就剥——用户在 UI
+                    # 上拖到 max 时，若该网关只认到 high，结果是「选了最高强度反而
+                    # 完全没思考」，与意图相反且无任何提示。max→high 通常一次就过。
+                    lower = effort_mod.downgrade(self.thinking_effort)
+                    if lower is not None:
+                        was = effort_mod.wire(self.thinking_effort)
+                        self.thinking_effort = lower
+                        if "reasoning_effort" in body:
+                            body["reasoning_effort"] = lower
+                        if isinstance(body.get("reasoning"), dict):
+                            body["reasoning"] = {"effort": lower}
+                        log.warning("思考强度 %s 被网关拒绝，降到 %s 重试", was, lower)
+                    else:
+                        self._thinking_disabled = True
+                        body.pop("reasoning_effort", None)
+                        body.pop("reasoning", None)
                     payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
                     continue
                 if (not self._stream_options_disabled and status == 400
@@ -321,7 +341,8 @@ class OpenAICompatProvider:
             if temperature is not None:
                 body["temperature"] = temperature
             if self._enable_thinking and not self._thinking_disabled:
-                body["reasoning_effort"] = self.thinking_effort
+                # 七档 → 线上值（低档归 low、中档归 high、高档归 max）
+                body["reasoning_effort"] = effort_mod.wire(self.thinking_effort)
             if inline_system:
                 body["messages"] = self._ensure_system_in_user(
                     body["messages"], self._system_text(system))
@@ -334,7 +355,7 @@ class OpenAICompatProvider:
         if temperature is not None:
             body["temperature"] = temperature
         if self._enable_thinking and not self._thinking_disabled:
-            body["reasoning"] = {"effort": self.thinking_effort}
+            body["reasoning"] = {"effort": effort_mod.wire(self.thinking_effort)}
         if inline_system:
             body["input"] = self._ensure_system_in_user(
                 body["input"], self._system_text(system))

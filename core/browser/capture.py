@@ -36,6 +36,11 @@ __all__ = ["CaptureTap", "normalize_body", "TEXTUAL_MIME_RE"]
 _TEXT_MIME_SUBSTR = ("json", "html", "xml", "javascript", "x-www-form-urlencoded",
                      "graphql", "csv", "event-stream")
 
+# Playwright resource_type 里属于流式/长连接的几类：``route.fetch()`` 会等整个响应体
+# 收完才返回，对 SSE / WebSocket 升级请求 **永不返回** → 该页所有请求堵在路由里。
+_STREAM_RESOURCE_TYPES = frozenset({"eventsource", "websocket"})
+
+
 
 def _is_textual_mime(mime: str) -> bool:
     m = (mime or "").lower()
@@ -83,11 +88,65 @@ class CaptureTap:
                 return sid
         return None
 
+    def _belongs_to_foreign_page(self, request) -> bool:
+        """请求是否来自「页面存在但不属于本实例」的页面（Electron 的平台 UI 主窗）。
+
+        必须与「拿不到页面归属」（service worker / 无法解析）区分开：前者是别人的
+        页面，绝不能碰；后者仍按原口径抓包（``sid=None`` 入库），否则会白白丢掉
+        service worker 流量。
+        """
+        try:
+            page = request.frame.page
+        except Exception:  # noqa: BLE001 —— service worker 等无页面归属
+            return False
+        if page is None:
+            return False
+        return all(entry.page is not page for entry in self.instance._pages.values())
+
+    @staticmethod
+    def _is_event_stream(request) -> bool:
+        """流式响应（SSE）候选：``route.fetch()`` 对无限流**永不返回**。
+
+        EventSource 必带 ``Accept: text/event-stream``；同源 fetch 读流的调用方通常
+        不会带这个头，故 resource_type 一并判定。
+        """
+        try:
+            if str(getattr(request, "resource_type", "") or "") in _STREAM_RESOURCE_TYPES:
+                return True
+            for key, value in (getattr(request, "headers", None) or {}).items():
+                if str(key).lower() == "accept":
+                    return "text/event-stream" in str(value or "").lower()
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
     async def _on_route(self, route) -> None:
         inst = self.instance
         request = route.request
         hub = getattr(inst, "_intercept", None)
         sid = self._sid_of(request)
+        # ---- ⓪ 只接管「本实例自己的页面」----
+        # Electron 桌面壳里，平台 UI 主窗与各浏览器标签同处一个 CDP context
+        # （pool._ensure_ctx 取 contexts[0]），``ctx.route`` 会把**前端自己的**
+        # ``/api/*`` 请求一起接管（2026-10-22 事故：http_history 里混进 2337 条
+        # ``127.0.0.1:8420/api/...`` 自抓记录）。后果正是「用了内置浏览器，前端就
+        # 拉不到后端数据」：
+        #   ① 每条 UI 请求被 route.fetch() 二次转发 —— 绕开缓存、延迟翻倍；
+        #   ② 拦截开关一开，UI 自己的请求被挂进人工裁决队列，最多卡 120s 才放行；
+        #   ③ 前端 SSE（EventSource）被 route.fetch() 无限期挂住 —— 流永不返回，
+        #      事件时间线整块死掉。
+
+        # ``_belongs_to_foreign_page`` 为真 = 不是本实例的会话页面（Electron 架构下
+        # 的平台 UI 主窗、其它项目实例的标签），一律原文放行、不抓不拦不改。
+        # 注意不能退化成「sid is None 就跳过」：service worker 等本就拿不到页面归属，
+        # 那样的流量仍要按原口径抓包入库。
+        if self._belongs_to_foreign_page(request):
+            await self._continue(route)
+            return
+        # ---- ⓪′ 流式响应不进 route（fetch 永不返回 → 页面请求全线堵死）----
+        if self._is_event_stream(request):
+            await self._continue(route)
+            return
         # ---- ① 请求向拦截（fetch 前 hold） ----
         req_hold = None
         if hub is not None and hub.req_enabled:
