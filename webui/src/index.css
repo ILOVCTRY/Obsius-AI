@@ -1884,6 +1884,10 @@
 .wb-todo { position: sticky; top: calc(-1 * var(--stream-pad-top, 20px)); z-index: 6; margin-bottom: 14px; overflow: hidden; border: 1px solid var(--theme-raw-c9c199ec46); border-radius: 10px; background-color: oklch(var(--surface-1-lch)); background-image: linear-gradient(180deg, var(--theme-raw-deaf08acbf), transparent 70%), linear-gradient(var(--theme-raw-ff24ae504f), var(--theme-raw-ff24ae504f)); box-shadow: 0 10px 22px -10px var(--theme-raw-7846e7d7de); }
 .wb-todo-head { display: flex; gap: 8px; align-items: center; padding: 9px 13px 7px; color: var(--primary); font-size: 11px; font-weight: 700; letter-spacing: .02em; }
 .wb-todo-count { margin-left: auto; color: var(--muted-foreground); font-family: var(--font-mono); font-size: 9px; }
+.wb-todo-toggle { display: inline-grid; width: 20px; height: 20px; margin: -4px -5px -4px 3px; place-items: center; border: 0; border-radius: 5px; background: transparent; color: var(--muted-foreground); transition: color .16s, background .16s, transform .16s; }
+.wb-todo-toggle:hover { background: var(--theme-raw-a4dcc6a258); color: var(--foreground); }
+.wb-todo-toggle:focus-visible { outline: 1px solid var(--primary); outline-offset: 1px; }
+.wb-todo-toggle svg { transition: transform .18s ease; }
 .wb-todo-bar { height: 3px; background: var(--theme-raw-3b5be19fa7); }
 .wb-todo-bar i { display: block; height: 100%; border-radius: 2px; background: linear-gradient(90deg, var(--brand), var(--theme-raw-7281a81000)); transition: width .4s ease; }
 .wb-todo-item { display: flex; gap: 8px; align-items: baseline; padding: 4px 13px 4px; font-size: 11.5px; }
@@ -1894,6 +1898,16 @@
 .wb-todo-item.is-done span:last-child { color: var(--muted-foreground); text-decoration: line-through; }
 .wb-todo-item.is-doing .wb-todo-glyph { color: var(--status-approval); }
 .wb-todo-item.is-doing span:last-child { color: var(--foreground); font-weight: 600; }
+.wb-todo.is-collapsed { margin-bottom: 8px; }
+.wb-running-experts { margin: -7px 0 14px; padding: 8px 13px 9px; border: 1px solid var(--theme-raw-c9c199ec46); border-top: 1px solid var(--border); border-radius: 0 0 8px 8px; background: oklch(var(--surface-1-lch) / .94); }
+.wb-running-experts-head { display: flex; gap: 7px; align-items: center; color: var(--muted-foreground); font-size: 10px; font-weight: 650; }
+.wb-running-experts-head .wb-dot { width: 6px; height: 6px; flex: 0 0 6px; }
+.wb-running-experts-count { margin-left: auto; color: var(--muted-foreground); font-family: var(--font-mono); font-size: 9px; }
+.wb-running-expert { display: flex; min-width: 0; gap: 8px; align-items: center; padding: 6px 0 0 13px; color: var(--foreground); font-size: 10.5px; }
+.wb-running-expert-spinner { flex: 0 0 12px; color: var(--status-approval); animation: spin 1s linear infinite; }
+.wb-running-expert-name { flex: 0 0 auto; color: var(--primary); font-weight: 650; }
+.wb-running-expert-task { min-width: 0; flex: 1; overflow: hidden; color: var(--muted-foreground); text-overflow: ellipsis; white-space: nowrap; }
+.wb-running-expert-time { flex: 0 0 auto; color: var(--muted-foreground); font-family: var(--font-mono); font-size: 9px; }
 
 /* 空态 hero */
 .wb-hero { display: flex; height: 100%; flex-direction: column; gap: 10px; align-items: center; justify-content: center; text-align: center; }

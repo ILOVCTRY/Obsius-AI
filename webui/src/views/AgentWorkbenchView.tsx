@@ -478,7 +478,7 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
   const liveTools = useMemo(() => {
     type LiveTool = {
       tool_call_id?: string; phase?: string; name?: string; args_head?: string
-      ok?: boolean; duration_s?: number; result_head?: string
+      ok?: boolean; duration_s?: number; result_head?: string; created_at?: string
     }
     const byId = new Map<string, LiveTool>()
     const legacy: LiveTool[] = []
@@ -490,7 +490,8 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
       if (e.kind !== "chat.tool") continue
       const p = e.payload as LiveTool & { thread_id?: string }
       if (p?.thread_id !== tid) continue
-      if (p.tool_call_id) byId.set(p.tool_call_id, p)
+      const eventTool = { ...p, created_at: e.created_at }
+      if (p.tool_call_id) byId.set(p.tool_call_id, eventTool)
       else legacy.push(p)
       if (p.phase === "start") {
         if (p.tool_call_id) startAtById.set(p.tool_call_id, e.created_at)
@@ -499,6 +500,19 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
     }
     return { byId, legacy, startAtById, legacyStarts }
   }, [events, tid])
+  // 运行中的子代理：call_expert 可能并发派发多个调用，按 tool_call_id 分组后
+  // 只保留最近状态仍为 start 的调用；收到 done、失败或取消事件后自然移除。
+  // 再和已落库的 tool 消息交叉排除，避免重连/事件窗口裁剪造成幽灵状态。
+  const runningCallExperts = useMemo(() => {
+    const answered = new Set<string>()
+    for (const m of messages) {
+      if (m.role === "tool" && m.tool_use_id) answered.add(m.tool_use_id)
+    }
+    return [...liveTools.byId.entries()]
+      .filter(([id, tool]) => tool.name === "call_expert"
+        && tool.phase === "start" && !answered.has(id))
+      .map(([id, tool]) => ({ id, tool }))
+  }, [liveTools.byId, messages])
   // 底部实时工具行（「运行中」）判据（2026-10-13 修「重启后幽灵运行中」）：只认
   // 「本线程最近一条 chat.tool 事件是 start」且该 tool_call_id **尚无持久化结果行**。
   // 旧实现取 byId 里最后一条 phase=start 的事件——中断/重启遗留的孤儿 start（后端
@@ -930,6 +944,9 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
           ) : (
             <div className="wb-timeline">
               {thread && thread.todo.length > 0 && <TodoCard todo={thread.todo} />}
+              {runningCallExperts.length > 0 && (
+                <RunningCallExperts calls={runningCallExperts} />
+              )}
               {items.map((it) => {
                 if (it.kind === "user") {
                   return <HumanNote key={it.m.id} m={it.m} />
@@ -1942,26 +1959,78 @@ function lastAssistantText(messages: ChatMessage[]): string {
 }
 
 function TodoCard({ todo }: { todo: { id: string; title: string; status: string }[] }) {
+  const [collapsed, setCollapsed] = useState(false)
   const done = todo.filter((t) => t.status === "completed").length
   const pct = todo.length ? Math.round((done / todo.length) * 100) : 0
   return (
-    <div className="wb-todo">
+    <div className={cn("wb-todo", collapsed && "is-collapsed")}>
       <div className="wb-todo-head">
         <CircleSlash size={11} /> 待办
         <span className="wb-todo-count">{done}/{todo.length} 完成 · {pct}%</span>
+        <button type="button" className="wb-todo-toggle"
+          aria-label={collapsed ? "展开待办清单" : "折叠待办清单"}
+          aria-expanded={!collapsed}
+          title={collapsed ? "展开待办清单" : "折叠待办清单"}
+          onClick={() => setCollapsed((value) => !value)}>
+          <ChevronDown size={13} className={cn(collapsed && "-rotate-90")} />
+        </button>
       </div>
-      <div className="wb-todo-bar"><i style={{ width: `${pct}%` }} /></div>
-      {todo.map((t) => (
-        <div key={t.id} className={cn("wb-todo-item",
-          t.status === "completed" && "is-done",
-          t.status === "in_progress" && "is-doing")}>
-          <span className="wb-todo-glyph">
-            {t.status === "completed" ? "✓" : t.status === "in_progress" ? "▸" : "○"}
-          </span>
-          <span>{t.title}</span>
-        </div>
-      ))}
+      {!collapsed && (
+        <>
+          <div className="wb-todo-bar"><i style={{ width: `${pct}%` }} /></div>
+          {todo.map((t) => (
+            <div key={t.id} className={cn("wb-todo-item",
+              t.status === "completed" && "is-done",
+              t.status === "in_progress" && "is-doing")}>
+              <span className="wb-todo-glyph">
+                {t.status === "completed" ? "✓" : t.status === "in_progress" ? "▸" : "○"}
+              </span>
+              <span>{t.title}</span>
+            </div>
+          ))}
+        </>
+      )}
     </div>
+  )
+}
+
+function RunningCallExperts({ calls }: {
+  calls: { id: string; tool: { args_head?: string; created_at?: string } }[]
+}) {
+  const [, redraw] = useState(0)
+  useEffect(() => {
+    const timer = setInterval(() => redraw((value) => value + 1), 1000)
+    return () => clearInterval(timer)
+  }, [])
+
+  return (
+    <section className="wb-running-experts" aria-label="运行中的子代理">
+      <div className="wb-running-experts-head">
+        <span className="wb-dot is-running" />
+        <span>子代理运行中</span>
+        <span className="wb-running-experts-count">{calls.length}</span>
+      </div>
+      {calls.map(({ id, tool }) => {
+        let task = ""
+        if (tool.args_head) {
+          try {
+            const args = JSON.parse(tool.args_head) as Record<string, unknown>
+            task = String(args.task ?? args.prompt ?? args.goal ?? "")
+          } catch { /* 截断或非 JSON 参数时仅显示调用状态。 */ }
+        }
+        const startedAt = tool.created_at ? parseTs(tool.created_at).getTime() : NaN
+        const seconds = Number.isNaN(startedAt)
+          ? 0 : Math.max(0, Math.floor((Date.now() - startedAt) / 1000))
+        return (
+          <div key={id} className="wb-running-expert">
+            <Loader2 size={12} className="wb-running-expert-spinner animate-spin" />
+            <span className="wb-running-expert-name">子代理</span>
+            <span className="wb-running-expert-task" title={task}>{task || "正在执行委派任务"}</span>
+            <span className="wb-running-expert-time">{seconds}s</span>
+          </div>
+        )
+      })}
+    </section>
   )
 }
 

@@ -2863,7 +2863,38 @@ class ToolDispatcher:
              **attribution},
             session_id=self.session_id, author=self.author)
         self.last_progress_step = self._step
-        return f"artifact={artifact_id} path={rel} sha256={sha[:8]}"
+        return self._artifact_receipt(artifact_id, rel, path, sha)
+
+    def _artifact_receipt(self, artifact_id: str, rel: str, path: Path,
+                          sha256: str) -> str:
+        """Return stable project identity plus a path usable by the active workspace.
+
+        The blackboard path remains relative to ``artifacts_dir``.  A bare value such
+        as ``poc/x.py`` is not executable from Docker, whose workspace mount starts
+        at ``/workspace``.  Linked external workspaces deliberately do not mount the
+        project artifacts directory, so never invent a container path there.
+        """
+        project_path = f"artifacts/{rel}"
+        ws = self.workspace_root
+        project_root = Path(self.artifacts_dir).parent if self.artifacts_dir else None
+        if ws is not None and project_root is not None:
+            try:
+                same_workspace = ws.resolve() == project_root.resolve()
+            except OSError:
+                same_workspace = ws == project_root
+        else:
+            same_workspace = False
+        host_path = path.resolve()
+        if same_workspace:
+            docker_path = "/workspace/" + project_path
+            return (f"artifact={artifact_id} path={docker_path} "
+                    f"docker_path={docker_path} project_path={project_path} "
+                    f"project_host_path={host_path} sha256={sha256[:8]}")
+        return (f"artifact={artifact_id} path={project_path} "
+                f"project_path={project_path} project_host_path={host_path} "
+                "docker_path=unavailable "
+                "(项目 artifacts 目录未挂载到当前执行工作区) "
+                f"sha256={sha256[:8]}")
 
     def _ctf_challenge_scope(self) -> dict | None:
         """CTF 跨题隔离面（challenge-isolation，2026-10-19）：本题 vs 其它题目。

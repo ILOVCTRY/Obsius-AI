@@ -1287,7 +1287,10 @@ tool(
         "落产物文件（POC 脚本/抓包/输出）：写项目产物目录 + sha256 落库。"
         "kind='poc' 仅限 .py——报文打不稳的漏洞才用脚本复现；kind='project' 限 R4 组装集成最终交付"
         "（整个重建程序的 zip 包）。CTF：解题/复现脚本与 writeup 必须落 artifact，不写裸文件"
-        "（队友与续跑会话靠黑板找现场）。"
+        "（队友与续跑会话靠黑板找现场）。回执中的 path 是当前默认项目工作区下可直接"
+        "用于 Docker 的绝对路径（/workspace/artifacts/...），project_path 是黑板规范路径；"
+        "关联外部执行工作区且项目 artifacts 未挂载时，回执会明确 docker_path=unavailable，"
+        "不要自行拼接 /workspace 路径。"
     ),
     input_schema={
         'type': 'object',
