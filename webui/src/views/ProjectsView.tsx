@@ -54,7 +54,10 @@ export function ProjectsView({ onOpen }: { onOpen: (pid: string) => void }) {
     api.listExperts().then((es) => setPool(es.filter((e) => e.kind !== "virtual"))).catch(() => {})
   }, [])
 
-  const trackExperts = pool.filter((e) => !e.tracks || e.tracks.length === 0 || e.tracks.includes(track))
+  // 服务轨过滤（2026-10-25 语义反转）：`tracks` 空 = **不启用**（原口径是「空=全轨」）。
+  // 这里也要跟着收紧——否则建项目时会把一个「不服务本轨、甚至不在任何轨」的
+  // 专家写进绑定清单，之后 `expert_exists` 一律拒，用户看到的是「建完项目专家全废」。
+  const trackExperts = pool.filter((e) => (e.tracks ?? []).includes(track))
 
   const create = async () => {
     if (!name.trim()) return

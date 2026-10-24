@@ -317,7 +317,7 @@ def level_two_stats(assets: list[dict],
 
 def situation_snapshot(assets: list[dict], findings: list[dict] | None = None,
                        *, untested_cap: int = 30, visited_cap: int = 20) -> dict:
-    """三态态势快照：给主控（workbench chat-orchestrator）注入的分桶视图。
+    """三态态势快照：给主控（workbench pentest-controller）注入的分桶视图。
 
     与 `effective_status_map` 同口径（读时派生三态，不落库）。只计
     COVERAGE_TYPES 四类，binary 等不入（与编排器口径一致）。返回：

@@ -147,22 +147,26 @@ export function SkillCreateDialog({ open, onOpenChange, onCreated }: {
 
 const KB_PATH_HINT = "源内相对路径，仅 .md；允许中文多级目录，如 ctf-web/新手法/绕过.md（1 MiB 内）"
 
-export function KbCreateDialog({ open, onOpenChange, cap, onCreated }: {
+export function KbCreateDialog({ open, onOpenChange, cap, capOptions, onCreated }: {
   open: boolean
   onOpenChange: (v: boolean) => void
   cap: string
-  onCreated: (path: string) => void
+  /** 「全部方向」聚合视图下由用户选落点方向（单方向视图不传 = 恒用 cap） */
+  capOptions?: string[]
+  onCreated: (cap: string, path: string) => void
 }) {
   const [path, setPath] = useState("")
   const [content, setContent] = useState("")
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+  // 目标方向：聚合视图里由下拉选（默认跟随当前选中文档的方向），单方向视图恒为 cap
+  const [target, setTarget] = useState(cap)
 
   useEffect(() => {
     if (open) {
-      setPath(""); setContent(""); setErr(null); setBusy(false)
+      setPath(""); setContent(""); setErr(null); setBusy(false); setTarget(cap)
     }
-  }, [open])
+  }, [open, cap])
 
   const submit = async () => {
     const p = path.trim()
@@ -170,8 +174,8 @@ export function KbCreateDialog({ open, onOpenChange, cap, onCreated }: {
     setBusy(true)
     setErr(null)
     try {
-      await api.kbCreate(cap, p, body)
-      onCreated(p)
+      await api.kbCreate(target, p, body)
+      onCreated(target, p)
       onOpenChange(false)
     } catch (e) {
       setErr(String(e))
@@ -185,8 +189,17 @@ export function KbCreateDialog({ open, onOpenChange, cap, onCreated }: {
       <DialogContent>
         <DialogTitle>新建知识库文档</DialogTitle>
         <DialogDescription>
-          capabilities/{cap}/kb/ 下新增 .md。英文上游快照原文不翻译不覆盖——新经验写新文件。
+          capabilities/{target}/kb/ 下新增 .md。英文上游快照原文不翻译不覆盖——新经验写新文件。
         </DialogDescription>
+        {capOptions && capOptions.length > 0 && (
+          <label className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+            落点方向
+            <select className="rounded border bg-background px-2 py-1 text-xs"
+                    value={target} onChange={(e) => setTarget(e.target.value)}>
+              {capOptions.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </label>
+        )}
         <Input value={path} onChange={(e) => setPath(e.target.value)}
                placeholder="如 ctf-web/sqli/新绕过手法.md"
                className="font-mono text-xs" autoFocus
@@ -198,7 +211,7 @@ export function KbCreateDialog({ open, onOpenChange, cap, onCreated }: {
         <ErrorLine err={err} />
         <div className="flex justify-end gap-2">
           <Button size="sm" variant="ghost" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button size="sm" disabled={busy || !path.trim()} onClick={submit}>
+          <Button size="sm" disabled={busy || !path.trim() || !target} onClick={submit}>
             {busy ? "创建中…" : "创建"}
           </Button>
         </div>

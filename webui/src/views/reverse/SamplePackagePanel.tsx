@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react"
-import { FileArchive, FolderOpen, Loader2, Play, RefreshCw, Upload } from "lucide-react"
+import { FileArchive, FolderOpen, FolderSearch, Loader2, Play, RefreshCw, Upload } from "lucide-react"
 import { api, pollJob } from "@/lib/api"
 import type { SamplePackage, SamplePackageTarget, SampleTargetAnalysis } from "@/lib/types"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
+import { DirectoryPickerDialog } from "@/views/reverse/DirectoryPickerDialog"
 
 function formatBytes(value: number): string {
   if (value < 1024) return `${value} B`
@@ -34,6 +35,8 @@ export function SamplePackagePanel({ pid, active = true, onOpenBinary }: {
   const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null)
   const [analyzing, setAnalyzing] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
+  // 「选择分析包目录」（2026-10-24）：大目录原地索引，不复制也不上传。
+  const [pickerOpen, setPickerOpen] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
   const folderRef = useRef<HTMLInputElement>(null)
 
@@ -87,6 +90,25 @@ export function SamplePackagePanel({ pid, active = true, onOpenBinary }: {
     } catch (error) {
       setMessage(`导入失败：${String(error)}`)
     } finally { setUploading(false); setUploadProgress(null) }
+  }
+
+  // 关联目录（2026-10-24）：后端扫描大目录是后台 Job，这里轮询到完成。
+  const linkDirectory = async (directory: string) => {
+    setPickerOpen(false); setUploading(true)
+    setMessage(`正在扫描 ${directory} …（大目录需要几分钟）`)
+    try {
+      const started = await api.linkSamplePackageDir(pid, directory)
+      const job = await pollJob(started.job_id, () => {}, 1500)
+      if (job.status !== "done") throw new Error(job.error || "扫描失败")
+      const result = job.result as SamplePackage | null
+      if (!result) throw new Error("扫描未返回分析包")
+      setCurrent(result)
+      setPackages((previous) => [result, ...previous.filter((item) => item.package_id !== result.package_id)])
+      setTargetId(result.targets[0]?.target_id ?? "")
+      setMessage(`已关联目录：${result.file_count} 个文件（原地索引，未复制）`)
+    } catch (error) {
+      setMessage(`关联失败：${String(error)}`)
+    } finally { setUploading(false) }
   }
 
   const analyzeTargets = async (ids: string[]) => {
@@ -153,6 +175,10 @@ export function SamplePackagePanel({ pid, active = true, onOpenBinary }: {
         </Button>
         <Button size="sm" variant="outline" className="h-7 gap-1 text-[11px]" disabled={uploading} onClick={() => folderRef.current?.click()}>
           <FolderOpen className="size-3" />上传文件夹
+        </Button>
+        <Button size="sm" variant="outline" className="h-7 gap-1 text-[11px]" disabled={uploading}
+          onClick={() => setPickerOpen(true)} title="选一个大目录原地索引（不复制），并作为执行工作区">
+          <FolderSearch className="size-3" />选择分析包目录
         </Button>
         <Button size="sm" variant="outline" className="h-7 gap-1 text-[11px]" onClick={() => void refresh()} title="刷新分析包列表">
           <RefreshCw className="size-3" />刷新
@@ -221,6 +247,8 @@ export function SamplePackagePanel({ pid, active = true, onOpenBinary }: {
         </details>
       )}
       {message && <p className={cn("mt-1 truncate text-[10px]", message.includes("失败") ? "text-destructive" : "text-muted-foreground")} title={message}>{message}</p>}
+      <DirectoryPickerDialog pid={pid} open={pickerOpen} busy={uploading} hint={null}
+        onClose={() => setPickerOpen(false)} onPick={(directory) => void linkDirectory(directory)} />
     </section>
   )
 }

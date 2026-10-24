@@ -9,7 +9,14 @@
 
 import sqlite3
 
-SCHEMA_VERSION = 48
+SCHEMA_VERSION = 49
+
+# v48→v49（主控改名，pentest-controller，2026-10-25）：chat_threads.agent_id 的
+# 存量值 `chat-orchestrator` 归一为 `pentest-controller`。该列的取值直接决定
+# `ChatTurn.__init__` 认不认它是控制器（`CONTROLLER_IDS`）——不改的话，老项目
+# 里所有历史主控线程都会掉回「普通专家」工具面（没有 call_expert、没有
+# todo_write），历史会话看上去还在、实际已经不能续跑。
+# 无 ALTER（纯数据迁移），幂等靠 meta 键 `agent_id_rename_migration` 去重。
 
 # v47→v48（线程级思考强度，thinking-effort，2026-10-21）：chat_threads 幂等补
 # thinking_effort（七档：minimal/low/medium/high/xhigh/max/ultra，''=跟随该供应商
@@ -981,6 +988,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 "ALTER TABLE orchestrator_state ADD COLUMN"
                 " derive_idle_rounds INTEGER NOT NULL DEFAULT 0")
     _migrate_intent_anchors(conn)
+    _migrate_agent_id_rename(conn)
     _ensure_artex_intents(conn)
     _ensure_artex_intents_deps(conn)
     _ensure_artex_exploration(conn)
@@ -1112,6 +1120,36 @@ def _migrate_intent_anchors(conn: sqlite3.Connection) -> None:
              "system-migration", ts))
     conn.execute(
         "INSERT INTO meta(key, value) VALUES('intents_anchor_migration', ?)"
+        " ON CONFLICT(key) DO UPDATE SET value=excluded.value", (ts,))
+
+
+def _migrate_agent_id_rename(conn: sqlite3.Connection) -> None:
+    """v48→v49：主控 agent_id 从 `chat-orchestrator` 归一为 `pentest-controller`。
+
+    为什么必须迁移而不是「新旧都认」：`ChatTurn.__init__` 用
+    `agent_id in CONTROLLER_IDS` 判定「这是不是控制器」，而 CONTROLLER_IDS 只能
+    有一个真值。同时认两个 id 会让「谁是主控」出现两个真相源（前端常量、通知
+    投递、wrapup 选词各写一份），迟早分叉。数据归一后代码只需认新 id。
+
+    迁移范围：`chat_threads.agent_id` 一列，其它表没有该语义（artex_* 表的
+    agent/worker 列存的是专家名与 intent id）。幂等：meta 键置位后不再扫描，
+    且 UPDATE 自带 WHERE 天然幂等（重跑命中 0 行）。
+    """
+    tables = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='chat_threads'")}
+    if not tables:
+        return
+    done = conn.execute(
+        "SELECT value FROM meta WHERE key='agent_id_rename_migration'").fetchone()
+    if done is not None:
+        return
+    from datetime import datetime, timezone
+    ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    conn.execute(
+        "UPDATE chat_threads SET agent_id='pentest-controller'"
+        " WHERE agent_id='chat-orchestrator'")
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES('agent_id_rename_migration', ?)"
         " ON CONFLICT(key) DO UPDATE SET value=excluded.value", (ts,))
 
 

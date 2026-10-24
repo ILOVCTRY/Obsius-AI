@@ -1,7 +1,7 @@
 """智能体工作台对话线程（K9，2026-09-29）：新独立轻量对话运行时的持久化层。
 
 不进 sessions/tasks 体系（与渗透会话窗完全解耦）。每 agent（主控
-chat-orchestrator + 专家池专家）独立线程；主控 call_expert spawn 的子专家
+pentest-controller + 专家池专家）独立线程；主控 call_expert spawn 的子专家
 线程经 parent_thread_id 留档关联。仿 intents.py：模块函数经 ``bb._tx()``
 写（黑板单一写入口），读走 ``bb.conn``。线程删除时消息级联物理删除。
 """
@@ -13,6 +13,9 @@ import sqlite3
 from typing import Any
 
 from core.blackboard.store import _loads, new_id, now
+# 系统注入消息判定（2026-10-24）：`list_messages` 据文案前缀派生 `origin` 字段，
+# 前端据此渲染成折叠的系统行而不是人类发言。真源见 core/chat/origin.py。
+from core.chat.origin import describe as origin_of
 
 THREAD_STATUSES = ("idle", "running", "error")
 TODO_STATUSES = ("pending", "in_progress", "completed")
@@ -441,6 +444,17 @@ def list_messages(bb, thread_id: str, *, after_id: int = 0) -> list[dict[str, An
     for r in rows:
         d = dict(r)
         d["tool_calls"] = _loads(d.get("tool_calls"), [])
+        # 系统注入消息的派生标记（2026-10-24）。**在读出层派生，不落库**：
+        # 判定依据是文案开头的中文方括号标签（既有事实），而落库层
+        # `append_message` 不知道调用方是人类还是系统——`ChatTurn.run(text)` 是
+        # 两者共用的唯一入口，加一列 origin 就得改 61 个调用点，且要用参数把
+        # 「这条是谁说的」一路透传下来，漏一处就静默退化成人类发言。
+        #
+        # 放在这里的好处：前端只认 `origin` 字段（不复制前缀表），任何走
+        # `list_messages` 的消费方自动同口径；`content` 保持审计原文不改写。
+        origin = origin_of(d.get("content") or "") if d.get("role") == "user" else None
+        if origin is not None:
+            d["origin"] = origin
         out.append(d)
     return out
 

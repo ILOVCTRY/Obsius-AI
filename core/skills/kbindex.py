@@ -250,6 +250,7 @@ def _seg_hits(seg: str, haystack: str, is_ascii: bool) -> bool:
 def match_kb_index_detailed(index: list[KbEntry], text: str,
                             cap: int = DEFAULT_HINT_CAP,
                             extra_segments: list[str] | None = None,
+                            source_weights: dict[str, float] | None = None,
                             ) -> list[tuple[KbEntry, str]]:
     """K3：与 match_kb_index 同评分，另返回每个命中的「相关段落」。
 
@@ -265,7 +266,12 @@ def match_kb_index_detailed(index: list[KbEntry], text: str,
     「graphql 接口未鉴权」时 `graphql` 只值 2 分，而扩展组把
     `越权漏洞（IDOR…）测试手册` 顶到 12 分、GraphQL 手册跌出 top-4；
     问「流量包找攻击痕迹」时 `镜像/数据恢复` 扩展段把磁盘取证顶掉网络取证。
-    减半后 recall@4 0.70 → 0.78，且未损失任何原查询命中（原查询段权重不变）。"""
+    减半后 recall@4 0.70 → 0.78，且未损失任何原查询命中（原查询段权重不变）。
+
+    ``source_weights``（2026-10-23 轨加权）：`{源 id: 权重}`，命中文档的得分
+    再乘所属源权重。知识库对模型默认全部打开后，跨方向的相关性由轨权重承担
+    （渗透轨 web ×2、CTF 轨全 1.0，见 taxonomy.TRACK_KB_DIRECTION_WEIGHTS）。
+    全 1.0（或缺省）时**直接跳过**乘法，保证既有排序逐位不变。"""
     # 同段去重必须按 seg 合并、取较大权重——若用 set(segs) 对 (seg, w) 元组去重，
     # 同一段同时出现在原查询与扩展组时（如 `ida` 既是技术词又是逆向组员）
     # 会被算两次，等于给该段凭空加分。
@@ -276,6 +282,10 @@ def match_kb_index_detailed(index: list[KbEntry], text: str,
             weights[s] = w
     if not weights:
         return []
+    # 全 1.0 的权重表 = 没有加权（CTF 轨/未配置轨）：直接置 None 跳过乘法，
+    # 避免浮点乘法把既有排序搅出不可复现的微差。
+    weighted = bool(source_weights) and any(
+        w != 1.0 for w in source_weights.values())
     scored: list[tuple[float, str, KbEntry, str]] = []
     for e in index:
         score = 0.0
@@ -304,6 +314,8 @@ def match_kb_index_detailed(index: list[KbEntry], text: str,
                         section = h
                         break
         if score > 0:
+            if weighted:
+                score *= source_weights.get(e.source_id, 1.0)
             scored.append((-score, e.module, e, section))
     scored.sort(key=lambda t: (t[0], t[1]))
     return [(e, sec) for _, _, e, sec in scored[:max(1, cap)]]
@@ -343,14 +355,29 @@ def _tree_mtimes(packs_root: str | Path,
     return mtimes
 
 
+def _source_weights(track: str | None,
+                    capabilities: list[str] | None) -> dict[str, float] | None:
+    """轨加权表 → {源 id: 权重}（源 id 口径 = `KbSource.id` = `<方向>-kb`）。
+
+    全 1.0 时返回 None（下游跳过乘法，保证 CTF 轨/未配置轨的既有排序不变）。"""
+    if not track:
+        return None
+    from core.skills.taxonomy import kb_direction_weight  # 就地导入防环
+    out = {f"{d}-kb": kb_direction_weight(track, d) for d in (capabilities or [])}
+    return out if any(w != 1.0 for w in out.values()) else None
+
+
 def kb_module_hints(packs_root: str | Path, capabilities: list[str] | None,
-                    query_text: str, cap: int = DEFAULT_HINT_CAP
+                    query_text: str, cap: int = DEFAULT_HINT_CAP,
+                    track: str | None = None
                     ) -> list[tuple[KbEntry, str]]:
     """带缓存的对外口：mtime 快检不一致才重建索引，然后匹配 query_text。
     路由未命中/命中都调它——hint 行让 Agent 知道 kb 里有相关专题。
     （K3：返回 (entry, 相关段落) 对，段落可能为空串。
     M2：query 先经同义词表查询扩展——命中组全成员切段参与匹配，
-    跨语言盲区（越权↔IDOR）由词表补。）"""
+    跨语言盲区（越权↔IDOR）由词表补。
+    2026-10-23：`track` 非空时按轨加权排序（Agent 侧召回专用；知识库工作台
+    的搜索框不加权）。）"""
     key = (str(packs_root), tuple(capabilities or []))
     with _CACHE_LOCK:
         cached = _CACHE.get(key)
@@ -360,7 +387,8 @@ def kb_module_hints(packs_root: str | Path, capabilities: list[str] | None,
             _CACHE[key] = cached
     extra = synonym_expansion(packs_root, query_text)
     return match_kb_index_detailed(cached[0], query_text, cap=cap,
-                                   extra_segments=extra)
+                                   extra_segments=extra,
+                                   source_weights=_source_weights(track, capabilities))
 
 
 # ---------- 领域同义词表（M2 retrieval-upgrade，2026-09-23） ----------

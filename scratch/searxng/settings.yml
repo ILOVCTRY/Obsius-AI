@@ -1,0 +1,14 @@
+use_default_settings: true
+server:
+  secret_key: "cyberstrike-pro-local-test"
+  limiter: false
+  image_proxy: false
+search:
+  safe_search: 0
+  formats:
+    - html
+    - json
+outgoing:
+  proxies:
+    all://:
+      - http://host.docker.internal:7891

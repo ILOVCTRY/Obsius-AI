@@ -338,6 +338,32 @@ def docker_network(net: str) -> str:
     return {"none": "none", "bridge": "bridge", "real": "bridge"}.get(net, "none")
 
 
+# 解题能力相关、**所有容器形态都必须带**的参数（一次性沙箱 + 会话常驻容器）。
+# 2026-10-24 实测得出，两条缺一都在特定题型上直接卡死：
+#
+# 1. `--ulimit core=-1`：默认 `ulimit -c=0` 导致 core dump 恒不落盘（pwn 题拿不到
+#    crash 现场）。实测抬高后 `core.N` 能正常产出。`core_pattern=core` 是**相对
+#    路径**、落在进程 cwd，所以容器内可修 —— 这条曾被误判成「宿主内核参数改不了」。
+# 2. `--security-opt seccomp=unconfined`：Docker 默认 profile 是**按参数值**过滤
+#    `personality`：0x0/0x8/0x20000/0x20008 放行，**只拒 0x40000**
+#    （`ADDR_NO_RANDOMIZE`，正是 `setarch -R` 传的值），导致关不掉 ASLR。
+#    精确解法是自定义 profile 只补这一个掩码，但实测 Windows + Docker Desktop 下
+#    `--security-opt seccomp=<宿主路径>` 加载失败（`string is not a valid action`，
+#    盘符不共享），跨平台不可靠，故退用 unconfined。
+#
+# **安全性依据（实测对照，改这两行前必须先读）**：
+#     | 配置                      | ASLR 可关 | mount | 他进程 ptrace | sysctl |
+#     | 默认 seccomp              | 否        | 否    | 否            | 否     |
+#     | unconfined + cap-drop ALL | 是        | 否    | 否            | 否     |
+#     | `--privileged`            | 是        | **是**| 是            | 是     |
+# 隔离的真正来源是 `--cap-drop ALL`（`CapEff=0`），**不是 seccomp**。
+# 放开 seccomp ≠ 拆沙箱；只有 `--privileged` 才等于拆沙箱，绝不能那样换 ASLR。
+SANDBOX_CAPABILITY_ARGS: list[str] = [
+    "--ulimit", "core=-1",
+    "--security-opt", "seccomp=unconfined",
+]
+
+
 def sandbox_docker_args(net: str) -> list[str]:
     """L3 加固参数（DESIGN.md §7）：无挂载、限额、降权。fakenet 下一里程碑实现。"""
     if net not in {"none", "real"}:
@@ -351,6 +377,7 @@ def sandbox_docker_args(net: str) -> list[str]:
         "--cpus", "1.0",
         "--security-opt", "no-new-privileges",
         "--cap-drop", "ALL",
+        *SANDBOX_CAPABILITY_ARGS,
     ]
     return args
 
@@ -448,6 +475,10 @@ class DockerBackend:
         argv = ["run", "-d", "--name", name,
                 "--network", docker_network(net)]
         argv += self._proxy_args(net)
+        # 常驻容器是 CTF 实际跑题的那个，**必须**带能力参数（core dump / 可关 ASLR）。
+        # 与 sandbox_docker_args 共用同一常量，避免两条路径再次漂移 ——
+        # 曾出现「一次性沙箱加固了、常驻容器完全裸奔」的分叉。
+        argv += SANDBOX_CAPABILITY_ARGS
         for k, v in labels.items():
             argv += ["--label", f"{k}={v}"]
         for host_path, cpath in (mounts or []):

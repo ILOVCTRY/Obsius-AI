@@ -733,7 +733,7 @@ export interface SamplePackage {
   created_at: string
   file_count: number
   total_bytes: number
-  origin?: { source_type?: string; filename?: string; file_count?: number; raw_sha256?: string }
+  origin?: { source_type?: string; filename?: string; file_count?: number; raw_sha256?: string; directory?: string }
   raw_sha256?: string | null
   targets: SamplePackageTarget[]
   entries?: SamplePackageEntry[]
@@ -741,6 +741,36 @@ export interface SamplePackage {
   source_analysis?: Record<string, unknown> | null
   import_count?: number
   tree_ref?: string
+  /** 关联目录包（2026-10-24）：内容树就是用户自选的外部文件夹，原地索引、不复制。
+   *  这类包的文件树编辑一律禁用（改内容请直接在磁盘上改后重新选择）。 */
+  linked?: boolean
+  /** 执行工作区根：关联目录包时=该目录，否则=项目工作区。 */
+  exec_workspace?: string
+}
+
+/** 「选择分析包」的应用内目录浏览器返回项（GET .../workspace/dirs）。 */
+export interface DirEntry {
+  name: string
+  path: string
+  kind: "dir"
+  entry_count: number | null
+  root: boolean
+  is_project?: boolean
+  is_workspace?: boolean
+}
+
+export interface DirListing {
+  path: string
+  parent: string | null
+  roots: boolean
+  entries: DirEntry[]
+  truncated?: boolean
+}
+
+/** 关联目录分析包（POST .../sample-packages/link）→ 后台 Job，轮询取结果。 */
+export interface SamplePackageLinkResponse {
+  job_id: string
+  directory: string
 }
 
 export interface SampleTargetAnalysis {
@@ -1379,7 +1409,7 @@ export interface Expert {
   name?: string | null // 中文显示名，缺省回退 id
   description?: string | null
   persona?: string | null
-  tracks?: string[] | null // null/缺省 = 服务全部轨
+  tracks?: string[] | null // 可服务轨域；**空/null = 不启用**（2026-10-25 反转，原口径是空=全轨）
   skills?: string[] | null // null = 全量专家（不限定）
   /** kb 方向白名单；null 或 [] 都表示不限方向（两态字段） */
   knowledge?: string[] | null
@@ -2415,6 +2445,24 @@ export interface ChatToolCall {
   args: Record<string, unknown>
 }
 
+/**
+ * 系统注入消息的派生标记（2026-10-24）。
+ *
+ * 后端 `store.list_messages` 按文案开头的白名单标签（`〔系统补达〕` 等）派生，
+ * **不落库**。人类消息没有该字段——判定「是不是系统消息」只看它存不存在，
+ * 前端**不复制前缀表**（两处各写一份必然漂移：本次事故就是后端注释写着
+ * 「前端会识别」而前端从未实现）。
+ *
+ * `body` 是剥掉标签后的正文，渲染 Markdown 用它；`content` 仍是审计原文。
+ */
+export interface ChatMessageOrigin {
+  kind: "system"
+  /** 给人看的短标签（「系统补达」「系统唤醒」「人工确认」「主动唤醒」） */
+  label: string
+  /** 剥掉 `〔标签〕` 后的正文 */
+  body: string
+}
+
 export interface ChatMessage {
   id: number
   thread_id: string
@@ -2425,6 +2473,8 @@ export interface ChatMessage {
   tool_calls: ChatToolCall[]
   tool_use_id: string
   created_at: string
+  /** 仅系统注入的 user 行有；人类发言与 assistant/tool 行无此键。 */
+  origin?: ChatMessageOrigin
 }
 
 export interface ChatThreadDetail {

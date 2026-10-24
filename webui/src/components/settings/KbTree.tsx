@@ -121,7 +121,9 @@ function dirHasMatch(node: TreeNode, q: string): boolean {
 }
 
 export function KbTree({ cap, sources, selected, onSelect, onRename, onDelete }: {
-  cap: string            // 正文搜索目标能力包（与树同源，即 SkillsPane 的 kbCap）
+  /** 正文搜索目标：知识方向名，或「全部方向」哨兵（taxonomy.KB_ALL，
+   *  后端逐方向检索后合并，命中 path 带方向前缀） */
+  cap: string
   sources: KbSourceTree[]
   selected: string | null
   onSelect: (path: string) => void

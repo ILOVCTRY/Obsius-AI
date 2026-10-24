@@ -29,6 +29,31 @@ TRACKS = ("ctf", "pentest", "redteam", "research")
 # kb 知识方向（原能力包名，降级为知识组织单位）
 KB_DIRECTIONS = ("web", "binary", "crypto", "forensics", "misc", "cloud")
 
+# 轨道 → kb 方向检索权重（**Agent 侧检索排序**专用，2026-10-23 Nan）。
+#
+# 为什么需要它：知识库对模型「默认全部打开」——可见范围不再按项目绑定裁剪，
+# 相关性改由**轨加权**承担。渗透/红队轨把 web 域顶上去，逆向轨把二进制域顶上
+# 去；CTF 轨**刻意不配**（= 全等权）——比赛题目跨域混杂，任何方向都可能是
+# 那道题，提前压权重只会让冷门方向的正确手册搜不出来。
+#
+# 边界：只作用于 Agent 侧检索（kb_search 工具合并排序、顾问 kb 召回 hints）。
+# 知识库工作台的正文搜索框与 route.json 确定性导航**不加权**（人工浏览/关键词
+# 精确命中，加权只会让人看不出为什么排序是这样）。
+# 未列出的轨/方向恒 1.0；改权重先改本表（护栏见 tests/test_kb_track_weight.py）。
+TRACK_KB_DIRECTION_WEIGHTS: dict[str, dict[str, float]] = {
+    "pentest": {"web": 2.0},
+    "redteam": {"web": 2.0},
+    "research": {"binary": 2.0},
+}
+
+
+def kb_direction_weight(track: str | None, direction: str | None) -> float:
+    """(场景轨, kb 方向) → 检索权重；未配置的轨/方向恒 1.0（CTF 轨全等权）。"""
+    if not track or not direction:
+        return 1.0
+    return TRACK_KB_DIRECTION_WEIGHTS.get(str(track).strip(), {}).get(
+        str(direction).strip(), 1.0)
+
 # 技能展示分组（专家池勾选清单按类别展示；**纯展示口径**，不参与加载/路由/校验）。
 # 技能目录是扁平的（kb/skills/<name>），没有方向归属，故按命名约定归类；
 # 新增技能若不套前缀会落到「其他」，不影响功能，只是显示位置靠后。

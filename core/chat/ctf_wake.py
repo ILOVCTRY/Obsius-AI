@@ -39,7 +39,13 @@ log = logging.getLogger(__name__)
 
 # 唤醒轮注入的 user 消息前缀。前端据此把这条渲染成「系统提示」而不是「我说的话」
 # （`ChatTurn.run` 无条件把入参落成 role=user，没有别的区分通道）。
-WAKE_TAG = "〔系统唤醒〕"
+#
+# **2026-10-24 修正**：与 `background_wake.py` 同款失效——「前端会识别」只写在
+# 文案侧注释里，渲染层从未实现。现统一由 `core/chat/origin.py` 裁决（后端在
+# `store.list_messages` 派生 `origin` 字段，前端只认字段）。
+from core.chat.origin import LABEL_CTF_WAKE, tag as _tag
+
+WAKE_TAG = _tag(LABEL_CTF_WAKE)
 
 # 唤醒事件 kind（去重锚点 + 前端可观测）。
 WAKE_EVENT = "chat.ctf_flag_wake"

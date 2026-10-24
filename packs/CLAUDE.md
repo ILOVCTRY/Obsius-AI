@@ -32,7 +32,7 @@ packs/
 
 - **项目绑定** = 场景轨（单选）× 专家组队（多选可空）。kb 可见方向 = `directions_effective`：有绑定专家→`knowledge` 并集（任一 null=全方向）；无绑定→盘上 `meta.capabilities` 直通（存量读兼容）；research 轨无绑定时按 `TRACK_DEFAULT_CAPS` 补 `binary`。
 - **技能扁平、无包归属**：`kb/skills/<name>/SKILL.md`。专家 `skills` 白名单=**硬选**（会话可见/可路由技能=绑定专家白名单并集；`null`/空=不限定=全量）。路由不再按包过滤（`route(packs=…)` 参数保留兼容但为 no-op）。
-- **专家 yaml 字段**（扁平单文件，与旧角色 yaml 全兼容）：`tracks` 缺省=全轨；`protected: true` 仅 `_generalist`；`variant_<track>_*` 轨变体字段级覆写；`skills`/`knowledge` 为 null 或空列表 = 不限定。加载/推导面 `core/skills/experts.py`（`load_expert`/`expert_exists`/`list_experts`/`expert_skills`/`expert_directions`/`directions_effective`/`allowed_roles`）。
+- **专家 yaml 字段**（扁平单文件，与旧角色 yaml 全兼容）：`tracks` **空/缺省 = 不启用**（2026-10-25 语义反转；全域兜底 `_generalist`/`worker` 显式列全四轨）；`protected: true` 仅 `_generalist`；`variant_<track>_*` 轨变体字段级覆写；`skills`/`knowledge` 为 null 或空列表 = 不限定。加载/推导面 `core/skills/experts.py`（`load_expert`/`expert_exists`/`list_experts`/`expert_skills`/`expert_directions`/`directions_effective`/`allowed_roles`）。
 - **平台规则 / 评级与价值口径为渗透（pentest）独有**（`rules._PLATFORM_TRACK` 门控）；轨红线全轨恒注入。
 - **资产范围（`资产范围/<tag>.md`，intel-pentest-link 2026-10-22）**：`fofa_search` 工具的机器可读范围源，格式见同目录 `README.md`（每行一条：域名后缀 / IP·CIDR / `fofa: <片段>` / `说明:`）。**与人读的 `平台规则/<tag>.md` 分家**——那边是授权条款与无害化边界（散文，会随平台改文案），这边是查询约束与结果判据（结构化，改一行就改行为）。新增平台三件套同名（`平台规则/` `评级与价值口径/` `资产范围/` 各一份 `<tag>.md`）。**范围写松会把不属于该平台的资产圈进来打**，故宁可少写：拿不准的域名先不写。
 - **判级口径单一正本（2026-10-17）**：档位条款只存在于 `kb/安全红线/评级与价值口径/<tag>.md`（勾选后整篇注入 `rule:rating:<tag>`）。kb 里任何副本都必须收口成**指针**——`web/实战打法/rules/edu-rating-rules.md`（旧副本，原与正本漂移）与 `vuln-report-format.md` §二「等级判定」表已改成指向注入口径。新增判级文字一律进正本，禁止在其它文档复制条款（实测：旧表把「未授权读课程正文」判成 high，正本为 low）。`scripts/import_kb.py` 的 `PRESERVE_OWNERS` 保护正本不被 `--force` 用源仓库旧版覆盖。

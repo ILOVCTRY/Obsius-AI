@@ -1,0 +1,15 @@
+{
+  "ts": "2026-10-24T12:48:21.851+00:00",
+  "provider": "openai",
+  "format": "",
+  "url": "http://x/v1/chat",
+  "model": "",
+  "bytes": 7,
+  "sha256": "015abd7f5cc57a2dd94b7590f04ad8084273905ee33ec5cebeae62276a97f862",
+  "truncated": false,
+  "request": {
+    "a": 1
+  },
+  "wire": [],
+  "wire_match": false
+}

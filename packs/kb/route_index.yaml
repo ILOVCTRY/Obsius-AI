@@ -427,6 +427,16 @@ entries:
   - point: 沙箱逃逸（seccomp）
     match: [seccomp, 沙箱逃逸, sandbox escape, orw, open read write, 系统调用过滤]
     kb: binary/漏洞利用/沙箱逃逸与受限环境.md
+  # 2026-10-24 补：容器内「工具没装」与「内核不允许」的判据分叉，
+  # 以及与逃逸页反向的另一半（在隔离里面做题被堵死时换哪条路）。
+  - point: 容器能力边界（装不了 / 不允许）
+    match: [EPERM, Operation not permitted, 工具缺失, 装不了, 环境缺失, af_alg,
+            cryptsetup, dm_mod, setarch, core dump, ptrace被拒, 容器限制]
+    kb: binary/环境与工具/容器能力边界与替代手法.md
+  - point: pwntools 命名空间遮蔽与库怪癖
+    match: [pwntools, from pwn import, 名字冲突, pwn.version, module object is not callable,
+            mode_xts, hashcat veracrypt]
+    kb: binary/环境与工具/容器能力边界与替代手法.md
   - point: 终端对抗与遥测致盲
     match: [终端对抗, edr对抗, 遥测致盲, telemetry blinding, unhook, ntdll hook, etw, amsi]
     kb: binary/终端对抗/遥测致盲：ETW、AMSI、反取证.md

@@ -62,6 +62,7 @@ from core.skills.experts import list_experts
 from core.skills.routeindex import top_route_entries
 from core.skills.rules import load_kb_sources
 from core.skills.refs import normalize_module
+from core.skills.taxonomy import kb_direction_weight
 from core.skills.writing import resolve_kb, search_kb
 
 # 意图内容按轨提示（2026-10-01，不硬拦——只给方向，靠模型自觉）：
@@ -531,6 +532,7 @@ class ToolDispatcher:
     def __init__(self, bb: Blackboard, gateway: ExecutionGateway,
                  *, project_id: str, session_id: str, author: str,
                  decompiler=None, artifacts_dir=None, browser=None,
+                 exec_workspace: str | Path | None = None,
                  packs_root: str | Path | None = None,
                  track: str | None = None,
                  capabilities: list[str] | None = None,
@@ -565,6 +567,11 @@ class ToolDispatcher:
         self.abort_event = abort_event
         self.decompiler = decompiler  # DecompilerService，缺省=未装配
         self.artifacts_dir = artifacts_dir  # 产物目录（bb_add_artifact 用），缺省=未装配
+        # 执行工作区根（2026-10-24「选择分析包 = 工作区」）：run_cmd 的 cwd/scratch/
+        # pathguard 边界与相对读路径的基准。缺省 None = 沿用 artifacts_dir 的父目录
+        # （= 项目工作区，与引入前完全一致）。仅当项目当前分析包是**关联外部目录**
+        # 时由上层显式给成那个目录——产物仍写 artifacts_dir，绝不混为一谈。
+        self.exec_workspace = Path(exec_workspace) if exec_workspace else None
         # F6 内置浏览器实例池（BrowserPool）：None=未接入（轨外/测试）→ browser_* 全 no-tool；
         # 接入后依赖仍可能缺（playwright 未装）→ 动作时回填安装指引，不 500
         self.browser = browser
@@ -592,7 +599,7 @@ class ToolDispatcher:
         # 的探针——为一次快检先建意图链路再收尾反而稀释速度；工具面侧已同步
         # 剔除 declare/close_intent 与 bb_query（runtime.py _PROBE_EXCLUDED_TOOLS），
         # 不放行这两道闸会让探针的 run_cmd/bb_add_finding 全被打回。任务链
-        # （AgentSession）、chat-orchestrator 子专家、人工/API 路径一律不豁免。
+        # （AgentSession）、pentest-controller 子专家、人工/API 路径一律不豁免。
         self.intent_free = bool(intent_free)
         # vision 通道（2026-10-19）：本会话的模型能否看图片。由上层从
         # provider 实例（`llm.supports_vision`，源自 providers.json 的
@@ -623,11 +630,25 @@ class ToolDispatcher:
             and not isinstance(closing_max_rounds, bool) else _CLOSING_MAX_ROUNDS)
 
     # ---------- 状态代理（session-state 收敛，2026-10-03） ----------
-    # 原属性名全部保留（读写点与测试断言零改动），存储落共享 SessionState。
     # current_task_id/last_progress_step：非每任务复位，由收尾/中断路径显式管理。
     # finished/awaiting_human/summary/delegation_*：会话收尾标志（每任务复位）。
     # plan_only_mode：教练（每任务复位）。
     # closing_round/closing_last_progress：D6 收尾确认轮状态（每任务复位）。
+
+    @property
+    def workspace_root(self) -> Path | None:
+        """工作区根：显式 exec_workspace 优先，否则 artifacts_dir 的父目录。
+
+        单一出口——工具层所有「相对 scratch 解析 / 写边界 / spill 相对路径」都从
+        这里取。分成两个根的原因（2026-10-24）：关联外部目录做执行工作区时，
+        cwd 是用户的目录，而 artifacts/（产物）与 sample_packages/（包元数据）
+        必须留在项目里，`Path(artifacts_dir).parent` 一个式子已推不出两件事。
+        """
+        if self.exec_workspace is not None:
+            return self.exec_workspace
+        if self.artifacts_dir:
+            return Path(self.artifacts_dir).parent
+        return None
 
     @property
     def state(self) -> SessionState:
@@ -704,9 +725,9 @@ class ToolDispatcher:
         if name in _SPILL_SKIP or getattr(result, "images", None) \
                 or len(result) <= _SPILL_THRESHOLD:
             return result
-        if not self.artifacts_dir:
+        ws = self.workspace_root
+        if ws is None:
             return result
-        ws = Path(self.artifacts_dir).parent
         path = spill_text(result, name, ws / "spill")
         if path is None:
             return result
@@ -919,7 +940,7 @@ class ToolDispatcher:
                         "wsl（受 threat_class 限制）。请改用 PowerShell "
                         "写法（`;` 顺序执行、`if ($?) {}` 条件）或拆成多条命令，"
                         "或请人类放宽运行时上限。")
-        workspace = Path(self.artifacts_dir).parent if self.artifacts_dir else None
+        workspace = self.workspace_root
         run_kwargs = {
             "threat_class": threat_class,
             "project_id": self.project_id,
@@ -1015,7 +1036,8 @@ class ToolDispatcher:
             return (receipt + "\n[stdout 已被截断且无法落盘] 无法分段取回，"
                     "请改用重定向：run_cmd 跑 `命令 > out.txt 2>&1`，"
                     "再用 read_file 读文件。")
-        ws = Path(self.artifacts_dir).parent
+        ws = self.workspace_root
+        assert ws is not None  # 上面已按 artifacts_dir 缺席提前返回
         for stream, label in ((stdout, "run_cmd_stdout"),
                               (stderr, "run_cmd_stderr")):
             if len(stream) <= self._CMD_STREAM_SPILL_AT:
@@ -1126,9 +1148,9 @@ class ToolDispatcher:
         读路径放开（2026-10-01）：不再限定工作区根（只有写才拦边界）；容器
         `/workspace/…` 与 WSL `/mnt/<盘符>/…` 绝对路径自动映射回宿主真实路径。
         cat -n 风格带行号；单行 >2000 字符切尾标注；offset=-N 读末尾 N 行（tail）。"""
-        if not self.artifacts_dir:
+        ws = self.workspace_root
+        if ws is None:
             return "[错误] 未装配工作区（artifacts_dir），read_file 不可用"
-        ws = Path(self.artifacts_dir).parent
         scratch = ws / "scratch"
         p = _resolve_read_path(path, ws, scratch)
         if not p.is_file():
@@ -1185,11 +1207,11 @@ class ToolDispatcher:
         **降级红线**（对齐工具失败约定）：非图片/超限/未声明 vision 一律回
         `[错误]` 或纯文本 + 明确下一步，**绝不抛异常**（工具失败不该炸整轮）。
         """
-        if not self.artifacts_dir:
-            return "[错误] 未装配工作区（artifacts_dir），view_image 不可用"
         from core import media
 
-        ws = Path(self.artifacts_dir).parent
+        ws = self.workspace_root
+        if ws is None:
+            return "[错误] 未装配工作区（artifacts_dir），view_image 不可用"
         scratch = ws / "scratch"
         p = _resolve_read_path(path, ws, scratch)
         got = media.read_image(p)
@@ -1258,7 +1280,8 @@ class ToolDispatcher:
         if not raw:
             return ("[错误] path 不能为空：传附件 zip 的 /workspace/... 路径"
                     "（附件行原样给出）或只传文件名")
-        ws = Path(self.artifacts_dir).parent
+        ws = self.workspace_root
+        assert ws is not None  # 上面已按 artifacts_dir 缺席提前返回
         scratch = ws / "scratch"
         p = _resolve_read_path(raw, ws, scratch)
         if not p.is_file() and "/" not in raw and "\\" not in raw:
@@ -1396,7 +1419,7 @@ class ToolDispatcher:
             return "[错误] 未装配工作区（artifacts_dir），search_files 不可用"
         if not isinstance(pattern, str) or not pattern:
             return "[错误] pattern 必须为非空字符串"
-        ws = Path(self.artifacts_dir).parent.resolve()
+        ws = self.workspace_root.resolve()  # type: ignore[union-attr]
         scratch = (ws / "scratch").resolve()
         root = _resolve_read_path(path, ws, scratch) if path else ws
         try:
@@ -1552,9 +1575,9 @@ class ToolDispatcher:
             if v:
                 rel = v
                 break
-        if not rel or not self.artifacts_dir:
+        ws = self.workspace_root
+        if not rel or ws is None:
             return None
-        ws = Path(self.artifacts_dir).parent
         p = _resolve_asset_path(rel, ws, ws / "scratch")
         if p is None:
             return None
@@ -1978,9 +2001,9 @@ class ToolDispatcher:
                     "`指纹`；中文题面可直接把「管理员叫 xxx」放进 hint_text）")
         # 落盘：路径必须相对 scratch（run_cmd 的 cwd），否则模型要自己换算
         rel = ""
-        if self.artifacts_dir:
+        if self.workspace_root is not None:
             try:
-                scratch = Path(self.artifacts_dir).parent / "scratch"
+                scratch = self.workspace_root / "scratch"
                 scratch.mkdir(parents=True, exist_ok=True)
                 tag = hashlib.sha256((obs + hint).encode("utf-8", "replace")).hexdigest()[:8]
                 name = f"ctf-ammo-{tag}.txt"
@@ -3265,7 +3288,13 @@ class ToolDispatcher:
                         tag: str | None = None) -> str:
         """kb 关键词全文检索（2026-09-18 路由增强 · 方向 A）：包装 writing.search_kb
         逐启用能力包检索后合并。返回 path 即 kb_open 的 module 参数（同口径），
-        落 kb.search 审计事件（与 kb.open 对称）。K5：tag 走 frontmatter 分面过滤。"""
+        落 kb.search 审计事件（与 kb.open 对称）。K5：tag 走 frontmatter 分面过滤。
+
+        2026-10-23：合并排序改为**按当前轨加权**（`taxonomy.kb_direction_weight`）。
+        知识库对模型默认全部打开（可见范围不再按项目绑定裁剪），「哪个方向的命中
+        更该被先看到」由轨权重承担——渗透/红队轨 web 域 ×2、逆向轨 binary 域 ×2、
+        CTF 轨全等权（不配权重）。权重只改**排序**，不改召回集合：压到 limit 之外
+        的方向仍可能因为命中次数高而留在表里。"""
         q = (query or "").strip()
         if not q:
             return "[拒绝] query 不能为空（可换中英文关键词各试一次）"
@@ -3290,7 +3319,9 @@ class ToolDispatcher:
                     rows.append(r)
             except Exception:  # 单域检索失败不拖垮整体
                 continue
-        rows.sort(key=lambda r: (-r["matches"], r["path"]))
+        rows.sort(key=lambda r: (
+            -(r["matches"] * kb_direction_weight(self.track, r.get("cap"))),
+            r["path"]))
         rows = rows[:limit]
         self.bb.append_event(
             self.project_id, "kb.search",
@@ -3299,7 +3330,10 @@ class ToolDispatcher:
         if not rows:
             return (f"[无命中] 知识库中没有包含 {q!r} 的文档。"
                     "可换中英文关键词各试一次，或按技能正文对照表用 kb_open 直接开模块。")
-        lines = [f"kb 检索 {q!r} 命中 {len(rows)} 篇（path 即 kb_open 的 module 参数，"
+        boosted = [c for c in caps if kb_direction_weight(self.track, c) != 1.0]
+        wnote = (f"（已按 {self.track} 轨加权：{'、'.join(boosted)} 域权重更高）"
+                 if boosted else "")
+        lines = [f"kb 检索 {q!r} 命中 {len(rows)} 篇{wnote}（path 即 kb_open 的 module 参数，"
                  "再用 kb_open 直接读取正文）:",
                  "> 提案要用 target.cap 时取 **path 的第一段**（下表的 cap=…），"
                  "不要用内部源标识（形如 `forensics-kb`，那是 KbSource.id，不是目录名）。"]

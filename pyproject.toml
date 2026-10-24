@@ -31,6 +31,18 @@ tokens = ["tiktoken>=0.7"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+# 分层标记（2026-10-24 回归提速）。**默认不排除任何用例**——`pytest tests/` 仍是
+# 全量真跑。快速回路走 `scripts/test_regress.py quick`（见该脚本头注释）。
+# 刻意不设 `addopts = "-m 'not slow'"`：默认静默少跑一批用例 = 假绿，本仓明令禁止。
+markers = [
+  "slow: 单用例 >2s（多为真实文件系统/子进程 IO）；quick 模式排除",
+  "e2e: 需真实浏览器/容器/外部服务；quick 模式排除",
+  "net: 需外网或真实代理链路；无网环境可 -m 'not net'",
+  "serial: 不可与其他用例并行（Windows 文件系统边界：junction/reparse/只读位/尾点名）；并行时由 --dist loadgroup 归到同一 worker",
+]
+# 标记名拼错必须报错，否则 @pytest.mark.slo 会静默失效 → 该排除的没排除 → 快速回路
+# 越来越慢且没人发现
+addopts = "--strict-markers"
 
 [build-system]
 requires = ["setuptools>=68"]

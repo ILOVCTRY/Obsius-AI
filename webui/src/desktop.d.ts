@@ -20,6 +20,8 @@ declare global {
     terminalWrite: (id: string, data: string) => void
     terminalResize: (id: string, cols: number, rows: number) => void
     terminalKill: (id: string) => Promise<void>
+    /** 原生目录选择（仅桌面壳）：返回绝对路径，用户取消返回空串。 */
+    pickDirectory?: (defaultPath?: string) => Promise<string>
   }
   interface Window { desktopBrowser?: DesktopBrowserApi }
   interface DesktopWindowApi {

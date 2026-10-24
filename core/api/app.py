@@ -56,6 +56,9 @@ from core.blackboard.intentgraph import build_intent_graph
 from core.blackboard.intents import list_intents, reopen_intent
 from core.blackboard import traces
 from core.blackboard.store import Blackboard, BlackboardClosedError
+# 系统注入消息的标签真源（2026-10-24）：所有 `〔…〕` 前缀必须经此生成，
+# 否则 `store.list_messages` 的 origin 判定认不出、前端当人类发言渲染。
+from core.chat.origin import LABEL_FLAG_LEDGER, tag as origin_tag
 from core import assetimport
 from core import fofa as fofa_mod
 from core.integrations import feishu as feishu_mod
@@ -500,6 +503,15 @@ class SampleUploadCreateIn(BaseModel):
     total_size: int = Field(gt=0)
     total_chunks: int = Field(gt=0, le=1_000_000)
     source_type: str = "auto"
+
+
+class SampleLinkIn(BaseModel):
+    """POST .../sample-packages/link：把外部文件夹**原地**登记为分析包（不复制）。
+
+    directory 必须是绝对路径。服务端会 resolve 后校验（存在/是目录/不是盘根/
+    不落在项目内部目录），并通过 `/workspace/dirs` 的树形浏览供前端点选。
+    """
+    directory: str = Field(min_length=1, max_length=4096)
 
 
 class FofaConfigIn(BaseModel):
@@ -1220,7 +1232,7 @@ def _solved_notice(proj, challenge_id: str, flag_row: dict, *,
     solved = bool(st.get("solved"))
     remaining = max(0, quota - got)
 
-    head = [f"〔人工确认〕题目「{name}」的 flag 台账有更新。", ""]
+    head = [f"{origin_tag(LABEL_FLAG_LEDGER)}题目「{name}」的 flag 台账有更新。", ""]
     if briefs:
         head.append(f"**已确认 {got}/{quota} 条**（人工核对过，这些不用再找了）：")
         for b in briefs:
@@ -1978,6 +1990,7 @@ def create_app(
                         app.state.packs_root, proj.track, proj.experts,
                         fallback=proj.capabilities),
                     artifacts_dir=proj.artifacts_dir,
+                    exec_workspace=_exec_workspace(proj),
                     browser_pool=app.state.browser_pool,
                     containers=app.state.session_containers,
                     recovery=_environment_recovery(proj),
@@ -2802,7 +2815,7 @@ def create_app(
             runner = gateway_runner(
                 gateway, project_id=proj.id, session_id="rev-workbench",
                 author="human", timeout=resolve_headless_timeout(),
-                workspace=proj.path)
+                workspace=_exec_workspace(proj))
             svc = build_headless_service(
                 proj.artifacts_dir / "decompiler-cache",
                 runner=runner,
@@ -3261,6 +3274,25 @@ def create_app(
     def _package_store() -> SamplePackageStore:
         return app.state.sample_packages
 
+    def _exec_workspace(proj: Project) -> Path:
+        """执行工作区（2026-10-24「选择分析包 = 工作区」）。
+
+        关联目录包（用户自选的大文件夹）即本项目的执行根：agent 的 run_cmd
+        相对路径、scratch、产物都落它下面，用户挑的目录与「干活的地方」是同一个，
+        不用再把几十 GB 样本复制进项目。无关联包 / 目录已不可用 → 项目工作区
+        （行为与引入前完全一致，存量项目零影响）。
+
+        只换**执行根**（cwd/scratch/pathguard 边界）；平台自有数据目录（黑板、
+        快照、decompiler 缓存、sample_packages 元数据）仍固定在 `proj.path`——
+        那些是平台不变量，不能随用户目录漂移，也不能被写进用户的原始目录。
+        """
+        try:
+            linked = _package_store().exec_workspace(proj.path)
+        except Exception:  # noqa: BLE001 —— 包元数据损坏不得让会话开不起来
+            log.exception("解析执行工作区失败 project=%s", proj.id)
+            linked = None
+        return Path(linked) if linked is not None else Path(proj.path)
+
     def _package_target_job_running(pid: str, package_id: str,
                                     version_id: str, target_id: str) -> bool:
         return any(
@@ -3342,7 +3374,17 @@ def create_app(
         if stop is not None and stop.is_set():
             raise RuntimeError("样本分析已取消")
         actual_sha, actual_size = package_sha256_file(binary_path)
-        if actual_sha != target.get("sha256") or actual_size != int(target.get("size") or -1):
+        if (not package.get("linked")
+                and (actual_sha != target.get("sha256")
+                     or actual_size != int(target.get("size") or -1))):
+            # 上传包的内容树是**不可变**的，sha 对不上只可能是内容树被外部篡改
+            # ——必须拒绝（报告会记错 sha，下游资产/缓存全部错位）。
+            #
+            # 关联目录包（2026-10-24）**故意不校验**（用户口径「不校验，信任快照」）：
+            # 那个目录是用户自己的工作区，文件随时会被改/被工具生成，一改就拒分析
+            # 等于把「选择分析包 = 工作区」变成只读摆设。改为**以实际内容为准**——
+            # 报告与资产都用 actual_sha/size，快照 sha 只留在 manifest 里供对照，
+            # 不会出现「报告 sha 与文件不符」的错位。
             raise RuntimeError("分析包内容已变化，拒绝分析")
         analyzers = list(target.get("analyzers") or [])
         report: dict[str, Any] = {
@@ -3736,6 +3778,7 @@ def create_app(
                                    stuck_max_extensions=adv["stuck_max_extensions"],
                                    closing_max_rounds=adv["closing_max_rounds"]),
                 artifacts_dir=proj.artifacts_dir,
+                exec_workspace=_exec_workspace(proj),
                 existing_session=existing_session,
                 campaign=app.state.campaign,
                 # 环境缺失受控恢复（None=tools 根未配置 → 只回填结构化原因）
@@ -3751,7 +3794,7 @@ def create_app(
                                       session_id=agent.session["id"],
                                       author=agent.session["id"],
                                       timeout=resolve_headless_timeout(),
-                                      workspace=proj.path),
+                                      workspace=_exec_workspace(proj)),
                 global_cache_dir=app.state.decompiler_cache_dir,
                 ida_db_dir=proj.artifacts_dir / "decompiler-db",
                 ghidra_tmp_dir=proj.artifacts_dir / "ghidra-tmp",
@@ -5655,6 +5698,128 @@ def create_app(
         proj = _project(pid)
         return _package_store().list_packages(proj.path)
 
+    # ---------- 选择分析包：目录浏览 + 原地关联（2026-10-24） ----------
+
+    #: 目录浏览一次最多返回多少个子目录（只列目录，不列文件——这里唯一的用途是
+    #: 让用户「点着找」到那个大包，列文件既慢又没用）。
+    _DIR_BROWSE_MAX = 300
+
+    def _browse_roots() -> list[Path]:
+        """目录浏览器可选的起点：Windows 各盘符 / POSIX 根与家目录。
+
+        这是**人工显式操作**（用户主动点「选择分析包」并逐级点进目标目录），
+        不是 agent 可触达的工具面——agent 侧读路径本就放开（只有写才拦边界），
+        故此处列盘符不构成新的越权面。
+        """
+        roots: list[Path] = []
+        if os.name == "nt":
+            import string
+            for letter in string.ascii_uppercase:
+                drive = Path(f"{letter}:\\")
+                try:
+                    if drive.exists():
+                        roots.append(drive)
+                except OSError:
+                    continue
+        else:
+            roots.extend([Path("/"), Path.home()])
+        home = Path.home()
+        if home.is_dir() and home not in roots:
+            roots.insert(0, home)
+        return roots
+
+    @app.get("/api/projects/{pid}/workspace/dirs")
+    def browse_directories(pid: str, path: str | None = Query(default=None)):
+        """列出一个目录的子目录（「选择分析包」的应用内目录浏览器）。
+
+        `path` 省略 → 返回起点列表（磁盘/家目录）。返回项含 `is_project` /
+        `is_workspace` 标记，前端据此提示「这个已经是本项目工作区」等。
+        隐藏/系统目录照常列出（用户可能就想选它们），但不 follow 符号链接，
+        读不到（权限/已卸载）的目录直接跳过而不是 500。
+        """
+        proj = _project(pid)
+        if not path:
+            items = []
+            for root in _browse_roots():
+                try:
+                    st = root.stat()
+                except OSError:
+                    continue
+                items.append({"name": str(root), "path": str(root), "kind": "dir",
+                              "entry_count": None, "root": True,
+                              "is_project": str(root) == str(proj.path)})
+            return {"path": "", "parent": None, "roots": True, "entries": items}
+
+        target = Path(str(path))
+        if not target.is_absolute():
+            raise HTTPException(422, "目录路径必须是绝对路径")
+        try:
+            resolved = target.resolve(strict=True)
+        except OSError as exc:
+            raise HTTPException(404, f"目录不存在或不可访问: {path}") from exc
+        if not resolved.is_dir():
+            raise HTTPException(422, f"不是目录: {path}")
+        linked_ws = _package_store().exec_workspace(proj.path)
+        entries: list[dict[str, Any]] = []
+        truncated = False
+        try:
+            children = sorted(resolved.iterdir(), key=lambda p: p.name.lower())
+        except OSError as exc:
+            raise HTTPException(403, f"目录不可读: {path}") from exc
+        for child in children:
+            try:
+                if not child.is_dir() or child.is_symlink():
+                    continue
+            except OSError:
+                continue
+            if len(entries) >= _DIR_BROWSE_MAX:
+                truncated = True
+                break
+            try:
+                count = sum(1 for _ in child.iterdir())
+            except OSError:
+                count = None
+            entries.append({
+                "name": child.name, "path": str(child), "kind": "dir",
+                "entry_count": count, "root": False,
+                "is_project": child == proj.path,
+                "is_workspace": bool(linked_ws and child == Path(linked_ws).parent),
+            })
+        parent = resolved.parent if resolved.parent != resolved else None
+        return {"path": str(resolved), "parent": str(parent) if parent else None,
+                "roots": False, "entries": entries, "truncated": truncated}
+
+    @app.post("/api/projects/{pid}/sample-packages/link", status_code=202)
+    def link_sample_package(pid: str, body: SampleLinkIn):
+        """把外部文件夹**原地**登记为分析包 + 执行工作区（2026-10-24）。
+
+        与上传路径的区别只有「不复制」：几十 GB 的分析包既不该走浏览器上传，
+        也不该在项目内再复制一份。目录本身成为 tree_ref，同时也是该项目后续
+        agent 会话的执行工作区（`_exec_workspace`）。
+
+        扫描是 CPU/IO 密集动作（几十万文件要算全量 sha256），故走后台 Job，
+        立即返回 `job_id`；前端轮询 `/api/jobs/{id}` 拿最终分析包对象。
+        """
+        proj = _project(pid)
+        store = _package_store()
+        directory = str(body.directory or "").strip()
+        if not directory:
+            raise HTTPException(422, "未指定目录")
+        # 同步预检（2026-10-24）：相对路径/不存在/非目录/平台内部目录这些能立刻
+        # 判死的错误必须在这里变成 4xx。否则 HTTP 先回 202，用户看到「已开始扫描」，
+        # 错误却只能从一个已经失败的 Job 里翻出来。
+        try:
+            store.validate_link_directory(proj.path, directory)
+        except SamplePackageError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        progress: dict[str, Any] = {"phase": "queued"}
+        job_id = app.state.jobs.submit_unique(
+            f"sample-package-link:{pid}",
+            lambda: store.link_directory(proj.path, directory, progress=progress),
+            meta={"project_id": pid, "progress": progress, "directory": directory},
+        )[0]
+        return {"job_id": job_id, "directory": directory}
+
     @app.get("/api/projects/{pid}/sample-packages/current")
     def current_sample_package(pid: str):
         proj = _project(pid)
@@ -5662,7 +5827,10 @@ def create_app(
         if row is None:
             raise HTTPException(404, "分析包不存在")
         pointer = _package_store()._read_current(proj.path) or {}
-        return {**row, "undo_available": bool((pointer.get("undo") or {}).get("version_id"))}
+        # exec_workspace：关联目录包时=该目录，否则=项目工作区。前端据此显示
+        # 「工作区」路径并把不可编辑（关联包）的文件树操作置灰。
+        return {**row, "undo_available": bool((pointer.get("undo") or {}).get("version_id")),
+                "exec_workspace": str(_exec_workspace(proj))}
 
     @app.get("/api/projects/{pid}/sample-packages/preview")
     def preview_sample_package_entry(pid: str, path: str = Query(..., min_length=1),
@@ -5897,10 +6065,17 @@ def create_app(
         if ("binary-static" not in analyzers
                 or str(target.get("format") or "") not in {"pe", "elf", "mach-o"}):
             raise HTTPException(422, "该目标不是 PE/ELF/Mach-O 二进制，无法登记为资产")
-        sha = str(target.get("sha256") or "")
-        if not sha:
-            raise HTTPException(422, "目标缺少 sha256，无法登记")
-        size = int(target.get("size") or binary_path.stat().st_size)
+        # 关联目录包按**实际内容**登记（2026-10-24，与「信任快照」口径一致）：
+        # 那个目录是用户自己的工作区，文件随时可能被改；沿用快照 sha 会把资产
+        # 挂到一个已经不存在的哈希上（后续按 sha 定位/去重/缓存全错位）。
+        from core.sample_packages import sha256_file as _pkg_sha256
+        if package.get("linked"):
+            sha, size = _pkg_sha256(binary_path)
+        else:
+            sha = str(target.get("sha256") or "")
+            if not sha:
+                raise HTTPException(422, "目标缺少 sha256，无法登记")
+            size = int(target.get("size") or binary_path.stat().st_size)
         asset = _register_package_binary_asset(proj, package, target, sha, size)
         proj.bb.append_event(pid, "sample.target.registered", {
             "package_id": package_id, "version_id": version_id,
@@ -9703,10 +9878,18 @@ def create_app(
         能力白名单三件套（skills/tools/mcp_servers）例外：空列表必须落成
         ``key: []``——勾选模式里「全不选」是明确的「一个都不启用」，
         若按空值丢弃会退化成 null（全量），与界面语义相反。
+
+        ``tracks`` 同属此列（2026-10-25，tracks 语义反转后）：现在「不勾任何轨」
+        就是「不启用」，与 skills/tools 完全同构。此前它按普通空值丢弃，于是
+        设置页保存一次就把 ``tracks: [pentest, redteam, ctf]`` 整行抹掉，
+        专家静默掉出全部轨的专家池——``artex-controller.yaml`` 就是这么被清空的
+        （doctor 报 expert-track-empty 才暴露）。**这与下方 docstring 记载的
+        `intent_free` 事故是同一家族：yaml 有、表单有、代码在读，但序列化漏了。**
+
         ``knowledge``（kb 方向）不在此列：它是两态字段，null 与 [] 都表示
         「不限方向」（见 core/skills/experts.expert_directions），空列表照常丢弃。
         """
-        _EMPTY_LIST_KEYS = {"skills", "tools", "mcp_servers"}
+        _EMPTY_LIST_KEYS = {"skills", "tools", "mcp_servers", "tracks"}
 
         def _emit(key: str, val: Any, lines: list[str]) -> None:
             if val is None or val == "":
@@ -10171,10 +10354,14 @@ def create_app(
 
     @app.get("/api/capabilities/{cap}/kb/routes")
     def kb_routes(cap: str):
-        """kb 任务导航路由表（kb/route.json 原样；前端 KbTree「按任务类型」分组）。"""
+        """kb 任务导航路由表（kb/route.json 原样；前端 KbTree「按任务类型」分组）。
+
+        `cap` 可为「全部」哨兵（writing.KB_ALL_CAP）：合并全部方向的 route.json
+        （前缀本就是全局形态 `<域>/…`，合并后与聚合树的带前缀路径同形）。"""
         from core.skills.kbindex import load_kb_routes
         return {"cap": cap, "routes": load_kb_routes(
-            app.state.packs_root, [cap])}
+            app.state.packs_root,
+            writing.kb_directions_for(app.state.packs_root, cap))}
 
     @app.get("/api/campaign-memory")
     def campaign_memory(limit: int = Query(50, ge=1, le=200)):
@@ -10257,8 +10444,26 @@ def create_app(
     def kb_search(cap: str, q: str = Query(""), limit: int = Query(50, ge=1, le=200),
                   tag: str | None = Query(None, description="分面标签过滤"
                       "（K5 升级项 C，phase/vuln_class 值，如 sqli、jwt、recon）")):
-        return {"cap": cap, "q": q, "tag": tag, "results": _kb_error_map(
-            writing.search_kb, app.state.packs_root, cap, q, limit, tag=tag)}
+        """kb 正文搜索。`cap` 可为「全部」哨兵（writing.KB_ALL_CAP）：逐方向检索后
+        合并，命中路径补方向前缀成全局 module 形态（与聚合树/`kb_open` 同口径），
+        排序与单方向口径一致（命中次数降序、同分按路径）再截断到 limit。
+
+        注意：**这里不做轨道加权**（知识库工作台是人工浏览，权重只作用于 Agent
+        侧检索，见 core/skills/taxonomy.TRACK_KB_DIRECTION_WEIGHTS）。"""
+        directions = writing.kb_directions_for(app.state.packs_root, cap)
+        if len(directions) == 1:
+            results = _kb_error_map(writing.search_kb, app.state.packs_root,
+                                    directions[0], q, limit, tag=tag)
+        else:
+            results = []
+            for direction in directions:
+                for row in _kb_error_map(writing.search_kb, app.state.packs_root,
+                                         direction, q, limit, tag=tag):
+                    results.append({**row, "path": f"{direction}/{row['path']}",
+                                    "cap": direction})
+            results.sort(key=lambda r: (-r.get("matches", 0), r["path"]))
+            results = results[:max(1, limit)]
+        return {"cap": cap, "q": q, "tag": tag, "results": results}
 
     @app.get("/api/capabilities/{cap}/kb/file")
     def kb_read(cap: str, path: str = Query(...)):
@@ -10628,11 +10833,19 @@ def create_app(
     # 持久子线程）。流式走 chat.delta/chat.tool/chat.message 事件（现有事件管道）。
 
     def _chat_agents(pid: str) -> list[dict]:
+        from core.chat.runtime import ORCHESTRATOR_ID
+        from core.skills.experts import expert_exists, load_expert
         proj = _project(pid)
-        from core.skills.experts import load_expert
-        rows = [{"id": "chat-orchestrator", "kind": "orchestrator"}]
+        # 主控也**走服务轨过滤**（controller-track-filter，2026-10-25）：此前主控
+        # 是硬编码追加的，yaml 里的 tracks 只给人看——于是 CTF 项目的工作台里
+        # 也能选到「渗透测试主控」，选进去才发现派不出该轨的专家（它的
+        # `_delegatable_experts` 就是本轨专家池交集的空集）。口径与专家池一致：
+        # `expert_exists`（= 文件在 且 tracks 含本轨）为假就不进菜单。
+        rows = ([{"id": ORCHESTRATOR_ID, "kind": "orchestrator"}]
+                if expert_exists(app.state.packs_root, ORCHESTRATOR_ID, proj.track)
+                else [])
         for eid in list_experts(app.state.packs_root, proj.track):
-            if eid in {"_generalist", "chat-orchestrator"}:
+            if eid in {"_generalist", ORCHESTRATOR_ID}:
                 continue
             rows.append({"id": eid, "kind": "expert"})
         out = []
@@ -11292,7 +11505,7 @@ def create_app(
                             tid, ov_err)
             exec_llm, plan_llm = _llms()
         agents = {a["id"] for a in _chat_agents(pid)}
-        # 控制器类智能体（chat-orchestrator + 激进主控）才拿可委派专家池；
+        # 控制器类智能体（pentest-controller + 激进主控）才拿可委派专家池；
         # 子专家线程 expert_names=[]（spawn 深度=1，call_expert 恒拒）。
         expert_names = (sorted(agents)
                         if thread["agent_id"] in CONTROLLER_IDS else [])
@@ -11317,7 +11530,7 @@ def create_app(
                                               session_id=session_id,
                                               author=author,
                                               timeout=resolve_headless_timeout(),
-                                              workspace=proj.path),
+                                              workspace=_exec_workspace(proj)),
                         global_cache_dir=app.state.decompiler_cache_dir,
                         ida_db_dir=proj.artifacts_dir / "decompiler-db",
                         ghidra_tmp_dir=proj.artifacts_dir / "ghidra-tmp",
@@ -11337,6 +11550,7 @@ def create_app(
                     owner_tags=proj.bb.owner_tags(pid),
                     rule_profiles=cfg.get("rule_profiles"),
                     artifacts_dir=proj.artifacts_dir,
+                    exec_workspace=_exec_workspace(proj),
                     browser_pool=(app.state.browser_pool
                                   if proj.track in ("pentest", "redteam", "ctf")
                                   else None),

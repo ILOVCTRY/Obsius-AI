@@ -27,7 +27,7 @@ from pathlib import Path
 
 from core.phases import GATE_KEYS, parse_phase_file, phase_spec
 from core.skills import refs
-from core.skills.experts import GENERALIST, expert_exists
+from core.skills.experts import GENERALIST, expert_exists, serves_track
 from core.skills.profiles import BOARD_VIEWS
 from core.skills.roles import _parse_inline_value
 from core.skills.registry import SkillRegistry, parse_frontmatter
@@ -243,6 +243,16 @@ def diagnose(packs_root: str | Path,
                         "error", "expert-track-unknown", _rel(ep, root),
                         f"专家 {ep.stem} 引用未知轨域: {tr}"
                         "（tracks 字段或 variant_<track>_* 前缀）"))
+            # tracks 未勾（2026-10-25 语义反转后必报）：此前「不勾 = 全轨通用」，
+            # 漏填是静默放行；现在「不勾 = 不启用」，该专家不会出现在任何轨的
+            # 专家池/委派值域里。这个 warning 就是唯一的可见入口——没有它，用户
+            # 只会看到「我明明建了专家，工作台里选不到」，无从下手。
+            if not (expert.get("tracks") or []):
+                rep.issues.append(Issue(
+                    "warning", "expert-track-empty", _rel(ep, root),
+                    f"专家 {ep.stem} 未勾任何服务轨 tracks（当前语义：不勾=不启用，"
+                    "该专家不会出现在任何轨的专家池；如需全域可用请显式写"
+                    f" tracks: [{', '.join(sorted(valid_tracks))}]）"))
             for sk_name in expert.get("skills") or []:
                 referenced.add(sk_name)  # 专家引用也算可达（M2 后专家是唯一引用源）
                 sk = reg.get(sk_name)
@@ -269,11 +279,11 @@ def diagnose(packs_root: str | Path,
                     rep.issues.append(Issue(
                         "error", "profile-expert-missing", _rel(prof, root),
                         f"场景档 {prof.stem} 引用了不存在的专家: {ename}"))
-                elif (ets := expert_tracks.get(ename)) is not None and track_name not in ets:
+                elif not serves_track(ets := expert_tracks.get(ename), track_name):
                     rep.issues.append(Issue(
                         "error", "profile-expert-missing", _rel(prof, root),
                         f"场景档 {prof.stem} 引用的专家 {ename} 不服务 {track_name} 轨"
-                        f"（tracks: {ets}）"))
+                        f"（tracks: {ets or '未勾任何轨（=不启用）'}）"))
             if (bv := p.get("board_view")) and bv not in BOARD_VIEWS:
                 rep.issues.append(Issue(
                     "warning", "profile-board-view-unknown", _rel(prof, root),

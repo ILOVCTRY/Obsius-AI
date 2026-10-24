@@ -50,7 +50,14 @@ EVENT_UNREAD = "chat.background_unread"
 
 # 唤醒轮注入的 user 消息前缀。前端据此渲染成「系统提示」而不是「我说的话」
 # （`ChatTurn.run` 无条件把入参落成 role=user，没有别的区分通道）。
-WAKE_TAG = "〔系统补达〕"
+#
+# **2026-10-24 修正**：这份「前端会识别」的约定此前**只有文案侧**——前端一直
+# 把它当人类发言原文渲染（`❯` + `whitespace-pre-wrap`，`**加粗**` 全成字面量）。
+# 现在统一由 `core/chat/origin.py` 裁决：后端在 `store.list_messages` 里派生
+# `origin` 字段，前端只认字段。标签本身也从那里取，避免两处字面量漂移。
+from core.chat.origin import LABEL_BG_DONE, tag as _tag
+
+WAKE_TAG = _tag(LABEL_BG_DONE)
 
 # 去重记账事件 kind（按 tool_use_id 记，重启后仍有效）。
 WAKE_EVENT = "chat.expert_bg_wake"

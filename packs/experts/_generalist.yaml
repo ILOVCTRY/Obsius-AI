@@ -3,6 +3,10 @@
 name: "通用"
 description: "通用评估员：按入口技能路由分配的方向干活"
 persona: "通用渗透测试员，按入口技能路由分配的方向干活。"
+# **tracks 必须显式列全四轨**（2026-10-25 语义反转）：tracks 空/缺省 = 不启用。
+# 本专家是 `load_expert` 的回退目标，任何一轨漏掉都会让该轨「专家被删/名字拼错」
+# 时的兜底失效（直接抛 FileNotFoundError → 整轮炸开）。
+tracks: [ctf, pentest, redteam, research]
 # null = 不限制（全量技能/工具）。**这三个键必须显式保留**：设置页保存会全字段
 # 覆写 yaml，缺键时 `load_expert` 返回的 dict 里就没有该键，而消费端区分三态
 # （缺键≠None）——`_skill_block` 会退化成"读不到白名单"、测试直接 KeyError。

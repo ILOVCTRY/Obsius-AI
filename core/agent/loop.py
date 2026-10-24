@@ -26,7 +26,7 @@ from typing import Any
 
 from core.agent.retention import omitted_note, retain
 from core.agent.session_state import SessionState, state_proxy
-from core.agent.tool_registry import bb_query_schema_for
+from core.agent.tool_registry import REGISTRY, bb_query_schema_for
 from core.agent.tools import (
     AGENT_TOOLS,
     HARD_REJECT_PREFIXES,
@@ -77,6 +77,48 @@ def _llm_tool_schemas(tools: list[dict[str, Any]],
         return tools
     return [bb_query_schema_for(track) if t.get("name") == "bb_query" else t
             for t in tools]
+
+
+def _face_of(tools: list[dict[str, Any]] | None) -> frozenset[str]:
+    """这次下发**真实到达模型**的工具名集合（工具面泄漏修复的判据来源）。
+
+    必须取「已过滤的最终列表」而不是角色 yaml / 全局 AGENT_TOOLS：中间还有
+    plan-only 收缩、探针排除、轨道裁剪多道闸，「yaml 里有」不等于「模型看得到」。
+    """
+    return frozenset(str(t.get("name") or "") for t in (tools or []))
+
+
+def _render_descriptions(tools: list[dict[str, Any]],
+                         face: frozenset[str] | None = None
+                         ) -> list[dict[str, Any]]:
+    """把每个工具的描述渲染成**该角色自己的那一份**（tool-face-leak，2026-10-23）。
+
+    起因（三份 agent 复盘 3/3 提到，R1 列为硬阻塞）：描述是全局文案，工具面按
+    角色裁剪，于是文案里「顺便提到」的别家工具对某些角色就是不存在的工具——
+    实测 ctf-controller 的系统提示写「用 skill_open」「结论走 bb_add_finding」
+    「→ ctf_abandon」，它一个都调不到，白烧往返。
+
+    做法：描述由 `ToolSpec.desc_for(face)` 按**实发面**组装，有这个工具才教它
+    调，没有就改成交接语。face 缺省取本 list 自身（即「这批工具」的集合）。
+    """
+    if not tools:
+        return tools
+    face = face if face is not None else _face_of(tools)
+    out: list[dict[str, Any]] = []
+    for t in tools:
+        name = str(t.get("name") or "")
+        spec = REGISTRY.get(name)
+        # bb_query 走 schema_for（轨裁剪还要叠一层），已在调用方处理
+        if spec is None or spec.desc_for is None or name == "bb_query":
+            out.append(t)
+            continue
+        try:
+            desc = spec.desc_for(face)
+        except Exception:  # noqa: BLE001 —— 渲染失败退回全量文案，不拖垮工具面
+            out.append(t)
+            continue
+        out.append({**t, "description": desc})
+    return out
 
 
 # 工具参数流截断的整轮重试上限（2026-09-20 事故修复）：GLM 长思考会话输出预算
@@ -475,7 +517,9 @@ def _zip_preview(p: Path) -> str | None:
 
 
 def _attachment_lines(attachments: Any,
-                      ws: Path | None = None) -> list[str]:
+                      ws: Path | None = None,
+                      *,
+                      can_unpack: bool = True) -> list[str]:
     """附件清单行（2026-09-19 附件随发）：任务 context.attachments 与
     human_note payload.attachments 共用渲染。
 
@@ -497,7 +541,14 @@ def _attachment_lines(attachments: Any,
     一一对应的确定性命名）；② zip central directory 预览（条目数/顶层文件/
     解压后大小，不解压）；③ 明示用 `unpack_attachment` 工具（服务端清旧+安全
     解压+结构化清单），替代 run_cmd unzip。ws 未装配（测试/无工作区）时退化为
-    旧单行形态。"""
+    旧单行形态。
+
+    **can_unpack（tool-face-leak，2026-10-23）**：解压指引只在**本会话工具面里
+    真有 unpack_attachment/read_file/search_files** 时才写。控制器类角色
+    （ctf-controller / pentest-controller / artex-controller）工具面里没有这三件，
+    照旧写等于教它调不存在的工具；此时改写成「交给负责该题的专家解压」。
+    调用方按自己的有效工具面（`config.allowed_tools` / 角色 yaml `tools`）传。
+    """
     lines: list[str] = []
     for a in attachments or []:
         if not isinstance(a, dict):
@@ -523,12 +574,23 @@ def _attachment_lines(attachments: Any,
             if preview:
                 line += f"；{preview}"
             lines.append(line)
-            lines.append(
-                f"  → 解压到 /workspace/scratch/att-{sha12}/：调 "
-                f"unpack_attachment(path=\"/workspace/{path}\")——服务端完成"
-                "清旧残留+安全解压+结构化清单，替代 run_cmd 拼 unzip（unzip -o "
-                "只覆盖同名文件，上轮分析残留会整批混进 ls 输出）；之后 read_file/"
-                f"search_files 用相对 scratch 路径 att-{sha12}/... 读")
+            if not can_unpack:
+                # 工具面泄漏修（tool-face-leak，2026-10-23）：本会话工具面里没有
+                # unpack_attachment/read_file/search_files（控制器类角色），
+                # 原文案会把它引导去调三个不存在的工具。
+                lines.append(
+                    f"  → 解压目录 /workspace/scratch/att-{sha12}/：本线程没有解压/"
+                    "读文件工具——把该 zip 交给负责这道题的专家，让它用 "
+                    f"unpack_attachment(path=\"/workspace/{path}\") 解压（服务端完成"
+                    "清旧残留+安全解压+结构化清单）后按清单读；解压产物不要当题目"
+                    "附件登记，路径已在解压回执里。")
+            else:
+                lines.append(
+                    f"  → 解压到 /workspace/scratch/att-{sha12}/：调 "
+                    f"unpack_attachment(path=\"/workspace/{path}\")——服务端完成"
+                    "清旧残留+安全解压+结构化清单，替代 run_cmd 拼 unzip（unzip -o "
+                    "只覆盖同名文件，上轮分析残留会整批混进 ls 输出）；之后 read_file/"
+                    f"search_files 用相对 scratch 路径 att-{sha12}/... 读")
         else:
             lines.append(line)
             # 图片附件给看图指引（vision 通道，2026-10-19）：此前附件一律只渲染
@@ -562,6 +624,7 @@ class AgentSession:
         config: AgentConfig | None = None,
         decompiler=None,
         artifacts_dir: str | Path | None = None,
+        exec_workspace: str | Path | None = None,
         existing_session: dict | None = None,
         enable_sediment: bool = False,  # v0.65：done 自动提案开关（app 工厂按配置开；直构默认关）
         campaign=None,                  # ⑥ 战役记忆全局库（CampaignMemory；None=不沉淀）
@@ -578,6 +641,11 @@ class AgentSession:
         self.config = config or AgentConfig()
         apply_context_budget(self.config, self.llm)  # 模型声明上下文 → 预算换算（无声明=默认）
         self.artifacts_dir = Path(artifacts_dir) if artifacts_dir else None
+        # 执行工作区根（2026-10-24「选择分析包 = 工作区」）：项目当前分析包是
+        # 关联外部目录时由 app 层传入该目录，run_cmd 的 cwd/scratch/写边界都落
+        # 那里；None = 沿用 artifacts_dir 的父目录（= 项目工作区，存量零影响）。
+        # 产物仍写 artifacts_dir，不随执行根漂移。
+        self.exec_workspace = Path(exec_workspace) if exec_workspace else None
 
         role_data = load_expert(self.packs_root, role, track)
         # 专家缺失时 load_expert 已回退 _generalist；role-rules/会话名按实际专家走
@@ -614,6 +682,7 @@ class AgentSession:
             bb, gateway,
             project_id=project_id, session_id=self.session["id"], author=self.session["id"],
             decompiler=decompiler, artifacts_dir=artifacts_dir,
+            exec_workspace=exec_workspace,
             packs_root=packs_root, track=track, capabilities=self.capabilities,
             allowed_tools=self.config.allowed_tools,
             allowed_task_types=load_task_types(self.packs_root, track).keys(),
@@ -1407,9 +1476,12 @@ class AgentSession:
                 return None  # drain 已消费，回复丢弃（abort 语义：本轮作废）
             step += 1
             try:
-                resp = self._chat_interruptible(messages, system=system,
-                                                tools=_llm_tool_schemas(CHAT_TOOLS, self.track),
-                                                stream_text=True)
+                resp = self._chat_interruptible(
+                    messages, system=system,
+                    tools=_render_descriptions(
+                        _llm_tool_schemas(CHAT_TOOLS, self.track),
+                        self._effective_face(CHAT_TOOLS)),
+                    stream_text=True)
             except _StepInterrupted:
                 # 对话中被中断（LLM 等待期间置位）：半截回复已由
                 # _flush_interrupted_reply 落盘（interrupted=true），引导已 drain
@@ -1948,7 +2020,9 @@ class AgentSession:
             try:
                 resp = self._chat_interruptible(
                     messages, system=system,
-                    tools=_llm_tool_schemas(self._task_tool_schemas(), self.track),
+                    tools=_render_descriptions(
+                        _llm_tool_schemas(self._task_tool_schemas(), self.track),
+                        self._effective_face(self._task_tool_schemas())),
                     step=step)
             except _StepInterrupted:
                 # ■ 即点即停（2026-09-19）：LLM 调用等待中被人手中断——不等本步
@@ -2045,6 +2119,20 @@ class AgentSession:
     # ---------- 阶段三规划节拍（2026-09-28，planner-cadence） ----------
 
     _CADENCE_K = 8  # 周期校验触发步距：每 K 步且近 K 步未修订过 → 提示一次
+
+    def _effective_face(self, tools: list[dict[str, Any]]) -> frozenset[str]:
+        """本会话**实际可用**的工具面：这批工具 ∩ 角色白名单。
+
+        子专家侧的工具表是全局 AGENT_TOOLS（不像控制器那样由 yaml 装配），但
+        `config.allowed_tools` 会在执行层拒掉越界调用（dispatcher 硬拒）。所以
+        「模型看得到」≠「调得动」：描述分叉必须按**能调动的**这一份算，否则会给
+        一个被白名单排除的角色写「用 bb_add_finding」，它一调就被拒。
+        """
+        face = _face_of(tools)
+        allowed = getattr(self.config, "allowed_tools", None)
+        if allowed:
+            face = face & frozenset(str(a) for a in allowed)
+        return face
 
     def _task_tool_schemas(self) -> list[dict[str, Any]]:
         """plan-only 教练模式：发给 LLM 的工具面收缩到计划/控制原语；其余全量。"""
@@ -2169,6 +2257,20 @@ class AgentSession:
                 out.append((kind, notice))
         return out, drained
 
+    def _can_unpack(self) -> bool:
+        """本会话工具面里有没有 unpack_attachment（附件解压指引的角色分叉）。
+
+        tool-face-leak（2026-10-23）：解压/读文件指引是给**有这些工具**的角色写的，
+        控制器类角色（ctf-controller 等）工具面里没有 → 照旧写等于教它调不存在的
+        工具。判据取**有效工具面**（`config.allowed_tools` 是 `_apply_role_limits`
+        按角色 yaml `tools` 收敛后的结果），两处都为空/缺省 = 全量工具面。
+        """
+        allowed = getattr(self.config, "allowed_tools", None)
+        if allowed:
+            return "unpack_attachment" in set(allowed)
+        tools = (self.role or {}).get("tools")
+        return True if not tools else "unpack_attachment" in set(tools)
+
     def _human_note_notice(self, inbox_rows: list[dict[str, Any]]) -> str | None:
         """拼「人类引导」消息（E8，kind='human_note'）：信息式注入；多条按序
         各占一行。payload.attachments（2026-09-19 附件随发）渲染成 📎 行——
@@ -2182,9 +2284,11 @@ class AgentSession:
             text = str(payload.get("text", "")).strip()
             if text:
                 lines.append(f"- {text}")
-            # ws 传入后 zip 附件可带「解压目录 + 条目预览 + unpack_attachment 指引」
+            # ws 传入后 zip 附件可带「解压目录 + 条目预览 + unpack_attachment 指引」；
+            # 指引按本会话有效工具面分叉（tool-face-leak，2026-10-23）
             ws_root = self.artifacts_dir.parent if self.artifacts_dir else None
-            lines.extend(_attachment_lines(payload.get("attachments"), ws_root))
+            lines.extend(_attachment_lines(payload.get("attachments"), ws_root,
+                                           can_unpack=self._can_unpack()))
         if not lines:
             return None
         return "\n".join(["💬 人类引导："] + lines)
@@ -2695,7 +2799,7 @@ class AgentSession:
             if not query.strip():
                 return ""
             hints = kb_module_hints(self.packs_root, self.capabilities, query,
-                                    cap=cap)
+                                    cap=cap, track=self.track)
             parts: list[str] = []
             for h, sec in hints:
                 body = read_kb_module(self.packs_root, self.capabilities,

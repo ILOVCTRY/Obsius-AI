@@ -31,6 +31,7 @@ group 必须落在 `TOOL_GROUPS` 内（`tool()` 装饰器当场拒绝），
 """
 
 from dataclasses import dataclass
+from typing import Any
 
 
 _ADDR_DESC = "函数地址，hex 字符串优先（如 \"0x401000\"）；十进制整数也收"
@@ -44,7 +45,18 @@ TOOL_GROUPS = ["执行", "文件", "黑板", "知识", "浏览器", "协作", "�
 
 @dataclass(frozen=True)
 class ToolSpec:
-    """单个工具的元数据。handler 缺省 = `_tool_<name>`（命名约定保留，便于阅读）。"""
+    """单个工具的元数据。handler 缺省 = `_tool_<name>`（命名约定保留，便于阅读）。
+
+    ``desc_for``（tool-face-leak，2026-10-23）：**按调用方工具面渲染描述**的可选
+    钩子。工具描述原先是一份全局文案，而工具面按角色裁剪（控制器 / 子专家 /
+    探针 / 工作区各有自己的面），于是文里「顺便提到」的别家工具，对某些角色就是
+    **不存在的工具**——实测原文：ctf-controller 的系统提示写「用 skill_open」
+    「结论走 bb_add_finding」，它一个都调不到，白烧往返。
+
+    ``desc_for`` 收调用方**实发工具面**（frozenset），返回该角色专属的那份文本：
+    有这个工具才教它调，没有就改成交接语。``description`` 保留**全量面**版本
+    （face=REGISTRY 全部），是 ``desc_for(None)`` 的回退，也是既有快照/文档的锚点。
+    """
 
     name: str
     description: str
@@ -52,27 +64,216 @@ class ToolSpec:
     group: str
     flags: frozenset = frozenset()
     handler: str = ""
+    desc_for: Any = None
 
-    def as_schema(self) -> dict:
-        """Anthropic 工具 schema（原 AGENT_TOOLS 的元素形态）。"""
-        return {"name": self.name, "description": self.description,
+    def as_schema(self, face: frozenset[str] | set[str] | None = None) -> dict:
+        """Anthropic 工具 schema（原 AGENT_TOOLS 的元素形态）。
+
+        ``face`` 给定且本工具有 ``desc_for`` 时返回**该工具面专属**的描述；否则
+        返回全量文案（与裁剪机制上线前逐字一致）。
+        """
+        desc = self.description
+        if face is not None and self.desc_for is not None:
+            try:
+                desc = self.desc_for(frozenset(face))
+            except Exception:  # noqa: BLE001 —— 渲染失败绝不拖垮整个工具面
+                desc = self.description
+        return {"name": self.name, "description": desc,
                 "input_schema": self.input_schema}
 
 
 REGISTRY: dict = {}
 
 
-def tool(name, *, description, input_schema, group, flags=(), handler=""):
-    """注册一个工具（导入期执行）。group 非法/重名当场抛错，杜绝静默落「其他」。"""
+def tool(name, *, description, input_schema, group, flags=(), handler="",
+         desc_for=None):
+    """注册一个工具（导入期执行）。group 非法/重名当场抛错，杜绝静默落「其他」。
+
+    ``desc_for``：见 `ToolSpec` 的说明——按调用方工具面渲染描述的可选钩子。
+    """
     if name in REGISTRY:
         raise ValueError(f"工具重复注册: {name}")
     if group not in TOOL_GROUPS:
         raise ValueError(f"工具 {name} 的 group 非法: {group!r}（须属 TOOL_GROUPS）")
     spec = ToolSpec(name=name, description=description, input_schema=input_schema,
                     group=group, flags=frozenset(flags),
-                    handler=handler or f"_tool_{name}")
+                    handler=handler or f"_tool_{name}", desc_for=desc_for)
     REGISTRY[name] = spec
     return spec
+
+
+# ---------------- 描述按工具面渲染的辅助（tool-face-leak，2026-10-23） ----------------
+#
+# 一段描述里常会「顺便提到」协作型工具（写黑板的 bb_add_finding、声明意图的
+# declare_intent、查重的 bb_query…），这对多数角色是对的，但对工具面被裁过的
+# 角色就是**教它调不存在的工具**。做法：把那类句子按「需要哪些工具同时在场」
+# 门控，`desc_for(face)` 组装出该角色专属的那一份。
+#
+# 与「按轨裁剪」的分工：轨裁剪管**同一个 what.enum/参数面**（渗透拿不到 tree_id），
+# 这里管**同一句话在不同角色面前的去向**。两者可叠加，互不覆盖。
+
+def _has(face, *names: str) -> bool:
+    """这些工具是否都在调用方工具面里（空 names = 恒真）。"""
+    return all(n in face for n in names)
+
+
+def _opt(face, names: tuple[str, ...], text: str, alt: str = "") -> str:
+    """工具面全含 ``names`` → 返回 ``text``；否则返回 ``alt``（缺省空串=整句拿掉）。"""
+    return text if _has(face, *names) else alt
+
+
+def _sentence(face, *parts: str) -> str:
+    """把若干片段拼成一句：空片段自动丢弃，避免出现「；。」这类残句。"""
+    body = "".join(p for p in parts if p)
+    return body
+
+
+def _search_files_desc(face) -> str:
+    """search_files 的描述：三处「别家工具」按面改写。"""
+    if _has(face, "bb_query"):
+        where = '适合在 bb_query 溢出落盘文件里定位关键词'
+    else:
+        where = '适合在落盘的大文件里定位关键词'
+    grep_alt = ('，替代 run_cmd grep' if _has(face, "run_cmd")
+                else '，替代 shell grep')
+    if _has(face, "unpack_attachment"):
+        cross = ('未指定 path 时不扫其它题目的附件解包副本'
+                 '（非本会话 unpack_attachment 解压过的 scratch/att-*），'
+                 '防多题共跑时旧题工作文件淹没命中；要跨题找就显式传 path。')
+    else:
+        cross = ('未指定 path 时不扫其它题目的附件解包副本（非本会话解压过的 '
+                 'scratch/att-*），防多题共跑时旧题工作文件淹没命中；要跨题找就显式传 path。')
+    return ('在工作区文本文件中按内容检索：纯 Python 实现、不经 shell'
+            '（无命令执行面、无注入风险），计划前也允许调（等价只读侦察）。'
+            '默认搜 scratch 及其余工作区目录，只搜本项目；命中行以「相对路径:行号:内容」返回。'
+            + where + grep_alt + '。' + cross)
+
+
+def _bb_add_asset_desc(face) -> str:
+    """bb_add_asset 的描述：查重 / 解压回执 / 结论出口三处按面改写。"""
+    dedup = ('重报同值=合并 meta 不插重复行（发布前先 bb_query 查重）。'
+             if _has(face, "bb_query") else
+             '重报同值=合并 meta 不插重复行（同一资产不要反复登记）。')
+    if _has(face, "unpack_attachment") and _has(face, "bb_add_finding"):
+        ctf = ('CTF 轨：只有**题目附件本体**才登记 binary（value=附件真实 sha256），'
+               '不用传 parent_id——自动挂到本题资产下；**zip 解压产物不要登记**'
+               '（路径已在 unpack_attachment 回执里，结论走 bb_add_finding）。')
+    elif _has(face, "unpack_attachment"):
+        ctf = ('CTF 轨：只有**题目附件本体**才登记 binary（value=附件真实 sha256），'
+               '不用传 parent_id——自动挂到本题资产下；**zip 解压产物不要登记**'
+               '（解压回执里已有路径）。')
+    else:
+        ctf = ('CTF 轨：只有**题目附件本体**才登记 binary（value=附件真实 sha256），'
+               '不用传 parent_id——自动挂到本题资产下；**zip 解压产物不要登记**。')
+    return ('登记资产（host/domain/service/url/binary；type 省略按值自动识别，识别不出拒收回填）。'
+            '资产树自动挂载：url/service 含 IP 自动建 host，domain 自动 DNS 解析挂 host。'
+            + dedup
+            + 'meta.title=一句话简述；meta.owner=平台标签（.edu.cn 系→edusrc 等，'
+              '命中的平台规则会注入会话）。'
+            '扫描/测试状态走 bb_asset_status，不要写 meta.scanned。' + ctf)
+
+
+def _ctf_abandon_desc(face) -> str:
+    """ctf_abandon 的描述：单条假设的出口（close_intent）与解出后的出口
+    （ctf_submit_flag）按面改写——控制器类角色两者都没有。"""
+    if _has(face, "close_intent"):
+        not_this = ('**什么不该用它**：单条解题假设不成立 → 用 close_intent(outcome="dead_end")，'
+                    '那只是这条路不通，题还能继续解；')
+    else:
+        not_this = ('**什么不该用它**：单条解题假设不成立 → 那只是某条思路走不通，'
+                    '题还能继续解，别把整题放弃；')
+    done = ('解出来了 → 什么都不用调（ctf_submit_flag 已入台账）。'
+            if _has(face, "ctf_submit_flag") else
+            '解出来了 → 什么都不用调（flag 由报出它的专家登记入台账）。')
+    return ('CTF 轨专用：**放弃这道题**（整题级，不是单个意图）或撤销放弃。'
+            '放弃后调度层不再为它派新 Worker，但**已登记的 flag 全部保留**'
+            '（放弃=不继续投入，不是清空结论）。'
+            '**什么该用它**：这题确实解不出来（缺附件/思路穷尽/时间不够）→ `abandoned=true`；'
+            '之后若拿到新线索想接着打 → `abandoned=false` 撤销。'
+            + not_this + done +
+            '**CTF 轨没有「资产测干净（tested_clean）」这个概念**——本题终态只看 flag 台账，'
+            '别去 bb_asset_status 标 tested_clean。**仅 CTF 轨可用**。')
+
+
+def _ctf_conclude_desc(face) -> str:
+    """ctf_conclude 的描述：`ctf_submit_flag` 与 `close_intent` 按面改写。"""
+    when = ('**什么时候用**：你已经提交了 flag（ctf_submit_flag 回报「候选 N 条待人工确认」），'
+            '且你核对过证据、确认答案确实拿到了——此时若继续派 Worker 只是重复劳动。'
+            if _has(face, "ctf_submit_flag") else
+            '**什么时候用**：本题的 flag 已由专家报出并登记在台账（候选待人工确认），'
+            '且你核对过证据、确认答案确实拿到了——此时若继续派 Worker 只是重复劳动。')
+    not_when_1 = ('① 还没提交任何 flag → 先 ctf_submit_flag；'
+                  if _has(face, "ctf_submit_flag") else
+                  '① 还没拿到任何 flag → 让专家继续打，别收尾；')
+    not_when_2 = ('② 只是某条思路不通 → close_intent(dead_end)，题还能继续解；'
+                  if _has(face, "close_intent") else
+                  '② 只是某条思路不通 → 那只是这条路不通，题还能继续解，别收尾；')
+    return ('CTF 轨专用：**主动收尾**——「这题的答案我已经拿到了，别再派工」，'
+            '但**不冒充「已解出」**（题目仍显示 partial/待人工确认）。'
+            '收尾后调度层不再为它派新 Worker，已登记的 flag 全部保留。'
+            + when + '**什么时候别用**：' + not_when_1 + not_when_2 +
+            '③ 这题根本解不出来（缺附件/思路穷尽） → 那是「放弃」，不是收尾。'
+            '**与「放弃」的区别**：收尾=做完了等确认（状态 partial）；'
+            '放弃=不做了可能没解出（状态 abandoned，由执行侧角色执行）。两者都不再派工，语义不同。'
+            '**人工确认才算解出**：pending 的候选 flag 不计 solved，'
+            '只有用户在题目卡片上点确认才变 accepted。收尾只是替你省掉「白派 Worker」，'
+            '不替人做「这条 flag 对不对」的判断。'
+            '撤销收尾（concluded=false）后调度层可以重新派工。**仅 CTF 轨可用**。')
+
+
+def _bb_asset_status_desc(face) -> str:
+    """bb_asset_status 的描述：结论出口 / 意图背书 / CTF 收尾出口按面改写。"""
+    # 全量面必须与注册项原文逐字一致（既有系统提示快照/文档以它为锚点）
+    if _has(face, "bb_add_finding") and _has(face, "close_intent") \
+            and _has(face, "ctf_abandon"):
+        return REGISTRY["bb_asset_status"].description
+    hole = ('（有洞与否不改变状态——测出洞直接 bb_add_finding，状态仍可标 tested_clean）；'
+            if _has(face, "bb_add_finding") else
+            '（有洞与否不改变状态——测出洞是专家登记发现，状态仍可标 tested_clean）；')
+    endorse = ('须有直接围绕该资产的 closed/dead_end 意图（target 或 basis_refs 含本资产 id）'
+               if _has(face, "close_intent") else
+               '须有直接围绕该资产的已收尾意图（target 或 basis_refs 含本资产 id）')
+    # CTF 收尾出口：两个工具都可能缺，分开判（aggressive-controller 有 ctf_abandon
+    # 但没有 close_intent，混着判会漏掉一处）
+    if _has(face, "close_intent") and _has(face, "ctf_abandon"):
+        ctf = '解出后 close_intent(finding) 收尾即可，整题放弃用 ctf_abandon。'
+    elif _has(face, "ctf_abandon"):
+        ctf = '解出后按意图流程收尾即可，整题放弃用 ctf_abandon。'
+    elif _has(face, "close_intent"):
+        ctf = '解出后 close_intent(finding) 收尾即可，整题放弃交给有放弃权的角色。'
+    else:
+        ctf = '解出后按意图流程收尾即可，整题放弃交给有放弃权的角色。'
+    return ('流转资产扫描/测试状态（open→visited→scanning→tested_clean/budget_stop/na）。'
+            '访问≠测试：访问过标 visited、开始扫描标 scanning、适用面全覆盖标 tested_clean'
+            + hole +
+            '预算用尽标 budget_stop、确认不适用（非目标协议/离线主机）标 na。'
+            'tested_clean/budget_stop/na 必须带 note（服务端强制），让「哪里没挖完、为什么」可对账。'
+            'tested_clean 另须四问（tested_what/viewpoint/why_no_finding 见参数说明）+ 逐资产背书：'
+            + endorse +
+            '——每资产独立立意，禁止父节点一条意图批量覆盖子树。四问并入审计事件可事后对账。'
+            '测出问题直接登记发现，不要自报状态。'
+            '**CTF 轨没有 tested_clean**：本题终态由 flag 台账判定，标它必被拒——' + ctf)
+
+
+def _bb_add_finding_desc(face) -> str:
+    """bb_add_finding 的描述：改结论 / 落产物的出口按面改写。"""
+    amend = ('补证据/改结论用 bb_update_finding。'
+             if _has(face, "bb_update_finding") else
+             '补证据/改结论由同一条目续写（不要在题目上再开一条）。')
+    art = ('解题脚本/writeup 用 bb_add_artifact 落产物。'
+           if _has(face, "bb_add_artifact") else
+           '解题脚本/writeup 随证据一并登记。')
+    return ('登记发现。无证据 status=unverified。'
+            '复现步骤写 evidence.repro_steps（结构见该字段说明）：渗透/红队轨 verified 门禁=至少一步 code'
+            '（或 artifact_id）且该步 expected 非空。'
+            'impact（危害事实：拿到什么/影响面）与 remediation（可落地修复）直接落字段，报告按三件套渲染。'
+            '**边干边写**：执行中每确认一条认知（端口/版本/未授权状态/接口行为/凭据线索等）立即以 '
+            'category=intel + status=unverified 落一条，抗中断/抗压缩/跨意图复用；收尾时再升 verified '
+            '或随死路一并了结，别攒到最后补记。注入评级口径（rule:rating:*）时 severity 须按口径判级并填 rating_basis。'
+            'CTF 轨：severity=线索级别（critical=关键突破/high=可行动线索/其余=背景备查），vuln_class=线索类别，'
+            'false-positive=死路（evidence 写清原因与已尝试清单）。'
+            '**一题一条**：同一题目上再登记会自动并入既有条目，' + amend +
+            'category 缺省自动判定（提示类或 info→intel，其余→vuln）。' + art)
 
 
 # ---------------- 工具定义（顺序 = 迁移前 AGENT_TOOLS 顺序） ----------------
@@ -228,6 +429,9 @@ tool(
         '未指定 path 时不扫其它题目的附件解包副本（非本会话 unpack_attachment 解压过的 scratch/att-*），'
         '防多题共跑时旧题工作文件淹没命中；要跨题找就显式传 path。'
     ),
+    # 按工具面渲染（tool-face-leak）：run_cmd / bb_query / unpack_attachment 三处
+    # 提到的是**别家的工具**，缺哪个就把那一句改成「去查那些工具」的中性说法。
+    desc_for=lambda face: _search_files_desc(face),
     input_schema={
         'type': 'object',
         'properties': {
@@ -306,6 +510,9 @@ tool(
         '不用传 parent_id——自动挂到本题资产下；**zip 解压产物不要登记**'
         '（路径已在 unpack_attachment 回执里，结论走 bb_add_finding）。'
     ),
+    # 按工具面渲染（tool-face-leak）：查重提 bb_query、解压回执提 unpack_attachment、
+    # 结论出口提 bb_add_finding——三处都按调用方有没有那个工具改写。
+    desc_for=lambda face: _bb_add_asset_desc(face),
     input_schema={
         'type': 'object',
         'properties': {
@@ -344,7 +551,7 @@ tool(
     flags=("intent_flow",),
     description=(
         'CTF 轨专用：登记/复用一道题目（challenge-asset）。用户给了题目描述+附件、而黑板还没有对应题目节点时，'
-        '用本工具把题立起来——立完自动绑定当前线程，后续本线程的 declare_intent/bb_add_finding 不必再传 '
+        '用本工具把题立起来——立完自动绑定当前线程，后续本线程的意图/发现登记不必再传 '
         'target_asset_id，会自动归到这道题下；附件本身不用登记（走本题目的子资产通道）。'
         'name=题目名（短、可一眼认出，如「树状化-签到题」）；description=一句话描述；'
         'tags=题型数组（web/pwn/re/crypto/misc/forensics）。同一道题重复调用=复用既有节点，不插重复行。'
@@ -400,7 +607,7 @@ tool(
     description=(
         'CTF 轨专用：**判定并登记**一个 flag。拿到疑似 flag 用本工具——先做三层机械判定，'
         '通过后写入 **flag 台账**（challenge_flags，flag 的唯一真值）并落一条过程留痕，'
-        '题目状态由台账派生（拿满 `meta.flag_count` 条即解出），不必再调 bb_add_finding。'
+        '题目状态由台账派生（拿满 `meta.flag_count` 条即解出），不必再额外登记一条发现。'
         '① 格式置信：前缀（`flag{...}`/`xxxctf{...}` 等已知前缀，或 `shellmates{}` 这类'
         '任意赛事前缀——后者靠内层构造度判定：够长 + 字母数字混排 + 分隔符/大小写混排）；'
         '题面占位符（`flag{example}`/`flag{test}`）、诱饵前缀（`fake_flag{}`）、'
@@ -533,6 +740,9 @@ tool(
         '**CTF 轨没有「资产测干净（tested_clean）」这个概念**——本题终态只看 flag 台账，'
         '别去 bb_asset_status 标 tested_clean。**仅 CTF 轨可用**。'
     ),
+    # 按工具面渲染（tool-face-leak）：`close_intent` 与 `ctf_submit_flag` 是本
+    # 工具面外的工具，缺哪个就把那一句改成不点名的说法。
+    desc_for=lambda face: _ctf_abandon_desc(face),
     input_schema={
         'type': 'object',
         'properties': {
@@ -572,14 +782,17 @@ tool(
         '且你核对过证据、确认答案确实拿到了——此时若继续派 Worker 只是重复劳动。'
         '**什么时候别用**：① 还没提交任何 flag → 先 ctf_submit_flag；'
         '② 只是某条思路不通 → close_intent(dead_end)，题还能继续解；'
-        '③ 这题根本解不出来（缺附件/思路穷尽） → ctf_abandon，那才是「放弃」。'
-        '**与 ctf_abandon 的区别**：收尾=做完了等确认（状态 partial）；'
-        '放弃=不做了可能没解出（状态 abandoned）。两者都不再派工，语义不同。'
+        '③ 这题根本解不出来（缺附件/思路穷尽） → 那是「放弃」，不是收尾。'
+        '**与「放弃」的区别**：收尾=做完了等确认（状态 partial）；'
+        '放弃=不做了可能没解出（状态 abandoned，由执行侧角色执行）。两者都不再派工，语义不同。'
         '**人工确认才算解出**：pending 的候选 flag 不计 solved，'
         '只有用户在题目卡片上点确认才变 accepted。收尾只是替你省掉「白派 Worker」，'
         '不替人做「这条 flag 对不对」的判断。'
         '撤销收尾（concluded=false）后调度层可以重新派工。**仅 CTF 轨可用**。'
     ),
+    # 按工具面渲染（tool-face-leak）：`ctf_submit_flag` / `close_intent` 是本面外
+    # 的工具，缺哪个就把「什么时候用/别用」改成不点名它的说法。
+    desc_for=lambda face: _ctf_conclude_desc(face),
     input_schema={
         'type': 'object',
         'properties': {
@@ -701,6 +914,9 @@ tool(
         '**CTF 轨没有 tested_clean**：本题终态由 flag 台账判定，标它必被拒——'
         '解出后 close_intent(finding) 收尾即可，整题放弃用 ctf_abandon。'
     ),
+    # 按工具面渲染（tool-face-leak）：bb_add_finding / close_intent / ctf_abandon
+    # 三处都是别家工具，缺哪个就把那句改成不点名的说法。
+    desc_for=lambda face: _bb_asset_status_desc(face),
     input_schema={
         'type': 'object',
         'properties': {
@@ -763,6 +979,8 @@ tool(
         '**一题一条**：同一题目上再登记会自动并入既有条目，补证据/改结论用 bb_update_finding。'
         'category 缺省自动判定（提示类或 info→intel，其余→vuln）。解题脚本/writeup 用 bb_add_artifact 落产物。'
     ),
+    # 按工具面渲染（tool-face-leak）：bb_update_finding / bb_add_artifact 都可能不在面里。
+    desc_for=lambda face: _bb_add_finding_desc(face),
     input_schema={
         'type': 'object',
         'properties': {
@@ -1222,6 +1440,11 @@ tool(
         '（block_id 看单个）——增改前先查现有节点/块，同职责节点用 bb_feature_node update 补 '
         'desc/func_addresses、块用 bb_logic_block_update 增补，不要重复 add；块名同项目同样本唯一，重名会被拒收。'
     ),
+    # 上面是全量面（所有工具都在场）的文案，作为锚点与回退；**实发描述一律按调用方
+    # 工具面渲染**（见 bb_query_schema_for：轨裁剪还要再叠一层 what.enum 收敛）。
+    # 两者缺一不可：这个钩子管「子专家侧漏掉 track 信息」时的兜底，schema_for 管
+    # 正常路径。渲染只依赖 face，不引入循环引用（函数在模块尾部定义，调用时才解析）。
+    desc_for=lambda face: _bb_query_desc_any(face),
     input_schema={
         'type': 'object',
         'properties': {
@@ -1394,51 +1617,109 @@ _BB_QUERY_CTF_ONLY_PROPS = ("package_id",)
 # 恒无效的开关（渗透/逆向拿不到它，等于多一个无关旋钮）。
 _BB_QUERY_CTF_EXCLUSIVE_PROPS = ("cross_challenge",)
 
-# 三轨共用的使用要点（findings/events/负结论口径一致，避免三份文案各自漂移）
-_BB_QUERY_DESC_COMMON = (
-    'findings 带 target_asset_id 精确过滤，返回含 dedup_key：给既有漏洞补证据/升链时用原 '
-    'dedup_key + target_asset_id 重报即自动并入，不要自造新键。'
-    'events 缺省=本项目全部 kind（不止 chat.*），要窄看传 kinds/session_id；limit 小值会截断。'
-    '**负结论不要塞进 events**：走 declare_intent → close_intent(dead_end)；'
-    '情报类非漏洞结论用 bb_add_finding category=intel。'
-)
-# 逆向家族（research/ctf）共用：样本 sha、分析包、功能树/业务块三件套的使用纪律
-_BB_QUERY_DESC_REVERSE_COMMON = (
-    '**逆向硬规则：反编译任何函数前先查 func 防重复劳动。**'
-    '样本：what=assets type=binary——行的 value 即 sha256（func 查询的 binary_sha256 / bb_upsert_func 都用它），'
-    'meta.filename 是原文件名；不知道 sha 先列样本，不要猜。'
-    '功能树/业务逻辑（先查后写）：what=feature_tree（tree_id 看单棵）/ what=logic_block'
-    '（block_id 看单个）——增改前先查现有节点/块，同职责节点用 bb_feature_node update 补 '
-    'desc/func_addresses、块用 bb_logic_block_update 增补，不要重复 add；块名同项目同样本唯一，重名会被拒收。'
-)
+# 三轨共用的使用要点（findings/events/负结论口径一致，避免三份文案各自漂移）。
+# 按工具面渲染（tool-face-leak，2026-10-23）：负结论该往哪走取决于调用方**能不能
+# 自己写**——有 declare_intent/close_intent 就教它走意图流程，有 bb_add_finding
+# 才提 category=intel，两者都没有（控制器类角色）就只说「交给能写的角色」，
+# 不点名它调不到的工具。
+def _bb_query_desc_common(face) -> str:
+    can_intent = _has(face, "declare_intent", "close_intent")
+    can_find = _has(face, "bb_add_finding")
+    if can_intent and can_find:
+        neg = ('**负结论不要塞进 events**：走 declare_intent → close_intent(dead_end)；'
+               '情报类非漏洞结论用 bb_add_finding category=intel（severity>=low）。')
+    elif can_intent:
+        neg = ('**负结论不要塞进 events**：走 declare_intent → close_intent(dead_end)；'
+               '情报类非漏洞结论按 intel 类线索登记（由你派出的专家写）。')
+    elif can_find:
+        neg = ('**负结论不要塞进 events**：作为 intel/dead-end 线索用 bb_add_finding 登记。')
+    else:
+        neg = ('**负结论不要塞进 events**：那是执行侧专家的意图流程（declare_intent → '
+               'close_intent），你只查不写。')
+    return (
+        'findings 带 target_asset_id 精确过滤，返回含 dedup_key：给既有漏洞补证据/升链时用原 '
+        'dedup_key + target_asset_id 重报即自动并入，不要自造新键。'
+        'events 缺省=本项目全部 kind（不止 chat.*），要窄看传 kinds/session_id；limit 小值会截断。'
+        + neg)
 
-_BB_QUERY_DESC_REVERSE = (
+
+# 逆向家族（research/ctf）共用：样本 sha、分析包、功能树/业务块三件套的使用纪律。
+# 这里三处都点到了写手工具（bb_upsert_func / bb_feature_node / bb_logic_block_update）：
+# 有就保留原话，没有就退成「只查不写」——否则控制器会被教着去调不存在的写手。
+def _bb_query_desc_reverse_common(face) -> str:
+    can_func_write = _has(face, "bb_upsert_func")
+    can_tree_write = _has(face, "bb_feature_node") or _has(face, "bb_logic_block_update")
+    sha = ('样本：what=assets type=binary——行的 value 即 sha256'
+           + ('（func 查询的 binary_sha256 / bb_upsert_func 都用它）' if can_func_write
+              else '（func 查询的 binary_sha256 用它）')
+           + '，meta.filename 是原文件名；不知道 sha 先列样本，不要猜。')
+    if can_tree_write:
+        tree = ('功能树/业务逻辑（先查后写）：what=feature_tree（tree_id 看单棵）/ '
+                'what=logic_block（block_id 看单个）——增改前先查现有节点/块，同职责节点用 '
+                'bb_feature_node update 补 desc/func_addresses、块用 bb_logic_block_update '
+                '增补，不要重复 add；块名同项目同样本唯一，重名会被拒收。')
+    else:
+        tree = ('功能树/业务逻辑**只读**：what=feature_tree（tree_id 看单棵）/ what=logic_block'
+                '（block_id 看单个）——增改是执行侧专家的活（你本线程没有那些写手工具），'
+                '不要重复派同一块。')
+    return ('**逆向硬规则：反编译任何函数前先查 func 防重复劳动。**' + sha + tree)
+
+
+_BB_QUERY_DESC_REVERSE_HEAD = (
     '查黑板（逆向 family：research/ctf）：findings / assets / events / func（函数知识库）/ '
-    'blueprint（开发蓝图）/ package（分析包全貌）/ feature_tree（功能树）/ logic_block（业务逻辑块）。'
-    + _BB_QUERY_DESC_COMMON
-    + _BB_QUERY_DESC_REVERSE_COMMON
-    + '分析包：what=package——条目/依赖边/内容树根 tree_ref（read_file <tree_ref>/<path> 读同包文件，'
-      '如 exe 依赖的 DLL）；样本资产行 meta.package_id 是来源包 id。'
-)
+    'blueprint（开发蓝图）/ package（分析包全貌）/ feature_tree（功能树）/ logic_block（业务逻辑块）。')
 
-_BB_QUERY_DESC_CTF = (
+
+def _bb_query_desc_reverse_tail(face) -> str:
+    """分析包段：`read_file <tree_ref>/<path>` 只对**有 read_file** 的角色可执行。"""
+    reader = _opt(face, ("read_file",), "read_file <tree_ref>/<path> 读同包文件",
+                  "把 tree_ref 连同目标路径交给有文件读取能力的专家")
+    return ('分析包：what=package——条目/依赖边/内容树根 tree_ref（' + reader
+            + '，如 exe 依赖的 DLL）；样本资产行 meta.package_id 是来源包 id。')
+
+
+def _bb_query_desc_reverse(face) -> str:
+    """research 轨（含 package 面，故带 read_file 指引）。
+
+    三段全部按 face 渲染，因此全量面下天然等价于改动前的文案（见
+    `test_bb_query_schema_for_reverse_keeps_reverse_faces_only` 钉住的抬头）。
+    """
+    return (_BB_QUERY_DESC_REVERSE_HEAD
+            + _bb_query_desc_common(face)
+            + _bb_query_desc_reverse_common(face)
+            + _bb_query_desc_reverse_tail(face))
+
+
+# CTF 轨头段：跨题隔离（challenge-isolation，2026-10-19）对所有角色都一致
+_BB_QUERY_DESC_CTF_HEAD = (
     '查黑板（逆向 family：ctf）：findings / assets / events / func（函数知识库）/ '
     'blueprint（开发蓝图）/ feature_tree（功能树）/ logic_block（业务逻辑块）。'
     '**默认只回本题**（本线程题目子树 + 未归属任何题目的条目）：别的题目的发现、'
     '附件子资产、执行事件一律不回传——多题共跑时那些条目对本题是纯噪声，会把'
     '你带偏到别人的打法上。assets 里仍能看到别的题的**题目行**（知道项目里还有'
-    '哪些题），但要跨题对照才传 cross_challenge=true。'
-    + _BB_QUERY_DESC_COMMON
-    + _BB_QUERY_DESC_REVERSE_COMMON
-)
+    '哪些题），但要跨题对照才传 cross_challenge=true。')
 
-_BB_QUERY_DESC_PENTEST = (
-    '查黑板（渗透 family：pentest/redteam）：findings / assets / events / site（单站全貌）。'
-    '**站点现状一律用 what=site 并传 asset**（一次返回根子树全貌）；assets 只是清单面'
-    '（按 type/status/tag 筛），其 asset 参数仅做子树过滤、不带 findings/intents——'
-    '不要用它当站点查询，也不要按 type 分片拉全量再本地过滤。'
-    + _BB_QUERY_DESC_COMMON
-)
+
+def _bb_query_desc_ctf(face) -> str:
+    return (_BB_QUERY_DESC_CTF_HEAD
+            + _bb_query_desc_common(face)
+            + _bb_query_desc_reverse_common(face))
+
+
+# 兼容旧调用名（lean=True 的语义已由 face 渲染覆盖）：保留常量给外部/测试引用，
+# 内容取「无写手工具」这一面的渲染结果——与 `_has_exec_tools()==False` 同义。
+_BB_QUERY_DESC_CTF_LEAN = _bb_query_desc_ctf(
+    frozenset({"bb_query", "ctf_dispatch", "call_expert", "ctf_submit_flag",
+               "ctf_conclude", "ctf_inspect", "bb_declare_challenge",
+               "route_lookup", "todo_write", "kb_search", "kb_open"}))
+
+
+def _bb_query_desc_pentest(face) -> str:
+    return ('查黑板（渗透 family：pentest/redteam）：findings / assets / events / site（单站全貌）。'
+            '**站点现状一律用 what=site 并传 asset**（一次返回根子树全貌）；assets 只是清单面'
+            '（按 type/status/tag 筛），其 asset 参数仅做子树过滤、不带 findings/intents——'
+            '不要用它当站点查询，也不要按 type 分片拉全量再本地过滤。'
+            + _bb_query_desc_common(face))
 
 
 def bb_query_what_for(track: str | None) -> list[str]:
@@ -1455,6 +1736,20 @@ def bb_query_what_for(track: str | None) -> list[str]:
 #
 # 主控的职责是「看执行事件、看已有资产与发现」，函数知识库与功能树属于 Worker。
 _BB_QUERY_WHAT_ARTEX = ("events", "assets", "findings")
+# 已裁剪变体的显式标记：runtime 侧的统一渲染循环见到它就原样放行，不再套轨变体
+# ——否则会把 952 字符的 slim schema 换回 3140 字符的全轨 schema
+# （artex-controller-slim 的 8200 上限就是这么破的）。用显式标记而不是「enum 只有
+# 三面」这类猜测判据：后者会被将来某个轨恰好只有三面骗过。
+#
+# **不能往 schema dict 里加键**（如 `{"_presliced": True}`）：OpenAI 兼容层虽然挑
+# 字段，Anthropic 通道是整体透传的，多一个未知键就有被网关 400 的风险。用模块级
+# 弱集合按 id 记——schema 是短生命周期对象，够用且零污染。
+_PRESLICED_IDS: set[int] = set()
+
+
+def is_presliced(schema: dict) -> bool:
+    """这个 schema 是否已由调用方裁到更紧的变体（见 `_PRESLICED_IDS`）。"""
+    return id(schema) in _PRESLICED_IDS
 _BB_QUERY_ARTEX_KEEP_PROPS = ("what", "kinds", "session_id", "limit", "type", "status")
 
 _BB_QUERY_DESC_ARTEX = (
@@ -1467,47 +1762,105 @@ _BB_QUERY_DESC_ARTEX = (
 )
 
 
-def bb_query_schema_for_artex() -> dict:
+def bb_query_schema_for_artex(face=None) -> dict:
     """ARTEX 主控的 bb_query 精简 schema（见 _BB_QUERY_WHAT_ARTEX 注释）。
 
     与 ``bb_query_schema_for(track)`` 同构但收得更紧：what 只三面、参数只六个。
     **返回全新 dict**，不与注册表共享可变子对象。
+
+    ``face``：ARTEX 主控的实际工具面。它只有 8 个工具（没有 declare_intent /
+    close_intent），描述里就不能教它走意图流程。
     """
     spec = REGISTRY["bb_query"].as_schema()
     props = {k: dict(v)
              for k, v in spec["input_schema"]["properties"].items()
              if k in _BB_QUERY_ARTEX_KEEP_PROPS and k != "what"}
     props["what"] = {"type": "string", "enum": list(_BB_QUERY_WHAT_ARTEX)}
-    return {"name": "bb_query", "description": _BB_QUERY_DESC_ARTEX,
-            "input_schema": {"type": "object", "properties": props,
-                             "required": ["what"]}}
+    if face is not None and not _has(face, "declare_intent", "close_intent"):
+        desc = ('查黑板（ARTEX 主控面）：events（执行事件流）/ assets（已有资产）/ '
+                'findings（已有发现）。**主控不查函数库、蓝图、功能树——那些是 '
+                'Worker 的面**。看 Worker 干了什么用 what=events（可按 kinds/'
+                'session_id 窄看，limit 小值会截断）；盘点已有资产与发现用 '
+                'what=assets / findings，避免重复派发。'
+                '**负结论不要塞进 events**：那是 Worker 的意图流程，主控只看不写。')
+    else:
+        desc = _BB_QUERY_DESC_ARTEX
+    out = {"name": "bb_query", "description": desc,
+           "input_schema": {"type": "object", "properties": props,
+                            "required": ["what"]}}
+    _PRESLICED_IDS.add(id(out))
+    return out
 
 
-def bb_query_schema_for(track: str | None) -> dict:
-    """bb_query 的 Anthropic schema 按轨变体：what.enum、description、参数面三者同步裁到
-    本家族（渗透拿不到 tree_id，逆向的 description 不提 site）。**返回全新 dict**
-    （可变子对象不与注册表共享，调用方零顾忌）；未知/空轨=canonical 全量 schema。"""
+def _bb_query_desc_any(face) -> str:
+    """tool_registry 层的兜底渲染（不知道该轨时）：四轨的公共纪律取并集不现实，
+    这里只保证**不点名调用方没有的工具**——把头段按「面里有哪些 what 相关的
+    写手」拼出来。正常路径由 ``bb_query_schema_for(track, face=...)`` 覆盖。
+
+    **全量面直接返回注册项原文**：既是既有系统提示快照的锚点，也保证「所有工具
+    都在场」的角色拿到的文案与本次改动前逐字一致（零回归）。
+    """
+    if _has(face, "bb_upsert_func", "bb_feature_node", "bb_logic_block_update",
+            "bb_add_finding", "declare_intent", "close_intent"):
+        return REGISTRY["bb_query"].description
+    head = ('查黑板：findings / assets / events / func（函数知识库）/ blueprint（开发蓝图）/ '
+            'site（单站全貌）/ package（分析包）/ feature_tree（功能树）/ logic_block（业务逻辑块）。'
+            '**站点现状一律用 what=site 并传 asset**（一次返回根子树全貌）；assets 只是清单面'
+            '（按 type/status/tag 筛），其 asset 参数仅做子树过滤、不带 findings/intents——'
+            '不要用它当站点查询，也不要按 type 分片拉全量再本地过滤。')
+    parts = [head, _bb_query_desc_common(face)]
+    if _has(face, "bb_upsert_func") or _has(face, "bb_feature_node") or _has(face, "bb_logic_block_update"):
+        parts.append(_bb_query_desc_reverse_common(face))
+    if _has(face, "read_file"):
+        parts.append(_bb_query_desc_reverse_tail(face))
+    return "".join(parts)
+
+
+# 全量面哨兵（「不按角色裁」）：定义在所有工具注册之后，见文件尾部赋值。
+_FULL_FACE: frozenset = frozenset()
+
+
+def bb_query_schema_for(track: str | None, *, face=None, lean: bool = False) -> dict:
+    """bb_query 的 Anthropic schema 按「轨 × 调用方工具面」双裁：
+    what.enum / 参数面按轨收（渗透拿不到 tree_id），description 按**实发工具面**
+    渲染（tool-face-leak，2026-10-23）。**返回全新 dict**（可变子对象不与注册表
+    共享，调用方零顾忌）；未知/空轨=canonical 全量 schema。
+
+    ``face``：调用方**实际拿到**的工具名集合。给出时描述里的协作工具名按 face
+    分叉——没有 bb_add_finding 就不提它、没有写手就只说「只查不写」。
+
+    ``lean``：**旧接口，等价于「没有写手工具的面」**，保留给既有调用方；
+    face 优先。新代码请直接传 face。
+    """
     spec = REGISTRY["bb_query"].as_schema()
     family = _BB_QUERY_TRACK_WHAT.get((track or "").strip())
     if family is None:
         return spec
+    if face is None and lean:
+        # 无 face 但要求 lean：退化成「控制器典型面」，与旧行为逐字一致
+        face = frozenset({"bb_query", "ctf_dispatch", "call_expert",
+                          "ctf_submit_flag", "ctf_conclude", "ctf_inspect",
+                          "bb_declare_challenge", "route_lookup", "todo_write"})
+    elif face is None:
+        # 未给面 = 「不按角色裁」，取全量面（所有工具在场）→ 文案与改动前逐字一致
+        face = _FULL_FACE
     props = {k: dict(v)
              for k, v in spec["input_schema"]["properties"].items()
              if k != "what"}
     if family is _BB_QUERY_WHAT_PENTEST:
         for k in _BB_QUERY_REVERSE_ONLY_PROPS + _BB_QUERY_CTF_EXCLUSIVE_PROPS:
             props.pop(k, None)
-        desc = _BB_QUERY_DESC_PENTEST
+        desc = _bb_query_desc_pentest(face)
     elif family is _BB_QUERY_WHAT_CTF:
         # CTF：只摘 package_id 参数（分析包面已从 enum 裁掉）；cross_challenge 保留
         for k in _BB_QUERY_CTF_ONLY_PROPS:
             props.pop(k, None)
-        desc = _BB_QUERY_DESC_CTF
+        desc = _bb_query_desc_ctf(face)
     else:
         # research（逆向）：cross_challenge 是 CTF 独占开关，此处不暴露
         for k in _BB_QUERY_CTF_EXCLUSIVE_PROPS:
             props.pop(k, None)
-        desc = _BB_QUERY_DESC_REVERSE
+        desc = _bb_query_desc_reverse(face)
     props["what"] = {"type": "string", "enum": list(family)}
     return {"name": "bb_query", "description": desc,
             "input_schema": {"type": "object", "properties": props,
@@ -1522,7 +1875,7 @@ tool(
         '打开全局知识库模块（packs/kb/ 区，含测试包手册与快照）：直接返回文件正文，不返回路径。'
         'module 走全局形态 `<域>/<快照>/<路径>`（如 web/漏洞分类/SQL注入/注入类漏洞（SQL注入-命令注入-SSTI）.md），也认 Obsidian wikilink '
         '（[[web/漏洞分类/SQL注入/注入类漏洞（SQL注入-命令注入-SSTI）|手册]]）与反引号/引号包裹。'
-        '.md/.py/.txt/.json 均按 UTF-8 文本返回（弹药脚本只是文本，执行仍走 run_cmd）。'
+        '.md/.py/.txt/.json 均按 UTF-8 文本返回（弹药脚本只是文本；要执行得交给能跑命令的角色）。'
         '路径不存在会返回可用模块清单（照清单改选，禁止猜文件名、禁止 .. 穿越）；禁止通读知识库目录。'
     ),
     input_schema={
@@ -1551,6 +1904,9 @@ tool(
         '多关键词空格分隔为 AND 语义，零结果自动放宽（英文 OR；中文按词元稀有度加权覆盖）。'
         '**直接问中文自然语言即可**（如「如何测试文件上传漏洞」「jwt 算法混淆怎么打」），'
         '不需要先拆成关键词——虚词会被自动剔除，术语按稀有度加权排序。'
+        '检索覆盖**全部知识方向**（web/二进制/密码学/取证/杂项/云安全），'
+        '排序按当前轨加权（渗透/红队轨 web 域更高、逆向轨二进制域更高、CTF 轨全等权）'
+        '——所以同一批命中里排前的方向随轨变化，不代表其他方向没搜。'
         'tag 可选：按 frontmatter 分面标签过滤（phase/vuln_class，如 tag=jwt）。'
         '用法：kb_search 定位 → kb_open 细读；中文专题用中文词、英文快照用英文词，必要时各试一次。'
     ),
@@ -2494,7 +2850,7 @@ tool(
     'route_lookup',
     group='知识',
     flags=("plan_pre", "spill_skip", "knowledge"),
-    description='按关键词查询测试点路由索引。返回测试点 → packs/kb 模块路径；技能自身目录用 skill_open 打开，二者互补。',
+    description='按关键词查询测试点路由索引。返回测试点 → packs/kb 模块路径；技能正文另有打开入口（见技能类工具，若你工具面里有），二者互补。',
     input_schema={
         'type': 'object',
         'properties': {
@@ -2599,7 +2955,7 @@ tool(
         '（游离意图落不到链路图子目标下，其 dead_end 也无法为资产背书 tested_clean）。'
         'basis_refs 写推导依据（asset:asset-6971f089d5fe / finding:find-c32f449cc7b5，'
         '<id> 是带前缀的完整 id），引用须已在本项目，悬空即拒。'
-        '**会话第一次实质动作（run_cmd/浏览器点击/写黑板）前必须先声明**（服务端意图先行闸：'
+        '**会话第一次实质动作（执行命令/浏览器点击/写黑板）前必须先声明**（服务端意图先行闸：'
         '无 open 意图时实质动作被拒；只读侦察不受限）。'
         '**负结论走死路收尾**：close_intent outcome=dead_end + dead_reason + evidence_refs——'
         '这是资产的 tested_clean 背书来源，别把「未发现」当成没产出。'
@@ -2786,3 +3142,13 @@ def agent_tool_group(name: str) -> str:
     """工具所属目录分组（GET /api/agent-tools 用）。未知工具回落「其他」。"""
     spec = REGISTRY.get(name)
     return spec.group if spec is not None else "其他"
+
+
+# 全量面的最终赋值（所有工具已注册完毕）。「不按角色裁」的调用方用它，
+# 语义 = 所有工具都在场 → 所有描述都走完整版（与本次改动前逐字一致）。
+def _set_full_face() -> None:
+    global _FULL_FACE
+    _FULL_FACE = frozenset(REGISTRY)
+
+
+_set_full_face()

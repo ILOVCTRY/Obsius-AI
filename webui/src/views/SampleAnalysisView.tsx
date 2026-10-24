@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import { Binary, Braces, ChevronDown, ChevronRight, Code2, FileCode2, FileText, FolderOpen, MoreHorizontal, PackagePlus, Play, RotateCcw, Search, Table2, Trash2, Upload } from "lucide-react"
+import { Binary, Braces, ChevronDown, ChevronRight, Code2, FileCode2, FileText, FolderOpen, FolderSearch, MoreHorizontal, PackagePlus, Play, RotateCcw, Search, Table2, Trash2, Upload } from "lucide-react"
 import { api, pollJob } from "@/lib/api"
 import type { SamplePackage, SamplePackageEntry, SamplePackagePreview, SamplePackageTarget, SampleTargetAnalysis } from "@/lib/types"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
+import { DirectoryPickerDialog } from "@/views/reverse/DirectoryPickerDialog"
 
 type Filter = "all" | "candidate" | "analyzed" | "unanalyzed"
 type TreeNode = { name: string; path: string; directory: boolean; entry?: SamplePackageEntry; children: TreeNode[] }
@@ -65,6 +66,9 @@ function SampleAnalysisBody({ pid, onOpenBinary }: { pid: string; onOpenBinary: 
   const [moreOpen, setMoreOpen] = useState(false)
   // 树节点右键菜单（2026-10-13）：右键 → 「打开系统目录」（explorer /select 定位）。
   const [menu, setMenu] = useState<{ x: number; y: number; path: string } | null>(null)
+  // 「选择分析包」（2026-10-24）：把外部大目录原地登记为分析包（不复制）。
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const [linking, setLinking] = useState(false)
   const restoredPid = useRef<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const folderRef = useRef<HTMLInputElement>(null)
@@ -141,8 +145,24 @@ function SampleAnalysisBody({ pid, onOpenBinary }: { pid: string; onOpenBinary: 
     } catch (error) { setMessage("上传失败：" + String(error)) }
     finally { setBusy(false) }
   }
-  const analyze = async (target: SamplePackageTarget) => {
-    if (!pkg) return
+  // 「选择分析包」（2026-10-24）：把外部大目录**原地**登记为分析包并作为执行
+  // 工作区——几十 GB 的成品游戏/固件树既不该走浏览器上传，也不该在项目内复制
+  // 一份。后端只扫描建清单（全量 sha256），故是后台 Job：这里轮询到完成为止。
+  const linkDirectory = async (directory: string) => {
+    setPickerOpen(false); setLinking(true); setMessage(`正在扫描 ${directory} …（大目录需要几分钟）`)
+    try {
+      const started = await api.linkSamplePackageDir(pid, directory)
+      const job = await pollJob(started.job_id, () => {}, 1500)
+      if (job.status !== "done") throw new Error(job.error || "扫描失败")
+      const result = job.result as SamplePackage | null
+      if (!result) throw new Error("扫描未返回分析包")
+      setPkg(result); setSelectedPath("")
+      setMessage(`已关联目录：${result.file_count} 文件 / ${(result.total_bytes / 1048576).toFixed(0)} MB（未复制，原地索引）`)
+      void refreshRegistered()
+    } catch (error) { setMessage("关联目录失败：" + String(error)) }
+    finally { setLinking(false) }
+  }
+  const analyze = async (target: SamplePackageTarget) => {    if (!pkg) return
     setBusy(true); setMessage(null)
     try { const result = await api.analyzeSampleTarget(pid, pkg.package_id, pkg.version_id, target.target_id, engine); if (result.job_id) await pollJob(result.job_id, () => {}, 1200); await refresh(); setMessage("分析完成") }
     catch (error) { setMessage("分析失败：" + String(error)) }
@@ -180,18 +200,19 @@ function SampleAnalysisBody({ pid, onOpenBinary }: { pid: string; onOpenBinary: 
     if (!matches(node)) return null
     const open = Boolean(query.trim()) || expanded.has(node.path)
     return <div key={node.path || "root"}>
-      <div draggable={node.path !== ""} onDragStart={(event) => event.dataTransfer.setData("text/sample-path", node.path)} onDragOver={(event) => node.directory && event.preventDefault()} onDrop={(event) => { if (!node.directory) return; event.preventDefault(); const source = event.dataTransfer.getData("text/sample-path"); if (source) void move(source, node.path) }} onContextMenu={(event) => { if (!node.path) return; event.preventDefault(); setMenu({ x: event.clientX, y: event.clientY, path: node.path }) }} className={cn("flex items-center gap-1 rounded px-2 py-1 text-[11px] hover:bg-accent/40", selectedPath === node.path && "bg-primary/10 text-primary")} style={{ paddingLeft: 8 + depth * 14 }} onClick={() => node.directory ? toggle(node.path) : setSelectedPath(node.path)} onDoubleClick={() => { if (!node.entry || !binaryFormats.has(node.entry.format)) return; if (node.entry.sha256 && registered.has(node.entry.sha256)) onOpenBinary(node.entry.sha256) }}>
+      <div draggable={node.path !== "" && !pkg?.linked} onDragStart={(event) => event.dataTransfer.setData("text/sample-path", node.path)} onDragOver={(event) => node.directory && event.preventDefault()} onDrop={(event) => { if (!node.directory) return; event.preventDefault(); const source = event.dataTransfer.getData("text/sample-path"); if (source) void move(source, node.path) }} onContextMenu={(event) => { if (!node.path) return; event.preventDefault(); setMenu({ x: event.clientX, y: event.clientY, path: node.path }) }} className={cn("flex items-center gap-1 rounded px-2 py-1 text-[11px] hover:bg-accent/40", selectedPath === node.path && "bg-primary/10 text-primary")} style={{ paddingLeft: 8 + depth * 14 }} onClick={() => node.directory ? toggle(node.path) : setSelectedPath(node.path)} onDoubleClick={() => { if (!node.entry || !binaryFormats.has(node.entry.format)) return; if (node.entry.sha256 && registered.has(node.entry.sha256)) onOpenBinary(node.entry.sha256) }}>
         {node.directory ? (open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />) : <span className="size-3" />} {node.directory ? <FolderOpen className="size-3.5 shrink-0" /> : node.entry?.candidate && binaryFormats.has(node.entry.format) ? <FileCode2 className="size-3.5 shrink-0" /> : <FileText className="size-3.5 shrink-0" />}<span className="min-w-0 flex-1 truncate">{node.name}</span>{node.entry && <span className="text-[9px] text-muted-foreground">{node.entry.format.toUpperCase()}</span>}{node.entry?.candidate && <span className={cn("size-1.5 rounded-full", (binaryFormats.has(node.entry.format) ? !!(node.entry.sha256 && registered.has(node.entry.sha256)) : !!reports[node.entry.path]?.analysis) ? "bg-primary" : "bg-muted-foreground/40")} />}
       </div>{node.directory && open && node.children.map((child) => renderNode(child, depth + 1))}
     </div>
   }
   return <div className="flex h-full min-h-0 w-full overflow-hidden"><aside className="flex w-[360px] shrink-0 flex-col border-r">
-    <div className="flex items-center gap-2 border-b px-3 py-2"><FolderOpen className="size-4" /><span className="text-sm font-medium">样本分析</span><span className="flex-1" /><Button size="icon-xs" variant="ghost" title="撤销最近一次变更" disabled={!pkg?.undo_available || busy} onClick={() => void undo()}><RotateCcw className="size-3.5" /></Button><div className="relative"><Button size="icon-xs" variant="ghost" title="更多" onClick={() => setMoreOpen((v) => !v)}><MoreHorizontal className="size-3.5" /></Button>{moreOpen && <div className="absolute right-0 top-7 z-10 w-40 rounded-md border bg-popover p-1 shadow-md"><button className="w-full rounded px-2 py-1.5 text-left text-[11px] text-destructive hover:bg-accent" onClick={async () => { setMoreOpen(false); if (!window.confirm("确认删除整个分析包？分析结果、逆向资产和依赖也会被清理。")) return; setBusy(true); try { await api.deleteSamplePackage(pid); setPkg(null); setSelectedPath(""); setMessage("分析包已删除") } catch (error) { setMessage("删除失败：" + String(error)) } finally { setBusy(false) } }}>删除分析包</button></div>}</div></div>
-    <div className="flex gap-1 border-b p-2"><Button size="sm" variant="outline" className="h-7 gap-1 text-[10px]" disabled={busy} onClick={() => fileRef.current?.click()}><Upload className="size-3" />上传文件</Button><Button size="sm" variant="outline" className="h-7 gap-1 text-[10px]" disabled={busy} onClick={() => folderRef.current?.click()}><FolderOpen className="size-3" />上传文件夹</Button></div>
+    <div className="flex items-center gap-2 border-b px-3 py-2"><FolderOpen className="size-4" /><span className="text-sm font-medium">样本分析</span><span className="flex-1" /><Button size="icon-xs" variant="ghost" title={pkg?.linked ? "关联目录包不支持撤销（原地索引，内容不复制）" : "撤销最近一次变更"} disabled={!pkg?.undo_available || busy || !!pkg?.linked} onClick={() => void undo()}><RotateCcw className="size-3.5" /></Button><div className="relative"><Button size="icon-xs" variant="ghost" title="更多" onClick={() => setMoreOpen((v) => !v)}><MoreHorizontal className="size-3.5" /></Button>{moreOpen && <div className="absolute right-0 top-7 z-10 w-40 rounded-md border bg-popover p-1 shadow-md"><button className="w-full rounded px-2 py-1.5 text-left text-[11px] text-destructive hover:bg-accent" onClick={async () => { setMoreOpen(false); if (!window.confirm("确认删除整个分析包？分析结果、逆向资产和依赖也会被清理。")) return; setBusy(true); try { await api.deleteSamplePackage(pid); setPkg(null); setSelectedPath(""); setMessage("分析包已删除") } catch (error) { setMessage("删除失败：" + String(error)) } finally { setBusy(false) } }}>删除分析包</button></div>}</div></div>
+    <div className="flex flex-wrap gap-1 border-b p-2"><Button size="sm" variant="outline" className="h-7 gap-1 text-[10px]" disabled={busy || linking} onClick={() => fileRef.current?.click()}><Upload className="size-3" />上传文件</Button><Button size="sm" variant="outline" className="h-7 gap-1 text-[10px]" disabled={busy || linking} onClick={() => folderRef.current?.click()}><FolderOpen className="size-3" />上传文件夹</Button><Button size="sm" variant="outline" className="h-7 gap-1 text-[10px]" disabled={busy || linking} title="选一个大目录原地索引（不复制），并作为执行工作区" onClick={() => setPickerOpen(true)}>{linking ? <RotateCcw className="size-3 animate-spin" /> : <FolderSearch className="size-3" />}{linking ? "扫描中…" : "选择分析包目录"}</Button></div>
     <input ref={fileRef} type="file" className="hidden" onChange={(event) => { if (event.target.files) void upload(event.target.files); event.target.value = "" }} /><input ref={folderRef} type="file" multiple className="hidden" {...({ webkitdirectory: "", directory: "" } as Record<string, string>)} onChange={(event) => { if (event.target.files) void upload(event.target.files); event.target.value = "" }} />
     <div className="flex gap-1 border-b p-2"><div className="relative min-w-0 flex-1"><Search className="absolute left-2 top-1.5 size-3 text-muted-foreground" /><input className="h-7 w-full rounded-md border bg-background pl-7 pr-2 text-[10px]" placeholder="搜索文件路径…" value={query} onChange={(event) => setQuery(event.target.value)} /></div><select className="h-7 rounded-md border bg-background px-1 text-[10px]" value={filter} onChange={(event) => setFilter(event.target.value as Filter)}><option value="all">全部</option><option value="candidate">可分析</option><option value="analyzed">已分析</option><option value="unanalyzed">未分析</option></select></div>
-    <div className="min-h-0 flex-1 overflow-auto p-1">{pkg ? renderNode(tree) : <div className="p-6 text-center text-xs text-muted-foreground">上传文件或文件夹创建分析包</div>}</div>{message && <div className="border-t px-2 py-1 text-[10px] text-muted-foreground">{message}</div>}
-  </aside><main className="min-w-0 flex-1 overflow-auto p-6">{selectedEntry ? <Detail pid={pid} entry={selectedEntry} treeRef={pkg?.tree_ref} target={selectedTarget} report={selectedReport} busy={busy} registered={!!selectedEntry.sha256 && registered.has(selectedEntry.sha256)} onAnalyze={analyze} onRegister={register} onDelete={remove} onOpenBinary={onOpenBinary} /> : <div className="flex h-full items-center justify-center text-sm text-muted-foreground">从文件树选择文件查看详情</div>}</main>{menu && <div className="fixed z-50 min-w-[150px] rounded-md border bg-popover p-1 shadow-md" style={{ left: menu.x, top: menu.y }}><button className="w-full rounded px-2 py-1.5 text-left text-[11px] hover:bg-accent" onClick={() => { const p = menu.path; setMenu(null); void revealInExplorer(p) }}>打开系统目录</button></div>}</div>
+    {pkg?.linked && <div className="border-b bg-primary/5 px-2 py-1 text-[10px] text-muted-foreground"><div className="truncate" title={pkg.exec_workspace || pkg.tree_ref}>关联目录（原地索引，不复制）</div><div className="truncate font-mono" title={pkg.exec_workspace || pkg.tree_ref}>{pkg.exec_workspace || pkg.tree_ref}</div><div className="mt-0.5">该目录同时是本项目的执行工作区；增删文件请直接在磁盘操作后重新「选择分析包目录」。</div></div>}
+    <div className="min-h-0 flex-1 overflow-auto p-1">{pkg ? renderNode(tree) : <div className="p-6 text-center text-xs text-muted-foreground">上传文件或文件夹创建分析包，或「选择分析包目录」把大目录原地索引</div>}</div>{message && <div className="border-t px-2 py-1 text-[10px] text-muted-foreground">{message}</div>}
+  </aside><main className="min-w-0 flex-1 overflow-auto p-6">{selectedEntry ? <Detail pid={pid} entry={selectedEntry} treeRef={pkg?.tree_ref} target={selectedTarget} report={selectedReport} busy={busy} registered={!!selectedEntry.sha256 && registered.has(selectedEntry.sha256)} onAnalyze={analyze} onRegister={register} onDelete={remove} onOpenBinary={onOpenBinary} /> : <div className="flex h-full items-center justify-center text-sm text-muted-foreground">从文件树选择文件查看详情</div>}</main>{menu && <div className="fixed z-50 min-w-[150px] rounded-md border bg-popover p-1 shadow-md" style={{ left: menu.x, top: menu.y }}><button className="w-full rounded px-2 py-1.5 text-left text-[11px] hover:bg-accent" onClick={() => { const p = menu.path; setMenu(null); void revealInExplorer(p) }}>打开系统目录</button></div>}<DirectoryPickerDialog pid={pid} open={pickerOpen} busy={linking} hint={null} onClose={() => setPickerOpen(false)} onPick={(directory) => void linkDirectory(directory)} /></div>
 }
 
 function Detail({ pid, entry, treeRef, target, report, busy, registered, onAnalyze, onRegister, onDelete, onOpenBinary }: { pid: string; entry: SamplePackageEntry; treeRef?: string; target: SamplePackageTarget | null; report: SampleTargetAnalysis | null; busy: boolean; registered: boolean; onAnalyze: (target: SamplePackageTarget) => void; onRegister: (target: SamplePackageTarget) => void; onDelete: (path: string) => void; onOpenBinary: (sha: string) => void }) {

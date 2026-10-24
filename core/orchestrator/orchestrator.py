@@ -26,6 +26,9 @@ from core.coverage import coverage_report, effective_status_map
 from core.autonomy import record_llm_usage
 from core.blackboard import Blackboard
 from core.blackboard.store import new_id
+# 系统注入标签真源（2026-10-24）：`wake_brief_text` 的输出若手写方括号前缀，
+# 前端认不出它是系统消息，会当人类发言原文渲染（同 background_wake 的事故）。
+from core.chat.origin import LABEL_AUTO_WAKE, tag as origin_tag
 from core.llm.provider import assistant_message, tool_results_message
 from core.llm.pseudo_toolcall import sanitize_response_text
 from core.llm.tokenizer import CHARS_PER_TOKEN, context_window_tokens, get_counter
@@ -1043,7 +1046,7 @@ class Orchestrator:
     @classmethod
     def wake_brief_text(cls, triggers: list[dict[str, Any]]) -> str:
         """把触发清单合成一条 user 消息（只进 LLM messages，不落 orch.chat 历史）。"""
-        lines = ["〔主动唤醒〕以下异常事件达到白名单触发条件，请向人类简报现状并给出"
+        lines = [f"{origin_tag(LABEL_AUTO_WAKE)}以下异常事件达到白名单触发条件，请向人类简报现状并给出"
                  "处理建议；若无需处理请明确说明。"]
         found = [t for t in triggers if t["kind"] == "finding.new"]
         for t in triggers:

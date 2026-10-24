@@ -186,6 +186,10 @@ function draftFrom(e: Expert): ExpertDraft {
     tracks: e.tracks ?? [],
     // null 必须原样保留：null = 全量（后端不落键），[] = 一个都不启用。
     // 读成 [] 再保存会把「未限制」写成「全部禁用」。
+    // **tracks 不适用这条**（2026-10-25 语义反转）：null 与 [] 现在都是
+    // 「不启用」，保留 null 毫无信息量，却会让保存链路把整行 `tracks:` 丢掉
+    // ——用户主动取消勾选的动作在磁盘上不可区分于「从未配置」，doctor 也
+    // 只能报「未勾任何轨」。故 tracks 恒以数组形式提交（见 bodyFrom）。
     skills: e.skills ?? null,
     tools: e.tools ?? null,
     mcpServers: e.mcp_servers ?? null,
@@ -200,7 +204,9 @@ function bodyFrom(d: ExpertDraft, e: Expert): ExpertBody {
     name: d.name.trim() || null,
     description: d.description.trim() || null,
     persona: d.persona.trim() || null,
-    tracks: d.tracks.length ? d.tracks : null,
+    // tracks 恒提交数组：空数组 = 「不勾任何轨 = 不启用」，后端落 `tracks: []`
+    // 而不是丢弃整键。传 null 会让「用户取消勾选」退化成「从未配置」。
+    tracks: d.tracks,
     // 能力白名单三件套按草稿原样提交：null = 不限制（后端不落键）；
     // [] = 明确一个都不启用（后端落 `key: []`）；非空 = 勾选清单。
     skills: d.skills,
@@ -644,7 +650,12 @@ function ExpertsPane({ tax, focus }: { tax: Taxonomy | null; focus: ExpertFocus 
                 title={`${e.id}${e.description ? ` · ${e.description}` : ""}`}>
                 {e.name || e.id}
                 <span className="ml-1 text-[9px] text-muted-foreground">
-                  {!e.tracks?.length ? "全轨" : e.tracks.join("/")}
+                  {/* 空 tracks 现在等于「不启用」而不是「全轨」（2026-10-25）：
+                      显示成「未启用」并置警示色，否则用户看到的是一个灰标签、
+                      根本想不到这个专家已经不在任何轨的池里了。 */}
+                  {!e.tracks?.length
+                    ? <span className="text-(--status-warning)">未启用</span>
+                    : e.tracks.join("/")}
                 </span>
               </button>
               {!e.protected && (
@@ -689,7 +700,13 @@ function ExpertsPane({ tax, focus }: { tax: Taxonomy | null; focus: ExpertFocus 
             <Textarea value={draft.persona} onChange={(e) => edit({ persona: e.target.value })}
                       className="min-h-16 shrink-0 resize-y text-xs" />
             <div>
-              <label className="text-[10px] text-muted-foreground">服务轨 tracks（不选 = 全轨通用）</label>
+              {/* 文案必须写明「不勾=不启用」（2026-10-25 语义反转）：旧文案
+                  「不选 = 全轨通用」现在会把人往反方向带——漏勾的专家会静默从
+                  所有轨的池里消失。JSX 不解析 Markdown，强调靠字号/颜色不靠星号。 */}
+              <label className="text-[10px] text-muted-foreground">
+                服务轨 tracks（不勾 = <span className="text-(--status-warning)">不启用</span>：
+                该专家不进任何轨的专家池、也无法被委派；要全域可用就把四条轨都勾上）
+              </label>
               <div className="mt-1 flex flex-wrap gap-1">
                 {(tax?.tracks ?? []).map((t) => (
                   <button key={t.name}
@@ -713,7 +730,7 @@ function ExpertsPane({ tax, focus }: { tax: Taxonomy | null; focus: ExpertFocus 
             {/* task_types 输入框已移除（2026-10-21）：任务认领机制 2026-10-06
                 退役后该字段零运行时消费，留着只会让人对着无效字段做决策。 */}
             {/* 工具白名单（controller-tool-select，2026-10-20 定稿）：
-                控制器类智能体（chat-orchestrator / aggressive / artex / ctf-controller）
+                控制器类智能体（pentest-controller / aggressive / artex / ctf-controller）
                 的 yaml `tools` 现在是**真实开关**——勾了就下发、没勾就既不下发 schema
                 也会在执行侧被拒。候选清单额外并入后端下发的 `tools_runtime`
                 （`artex_*` / `ctf_*` / `todo_write` / `call_expert` 不在通用目录里），

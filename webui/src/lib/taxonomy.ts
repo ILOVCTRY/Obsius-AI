@@ -48,6 +48,18 @@ export const trackLabel = (t?: string | null): string =>
 export const dirLabel = (d?: string | null): string =>
   d ? (DIR_LABELS[d] ?? d) : ""
 
+/** 「全部」聚合视图哨兵 cap：与后端 `core/skills/writing.KB_ALL_CAP` **同值**。
+ *  知识库工作台默认选它——知识库对人是全开的，方向只是树的组织维度，
+ *  不该成为「默认只看到某一个方向」的过滤器（2026-10-23 Nan 报 bug）。 */
+export const KB_ALL = "__all__"
+
+/** 「全部」聚合视图显示名（选择器选项与徽章共用） */
+export const KB_ALL_LABEL = "全部方向"
+
+/** 选择器选项显示名：哨兵走 KB_ALL_LABEL，方向名走 dirLabel */
+export const capOptionLabel = (name: string): string =>
+  name === KB_ALL ? KB_ALL_LABEL : dirLabel(name)
+
 /** 兼容别名：能力包已退役，方向名即原包名，旧调用点零改动 */
 export const capLabel = dirLabel
 

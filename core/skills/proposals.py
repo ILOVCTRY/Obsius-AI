@@ -63,6 +63,52 @@ _BARE_NUM_RE = re.compile(r"(?<![\w.])0x[0-9a-fA-F]{3,}(?![\w.])"
                           r"|(?<![\w.])\d{4,}(?![\w.%])")
 _CRITERIA_TABLE_RE = re.compile(r"^\|\s*(?:现象|手上的原语|卡在哪|#)\s*\|", re.M)
 
+# ---- 前置条件 / 降级路径（2026-10-23，B5；KB-WRITING-SPEC.md §2 规则 3）----
+# 背景（R3 复盘）：手册默认工具可用，比工具缺失更贵——查不到还能自己摸，
+# 查到一条「看起来完全合理」的判据却跑不通最费时间。典型：VeraCrypt 手册的
+# 入口是 `cryptsetup tcryptDump`，容器里无二进制 + 无 dm-crypt 内核接口 = 整条
+# 断；`__libc_csu_init` 搬运段寄存器顺序随编译选项变，照抄会静默崩溃。
+# 故带代码块的手法节必须写「前置」（成立条件）与「降级」（不成立时改走什么）。
+# 只查**带代码块**的节：纯叙述节（纪律/小结）没有可失效的执行路径。
+# 命中同义词：人类旧文档惯用「前提/环境/适用条件」，一并认。
+_PRE_REQ_RE = re.compile(r"\*\*(?:前置|前提|环境|依赖|适用条件)[^*]*\*\*")
+_FALLBACK_RE = re.compile(r"\*\*(?:降级|替代|回退|退路)[^*]*\*\*")
+# 不算手法节的标题（表节、纪律、叙事）
+_NON_TECHNIQUE_RE = re.compile(
+    r"速查|测试面|纪律|注意|小结|总结|参考|术语|清单|索引|目录|前言|总览"
+    r"|概览|成本|约定|附录|背景|原理|写在前面|工具准备|环境准备")
+# 覆盖率门槛：留出余量——硬要 100% 会逼 agent 往纯数学节里塞「**前置**：无」
+# 式填充，噪声比缺失更贵。60% 且至少容 1 节豁免，够拦住「整篇没写」。
+_PRE_COVER_MIN = 0.6
+
+
+def _kb_technique_sections(content: str) -> list[tuple[str, str]]:
+    """切出「带代码块的手法节」：[(标题, 节正文)]。
+
+    跳过围栏内的 `## `（代码里的注释不是标题），跳过表节与纪律节——
+    它们没有可失效的执行路径，要求写降级只会产出填充行。
+    """
+    lines = content.splitlines()
+    heads: list[tuple[int, str]] = []
+    in_fence = False
+    for i, ln in enumerate(lines):
+        s = ln.strip()
+        if s.startswith(("```", "~~~")):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        if ln.startswith("## "):
+            heads.append((i, ln[3:].strip()))
+    out: list[tuple[str, str]] = []
+    for k, (i, title) in enumerate(heads):
+        end = heads[k + 1][0] if k + 1 < len(heads) else len(lines)
+        body = "\n".join(lines[i:end])
+        if _NON_TECHNIQUE_RE.search(title) or "```" not in body:
+            continue
+        out.append((title, body))
+    return out
+
 
 class ProposalError(ValueError):
     """提案非法（API→422）。"""
@@ -290,6 +336,26 @@ def _validate_not_case_replay(content: str) -> None:
             "`| 现象 |`（或 `| 手上的原语 |` / `| 卡在哪 |`）开头。"
             "判据库口径是「看到什么现象 → 该做什么 → 什么情况算不成立」，"
             "无此表的文档在卡住时检索不到。")
+
+    # 4) 前置 + 降级（B5，2026-10-23）
+    secs = _kb_technique_sections(content)
+    if len(secs) >= 2:   # 只有一个手法节时，人读一遍就能补，不必机械拦
+        miss_pre = [t for t, b in secs if not _PRE_REQ_RE.search(b)]
+        miss_fb = [t for t, b in secs if not _FALLBACK_RE.search(b)]
+        worst = max(len(miss_pre), len(miss_fb))
+        if worst / len(secs) > 1 - _PRE_COVER_MIN:
+            names = "、".join((miss_pre or miss_fb)[:3])
+            raise ProposalError(
+                f"缺前置/降级路径：{len(secs)} 个带代码块的手法节里，"
+                f"{len(miss_pre)} 节没写「**前置**」、{len(miss_fb)} 节没写"
+                f"「**降级**」（例：{names}）。"
+                "**前置** = 这条手法成立必须满足什么（工具装了没、内核接口有没有、"
+                "版本区间、权限）；**降级** = 前置不成立时改走什么，要写成可执行的"
+                "替代路径，不能只写「换工具试试」。"
+                "为什么是硬规则：手册默认工具可用比工具缺失更贵——查不到还能自己摸，"
+                "查到一条看着合理却跑不通的判据最费时间。"
+                "自检：读者在只有最朴素环境（无该工具/无权限/无网络）时，"
+                "能靠这一节走完吗？")
 
 
 

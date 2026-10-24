@@ -43,6 +43,11 @@ KB_ATTACHMENT_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bm
 KB_FILE_SUFFIXES = KB_TEXT_SUFFIXES | KB_ATTACHMENT_SUFFIXES
 # kb 根下平台自维护文件（非知识内容，树/搜索里不出现）
 _KB_NON_CONTENT_FILES = {"route.json"}
+#: 「全部」聚合视图哨兵 cap（2026-10-23）：知识库工作台默认打开全部方向。
+#: 只在**只读列举/检索**口径被识别（list_kb / API 层 fan-out）；写入类接口
+#: （create/update/rename/delete）必须落到具体方向目录，故不认哨兵——传进来
+#: 会按「域不存在」422 拒收，这正是我们要的：宁可报错也不猜落点。
+KB_ALL_CAP = "__all__"
 # Windows 非法文件名字符（/ 是分隔符不算）。知识库来源文件名可能包含 Unicode
 # 标点（例如 en dash ``–``），因此不能用过窄的 ASCII 文件名白名单限制既有资料。
 _KB_FORBIDDEN_CHARS = set('<>:"|?*\x00')
@@ -154,6 +159,18 @@ def _validate_rel(rel_path: str) -> Path:
     return p
 
 
+def kb_directions_for(packs_root: str | Path, cap: str) -> list[str]:
+    """cap → 参与列举/检索的 kb 方向列表。
+
+    `cap == KB_ALL_CAP` 时展开为**盘上全部** kb 方向（`list_directions`），
+    否则单元素直通。只读口径专用；写入口径不认哨兵（见 KB_ALL_CAP 注释）。
+    """
+    if cap == KB_ALL_CAP:
+        from core.skills.taxonomy import list_directions  # 就地导入防环
+        return list_directions(packs_root)
+    return [cap]
+
+
 def _sources(packs_root: str | Path, cap: str) -> list[KbSource]:
     sources = load_kb_sources(packs_root, [cap])
     if not sources:
@@ -243,24 +260,45 @@ def list_kb(packs_root: str | Path, cap: str) -> list[dict]:
 
     每文件带 title（kbindex 同口径：frontmatter title > 第一个 # H1 > 文件名 stem），
     供前端树行显中文标题——kb 树重做后文件名不再含编号语义（DESIGN.md §4 F15）。
+
+    ``cap == KB_ALL_CAP``（「全部」聚合视图，2026-10-23）：跨全部 kb 方向合并为
+    **单棵源树**，文件 path 带方向前缀（= kb_open 的全局 module 形态
+    `<域>/<快照>/<路径>`）。三点理由：
+
+    1. 前端树的 key/选中态都是 path 字符串，跨域同名路径（如 `实战打法/SQL.md`
+       同时存在于 web 与 misc）不加前缀必然撞 key；
+    2. 前缀与 `route.json` 的导航前缀同形，点「任务导航」过滤树照常生效；
+    3. 选中后由前端按首段还原方向，编辑器/改名/删除仍走具体方向接口。
     """
     from core.skills.kbindex import _extract_title  # kbindex 不反向依赖 writing，就地导入防环
 
     head_bytes = 2048  # title/H1 都在文件头部，读首部即可（kbindex 段落索引才需全文）
 
+    directions = kb_directions_for(packs_root, cap)
+    merged = len(directions) > 1
     out = []
-    for src in _sources(Path(packs_root), cap):
-        files: list[dict] = []
-        for f in _iter_kb_files(src):
-            st = f.stat()
-            head = f.open("rb").read(head_bytes).decode("utf-8", errors="replace")
-            files.append({"path": f.relative_to(src.root).as_posix(),
-                          "size": st.st_size,
-                          "title": _extract_title(head, f.stem),
-                          "mtime": time.strftime("%Y-%m-%dT%H:%M:%SZ",
-                                                 time.gmtime(st.st_mtime))})
-        out.append({"id": src.id, "recursive": src.recursive,
-                    "root": src.root.name, "files": files})
+    for direction in directions:
+        for src in _sources(Path(packs_root), direction):
+            files: list[dict] = []
+            for f in _iter_kb_files(src):
+                st = f.stat()
+                head = f.open("rb").read(head_bytes).decode("utf-8", errors="replace")
+                rel = f.relative_to(src.root).as_posix()
+                files.append({"path": f"{direction}/{rel}" if merged else rel,
+                              "size": st.st_size,
+                              "title": _extract_title(head, f.stem),
+                              "mtime": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                                     time.gmtime(st.st_mtime))})
+            if not files:
+                continue
+            out.append({"id": src.id if not merged else f"{direction}-kb",
+                        "recursive": src.recursive,
+                        "root": src.root.name, "files": files})
+    if merged:
+        # 合并为单源（前端 `sources.length > 1` 才显源标题；聚合视图靠 path 首段
+        # 区分方向，多源反而把同一批文件拆成 6 段重复表头）
+        return [{"id": "all-kb", "recursive": True, "root": "全部",
+                 "files": [f for s in out for f in s["files"]]}]
     return out
 
 

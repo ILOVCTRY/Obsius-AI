@@ -179,16 +179,55 @@ def _check_vuln_gates(*, category: str, severity: str, status: str,
 # image（无代码块，artifact_id 必填指向图片产物，渲染嵌入）；旧值 http_raw 读时
 # 映射 http、steps 视为纯文字步骤（写入不再产生）。
 REPRO_STEP_TYPES = ("http", "python", "cmd", "image")
-# 写入口宽容集：白名单 + 旧值（读时降级映射，不拒存量形态重写）
-_REPRO_STEP_TYPES_WRITE = REPRO_STEP_TYPES + ("http_raw", "steps")
+
+# 同义写法归一（2026-10-23，R2 #6）：模型几乎总是写 `python3`/`bash`/`sh`/`powershell`，
+# 而不是白名单里的 `python`/`cmd`。旧实现直接 422 拒，错误文案只列白名单、
+# 不说「该写哪个」，模型只能猜——实测连拒两轮后改用 cmd 才过。
+#
+# **修法是归一而不是扩枚举**：白名单是**渲染口径**（决定围栏语言与是否嵌图），
+# 扩枚举会让 FENCE 映射（前端 `{http,python,cmd}`）漏掉新值 → 代码块无围栏、
+# 或 image 那类「必须嵌图」的分支走不到。归一到既有四类，渲染侧零改动。
+#
+# 映射表用**归一后的目标**做值，且只归一**不影响语义**的写法差异：
+# 解释器/壳的别名归到该语言（python3→python、bash→cmd），不是「猜内容类型」。
+_REPRO_TYPE_ALIASES = {
+    "python": "python", "python3": "python", "py": "python",
+    "python2": "python", "py3": "python",
+    "cmd": "cmd", "bash": "cmd", "sh": "cmd", "shell": "cmd", "zsh": "cmd",
+    "powershell": "cmd", "ps1": "cmd", "pwsh": "cmd", "console": "cmd",
+    "http": "http", "http_raw": "http", "raw": "http", "curl": "http",
+    "httpreq": "http", "request": "http",
+    "image": "image", "img": "image", "screenshot": "image",
+}
+
+
+def normalize_repro_type(t: object) -> str | None:
+    """把步骤 type 归一到四类白名单；不认识返回 None（调用方据此报错）。
+
+    空/缺省返回 None 但**不是错误**（type 本就是可选项，渲染时按无围栏处理）。
+    """
+    if t is None:
+        return None
+    s = str(t).strip().lower()
+    if not s:
+        return None
+    return _REPRO_TYPE_ALIASES.get(s)
 
 
 def validate_repro_steps(evidence: dict | None) -> None:
-    """校验 evidence.repro_steps 复现步骤结构（收录格式一等结构，宁严勿松）：
-    形态必须为 [{desc, type?, code?, expected?, artifact_id?, stability?, target?}]——
-    desc 必填非空字符串（步骤描述）；type 白名单 {http,python,cmd,image}+
-    旧值 {http_raw,steps}（image 步骤 artifact_id 必填）；expected/code 等须为
-    字符串。非法一律 ValueError（API 422 / Agent 工具回填 [拒绝]）。"""
+    """校验 **并原地归一** evidence.repro_steps（收录格式一等结构，宁严勿松）。
+
+    形态必须为 [{desc, type?, code?, expected?, artifact_id?, stability?, target?}]：
+    desc 必填非空字符串；type 归一到 {http,python,cmd,image}
+    （`python3`/`bash`/`powershell` 等写法自动归一，见 `normalize_repro_type`；
+    image 步骤 artifact_id 必填）；expected/code 等须为字符串。
+    非法一律 ValueError（API 422 / Agent 工具回填 [拒绝]）。
+
+    **为什么在这里改写而不是只校验**：白名单是**渲染口径**（决定围栏语言、
+    是否嵌图）。只校验不归一 → 存进库的仍是 `python3`，渲染侧拿到未识别的
+    值就落不到任何围栏分支（代码块无语言标注）。校验与归一同处，才不会
+    「校验放行、渲染失配」。
+    """
     steps = (evidence or {}).get("repro_steps")
     if steps is None:
         return
@@ -201,11 +240,19 @@ def validate_repro_steps(evidence: dict | None) -> None:
                              " {desc, type?, code?, expected?, artifact_id?, …}")
         desc = s.get("desc")
         if not isinstance(desc, str) or not desc.strip():
+
             raise ValueError(f"repro_steps 第 {i} 步缺非空 desc（步骤描述）")
-        t = s.get("type")
-        if t is not None and t != "" and t not in _REPRO_STEP_TYPES_WRITE:
+        raw_t = s.get("type")
+        t = normalize_repro_type(raw_t)
+        if t is None and raw_t not in (None, ""):
+            # 报错要**给出可用写法**，不能只列白名单——模型不知道 `python3`
+            # 该写成什么，只能连试几次（R2 实测连拒两轮）。
             raise ValueError(
-                f"repro_steps 第 {i} 步非法 type: {t}（允许 {REPRO_STEP_TYPES}）")
+                f"repro_steps 第 {i} 步非法 type: {raw_t}（可用 "
+                f"{'/'.join(REPRO_STEP_TYPES)}；python3/py→python，"
+                "bash/sh/shell/powershell→cmd）")
+        if t is not None and t != raw_t:
+            s["type"] = t          # 原地归一：存库与渲染都拿规范化值
         if t == "image" and not s.get("artifact_id"):
             raise ValueError(f"repro_steps 第 {i} 步 type=image 必须带 artifact_id"
                              "（指向图片产物，渲染时嵌入）")

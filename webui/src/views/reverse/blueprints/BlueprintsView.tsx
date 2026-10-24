@@ -89,7 +89,7 @@ function ModuleCard({ m, onLocate, bpSha }: {
 // （主控 chat-orchestrator）+ 下发阶段 objective，随后跳「智能体工作台」（goto-agents）；
 // 实际执行在工作台（主控 call_expert 扇出子专家），本页 4s 轮询反映 Agent 写回。
 // M3：status=building 时露「派发重建」（阶段四/五），深析按钮在 building/built 收敛。
-const ORCHESTRATOR_ID = "chat-orchestrator"
+const ORCHESTRATOR_ID = "pentest-controller"
 
 // 阶段一：模块划分 → 子专家 bb_blueprint_create 产骨架
 function stageObjective(sampleSha: string): string {

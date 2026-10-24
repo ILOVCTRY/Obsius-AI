@@ -24,6 +24,9 @@ contextBridge.exposeInMainWorld("desktopBrowser", {
   terminalWrite: (id, data) => ipcRenderer.send("terminal:write", { id, data }),
   terminalResize: (id, cols, rows) => ipcRenderer.send("terminal:resize", { id, cols, rows }),
   terminalKill: (id) => ipcRenderer.invoke("terminal:kill", id),
+  // 原生目录选择（「选择分析包」2026-10-24）：只有桌面壳有系统对话框；
+  // 浏览器里这个能力不存在，前端据此回落应用内目录浏览器。
+  pickDirectory: (defaultPath) => ipcRenderer.invoke("dialog:pick-directory", defaultPath || ""),
 })
 
 contextBridge.exposeInMainWorld("desktopWindow", {

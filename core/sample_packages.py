@@ -35,6 +35,11 @@ class PackageLimits:
     max_expanded_bytes: int = 10 * 1024 * 1024 * 1024
     max_files: int = 100_000
     max_depth: int = 32
+    #: 关联外部目录（原地索引，不复制）专用配额：这类包本来就是「很大所以不想复制」，
+    #: 沿用上传配额会让几十 GB 的成品游戏目录直接 422。只放宽**扫描规模**，单文件
+    #: 上限不变（单文件过大仍拒绝——那是分析侧的耗时风险，不是空间问题）。
+    max_linked_files: int = 500_000
+    max_linked_bytes: int = 512 * 1024 * 1024 * 1024
 
 
 def utc_now() -> str:
@@ -230,17 +235,37 @@ def _dependency_names(path: Path, fmt: str) -> set[str]:
     return {name.decode("ascii", "ignore").lower() for name in names}
 
 
-def _manifest(tree: Path, *, origin: dict[str, Any], limits: PackageLimits) -> dict[str, Any]:
+def _manifest(tree: Path, *, origin: dict[str, Any], limits: PackageLimits,
+              identity: str | None = None,
+              progress: dict[str, Any] | None = None) -> dict[str, Any]:
+    """扫描一棵树生成清单。
+
+    ``identity``（关联外部目录专用）：外部文件夹的内容可能与另一个包完全相同，
+    此时若仍只用内容哈希做包身份，两次「选择」会撞成同一个 package_id、后者的
+    tree_ref 被前者的路径顶掉。把**目录绝对路径**混进哈希即可让「同一份内容、
+    两个位置」保持为两个包，内容寻址的其余语义不变。
+
+    ``progress``：可选进度字典（就地更新 files/bytes），供后台 Job 展示。
+    """
     entries: list[dict[str, Any]] = []
+    seen_bytes = 0
     for path in sorted((p for p in tree.rglob("*") if p.is_file()), key=lambda p: p.as_posix().lower()):
         rel = _safe_relative(path.relative_to(tree).as_posix(), max_depth=limits.max_depth)
         digest, size = sha256_file(path)
         info = classify_file(path, rel)
         entries.append({"path": rel, "sha256": digest, "size": size, **info})
+        seen_bytes += size
+        if progress is not None:
+            progress.update({"phase": "scan", "files": len(entries), "bytes": seen_bytes})
+        if len(entries) > limits.max_files:
+            raise SamplePackageError(f"文件数量超过 {limits.max_files}")
     if len(entries) > limits.max_files:
         raise SamplePackageError(f"文件数量超过 {limits.max_files}")
     canonical = [{k: row[k] for k in ("path", "sha256", "size", "format", "platform")} for row in entries]
-    manifest_hash = hashlib.sha256(json.dumps(canonical, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
+    payload = json.dumps(canonical, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    if identity:
+        payload += "\n" + identity
+    manifest_hash = hashlib.sha256(payload.encode()).hexdigest()
     by_name = {Path(row["path"]).name.lower(): row for row in entries}
     dependencies: list[dict[str, str]] = []
     for row in entries:
@@ -454,6 +479,46 @@ class SamplePackageStore:
         return (tree.is_relative_to(self._trees_root(project))
                 or tree.is_relative_to(self.legacy_root))
 
+    def _linked_tree(self, package: dict[str, Any], project: Path) -> Path | None:
+        """关联目录包的 tree_ref 校验（2026-10-24 大包原地索引）。
+
+        关联包的内容树在**项目外**（用户自选文件夹，可能就是项目工作区本身之外
+        任意位置），故不能套 `_tree_allowed` 的项目内白名单。判据改为「与登记时
+        记录的目录完全一致」——路径来源是服务端自己写进 manifest 的绝对值，不
+        接受请求方传入，等价于白名单。目录被删除/换盘则返回 None（调用方按
+        「内容树不存在」处理）。
+        """
+        if not package.get("linked"):
+            return None
+        recorded = str((package.get("origin") or {}).get("directory") or "")
+        if not recorded:
+            return None
+        root = Path(recorded)
+        if not root.is_absolute():
+            return None
+        try:
+            resolved = root.resolve()
+        except OSError:
+            return None
+        try:
+            if Path(str(package.get("tree_ref") or "")).resolve() != resolved:
+                return None
+        except OSError:
+            return None
+        # 关联根绝不能是项目内的 trees/raw（那会把不可变内容树当可写工作区），
+        # 也不能是盘符根/工作区根本身（一次误选就把整个盘索引成包）。
+        if resolved.is_relative_to(self._trees_root(project)) \
+                or resolved.is_relative_to(self._raw_root(project)):
+            return None
+        return resolved if resolved.is_dir() else None
+
+    def _package_tree(self, package: dict[str, Any], project: Path) -> Path | None:
+        """包内容树绝对路径：关联包走 `_linked_tree`，其余走项目内白名单。"""
+        tree = Path(str(package.get("tree_ref") or "")).resolve()
+        if package.get("linked"):
+            return self._linked_tree(package, project)
+        return tree if tree.is_dir() and self._tree_allowed(tree, project) else None
+
     def _metadata_root(self, project_root: Path) -> Path:
         path = project_root / "sample_packages"
         path.mkdir(parents=True, exist_ok=True)
@@ -492,6 +557,32 @@ class SamplePackageStore:
         rows = self.list_packages(project)
         return rows[0] if rows else None
 
+    # ---------- 执行工作区（2026-10-24「选择分析包 = 工作区」） ----------
+
+    def exec_workspace(self, project_root: str | Path) -> Path | None:
+        """当前分析包要求作为**执行工作区**的目录；无关联包 → None。
+
+        语义：用户「选择分析包」挑的是一个大目录（成品游戏/固件树），它既是分析
+        对象也是这一轮干活的 cwd——agent 的 run_cmd 相对路径、scratch 都落在它
+        下面，实现与「脚本就在样本旁边、直接 ./ 跑」一致的用法。
+
+        只对**关联目录包**（origin.source_type == "linked-directory" 且目录仍在）
+        生效；上传包的内容树在 `<project>/trees/` 且不可变，绝不拿它当可写工作区。
+        目录被拔盘/删除 → None（自动退回项目工作区，不阻断整个会话）。
+
+        **只换执行根，不换产物根**（重要，2026-10-24）：平台的 artifacts/、黑板库、
+        decompiler 缓存、sample_packages 元数据全部固定在 `proj.path`。把产物写进
+        用户的分析目录会污染样本树（且样本目录常是只读挂载/成品游戏目录），而
+        `bb_add_artifact` 的落盘路径与 DB 记录路径必须同源。
+        """
+        project = self._project_root(project_root)
+        package = self.current_package(project)
+        if not package or not package.get("linked"):
+            return None
+        if str((package.get("origin") or {}).get("source_type") or "") != "linked-directory":
+            return None
+        return self._linked_tree(package, project)
+
     def _commit_tree(self, project: Path, tree: Path, manifest: dict[str, Any]) -> Path:
         digest = manifest["manifest_sha256"]
         dest = self._trees_root(project) / digest
@@ -519,10 +610,28 @@ class SamplePackageStore:
                 temp.unlink(missing_ok=True)
         return dest
 
-    def import_tree(self, project_root: str | Path, tree: Path, *, origin: dict[str, Any]) -> dict[str, Any]:
+    def import_tree(self, project_root: str | Path, tree: Path, *, origin: dict[str, Any],
+                    linked: bool = False,
+                    progress: dict[str, Any] | None = None) -> dict[str, Any]:
+        """登记一棵内容树为分析包版本。
+
+        ``linked=True``（2026-10-24「选择分析包」）：`tree` 就是用户自选的外部
+        文件夹，**原地索引、不复制**——tree_ref 直接指向该目录，manifest 记
+        `linked:true` + `origin.directory` 绝对路径。包身份哈希混入目录路径，避免
+        同内容两处互相顶掉（见 `_manifest` 的 `identity`）。
+
+        关联包与上传包的分野只有三处：①不落 `<project>/trees/`；②tree_ref 白名单
+        走 `_linked_tree`；③禁止文件树编辑（`_edit_tree` 拒绝——编辑要知道临时
+        全量 copytree，几十 GB 目录直接爆盘）。
+        """
         project = self._project_root(project_root)
-        manifest = _manifest(tree, origin=origin, limits=self.limits)
-        tree_ref = self._commit_tree(project, tree, manifest)
+        manifest = _manifest(tree, origin=origin, limits=self.limits,
+                             identity=str(origin.get("directory") or "") if linked else None,
+                             progress=progress)
+        if linked:
+            tree_ref = Path(str(origin.get("directory"))).resolve()
+        else:
+            tree_ref = self._commit_tree(project, tree, manifest)
         manifest_hash = manifest["manifest_sha256"]
         package_id = "pkg-" + manifest_hash[:16]
         version_id = "ver-" + manifest_hash[:16]
@@ -533,6 +642,7 @@ class SamplePackageStore:
             "package_id": package_id,
             "version_id": version_id,
             "tree_ref": str(tree_ref),
+            "linked": bool(linked),
             "targets": [
                 {"target_id": _target_id(version_id, row["path"]),
                  "analyzers": analyzers_for_target(row), **row}
@@ -548,6 +658,56 @@ class SamplePackageStore:
         undo = {"package_id": previous.get("package_id"), "version_id": previous.get("version_id")} if previous else None
         self._write_current(project, package_id, version_id, undo=undo)
         return enriched
+
+    def validate_link_directory(self, project_root: str | Path,
+                                directory: str | Path) -> Path:
+        """关联目录的**同步预检**：只做便宜判定，不扫内容。
+
+        必须在提交后台 Job 之前调（2026-10-24 实测踩到）：给相对路径/不存在的
+        目录时，若把校验全放进 Job 里，HTTP 会先回 202、前端随后才从一个失败的
+        Job 里读到错误——用户看到的是「已开始扫描」，实际什么都没发生。预检
+        把这些能立刻判死的错误变成同步 4xx。
+
+        `link_directory` 内部仍会再走一遍（Job 与直调共用同一套判据）。
+        """
+        project = self._project_root(project_root)
+        raw = Path(directory)
+        if not raw.is_absolute():
+            raise SamplePackageError("分析包目录必须是绝对路径")
+        try:
+            root = raw.resolve(strict=True)
+        except OSError as exc:
+            raise SamplePackageError(f"目录不存在或不可访问: {directory}") from exc
+        if not root.is_dir():
+            raise SamplePackageError(f"不是目录: {directory}")
+        if root.parent == root:
+            raise SamplePackageError("不能把磁盘根目录作为分析包")
+        for owned in (self._trees_root(project), self._raw_root(project),
+                      self._metadata_root(project)):
+            if root == owned or root.is_relative_to(owned):
+                raise SamplePackageError(f"不能把平台内部目录作为分析包: {root}")
+        if root == Path(project):
+            raise SamplePackageError("不能把项目根目录本身作为分析包")
+        return root
+
+    def link_directory(self, project_root: str | Path, directory: str | Path, *,
+                       progress: dict[str, Any] | None = None) -> dict[str, Any]:
+        """把用户选中的**外部文件夹**原地登记为分析包（2026-10-24）。
+
+        动机：分析包动辄几十 GB（成品游戏/整机固件树），走上传路径要么撑爆浏览器
+        要么在项目内复制一份等价体积。此入口只做「扫描建清单」，文件一个字节都不
+        复制——tree_ref 直接就是该目录，因此它同时也天然是该项目的执行工作区
+        （`exec_workspace`，见 API 层解析）。
+
+        三条硬约束（都是「不复制」带来的，必须显式挡）由 `validate_link_directory`
+        落实：目录必须存在且是真目录；不能是盘符根；不能落在平台内部目录里。
+        """
+        root = self.validate_link_directory(project_root, directory)
+        return self.import_tree(
+            self._project_root(project_root), root,
+            origin={"source_type": "linked-directory", "directory": str(root),
+                    "filename": root.name},
+            linked=True, progress=progress)
 
     def import_source(self, project_root: str | Path, source: Path, *, filename: str | None = None,
                       source_type: str = "auto") -> dict[str, Any]:
@@ -626,6 +786,13 @@ class SamplePackageStore:
         package = self.current_package(project)
         if package is None:
             raise SamplePackageError("分析包不存在")
+        if package.get("linked"):
+            # 关联目录包是**原地索引**（tree_ref = 用户自己的文件夹），任何编辑都要
+            # 先整树 copytree 到临时目录再整树扫一遍——几十 GB 目录会直接爆盘/超时，
+            # 且真的写下去等于改动用户的原始数据。明确拒绝并给可行出口。
+            raise SamplePackageError(
+                "关联目录分析包不支持文件树编辑（原地索引，不复制内容）；"
+                "请直接在其磁盘目录中增删文件后重新「选择分析包」")
         tree = Path(str(package.get("tree_ref") or "")).resolve()
         if not tree.is_dir() or not self._tree_allowed(tree, project):
             raise SamplePackageError("分析包内容树不存在或不安全")
@@ -700,6 +867,10 @@ class SamplePackageStore:
         design (another package in the same project may reuse the same tree), so
         they are left in place.  Project-local manifests, reports and import
         history are removed by deleting the package metadata directory.
+
+        **关联目录包（linked）同样只删元数据**：tree_ref 是用户自己的文件夹，
+        删包=解除登记，绝不动用户的原始目录（这一条是硬红线——「删除分析包」
+        按钮对几十 GB 的外部目录不能有任何写操作）。
         """
         project = self._project_root(project_root)
         pointer = self._read_current(project)
@@ -776,8 +947,8 @@ class SamplePackageStore:
             raise SamplePackageError("分析目标不存在")
         if not target.get("analyzers"):
             target = {**target, "analyzers": analyzers_for_target(target)}
-        tree = Path(str(package.get("tree_ref") or "")).resolve()
-        if not tree.is_dir() or not self._tree_allowed(tree, project):
+        tree = self._package_tree(package, project)
+        if tree is None:
             raise SamplePackageError("分析包内容树不存在或不安全")
         rel = _safe_relative(str(target.get("path") or ""), max_depth=self.limits.max_depth)
         path = (tree / rel).resolve()
@@ -795,8 +966,8 @@ class SamplePackageStore:
         entry = next((row for row in package.get("entries", []) if row.get("path") == rel), None)
         if entry is None:
             raise SamplePackageError("文件不存在")
-        tree = Path(str(package.get("tree_ref") or "")).resolve()
-        if not tree.is_dir() or not self._tree_allowed(tree, project):
+        tree = self._package_tree(package, project)
+        if tree is None:
             raise SamplePackageError("分析包内容树不存在或不安全")
         resolved = (tree / rel).resolve()
         if not resolved.is_file() or not resolved.is_relative_to(tree):

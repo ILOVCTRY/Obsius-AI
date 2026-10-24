@@ -256,13 +256,27 @@ def classify_execution_failure(*, command: str, runtime: str,
 
     识别只依赖明确的解释器/工具/Docker 错误特征，不能因为任意非零退出就
     触发安装或构建。
+
+    **成因为什么必须判 ``exit_code != 0``**（2026-10-23，R2 #3）：
+    ``gateway.py`` 对**所有非超时结果**都调本函数（不只非零退出）。只看输出
+    子串时，一条 ``exit_code=0``、已经成功的命令，只要输出里带
+    ``cannot create /dev/null: Permission denied``（CTF 里 `2>/dev/null` 在
+    受限容器中的常见噪音）或 ``try again`` 之类字样，就会被判成环境错误，
+    进而触发装包/换镜像等恢复动作——**对着一条成功的命令做环境修复**。
+    故下面两个「纯子串」分支（permission_denied / transient）必须要求非零退出。
+
+    其余分支本就隐含非零语义（127 / 126 / docker 拉取失败 / 模块缺失），
+    不额外加条件：``ModuleNotFoundError`` 出现在 exit 0 的输出里也不该被当成
+    失败，但那种情况本函数返回 None 也无害（调用方只对非零结果做恢复）。
     """
     text = "\n".join(x for x in (stderr, stdout) if x)
     low = text.lower()
     if not text and exit_code == 127:
         # 没有 stderr 的 127 可能是 shell 兼容问题，不能安全推断工具缺失。
         return None
-    if any(x in low for x in ("permission denied", "access is denied", "拒绝访问")):
+    # permission_denied：纯子串判据 → 必须非零退出才成立（见 docstring）
+    if exit_code != 0 and any(
+            x in low for x in ("permission denied", "access is denied", "拒绝访问")):
         return EnvironmentIssue(
             EnvironmentErrorCategory.PERMISSION_DENIED, text[:600], command, runtime,
             recoverable=False)
@@ -293,8 +307,10 @@ def classify_execution_failure(*, command: str, runtime: str,
             EnvironmentErrorCategory.RUNTIME_MISSING,
             text[:600] or f"运行时不可用（exit={exit_code}）", command, runtime,
             recoverable=False)
-    if any(x in low for x in ("temporarily unavailable", "resource busy", "try again",
-                              "timed out", "timeout", "connection reset")):
+    # transient：同为纯子串判据 → 同样要求非零退出（见 docstring）
+    if exit_code != 0 and any(
+            x in low for x in ("temporarily unavailable", "resource busy", "try again",
+                               "timed out", "timeout", "connection reset")):
         return EnvironmentIssue(
             EnvironmentErrorCategory.TRANSIENT, text[:600], command, runtime,
             recoverable=False)

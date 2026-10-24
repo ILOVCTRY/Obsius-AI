@@ -23,6 +23,7 @@ import { AttachmentChipRow } from "@/components/chat/AttachmentChip"
 import { CandidateFlagCard } from "@/components/chat/CandidateFlagCard"
 import { FileCardList } from "@/components/chat/FileCard"
 import { ChatStats } from "@/components/chat/ChatStats"
+import { SystemNote } from "@/components/chat/SystemNote"
 import { ThinkingBlock } from "@/components/chat/ThinkingBlock"
 import { useCandidateFlags } from "@/lib/useCandidateFlags"
 import { usePendingApprovals } from "@/lib/usePendingApprovals"
@@ -48,7 +49,23 @@ import { useEvents } from "@/lib/useEvents"
 // 动效尊重 prefers-reduced-motion。左栏分割线可拖宽（180–420px，键盘 ←/→ 微调）。
 // 数据链路不变：REST 2s 轮询为主，chat.delta 事件做实时输入行增强。
 
-const ORCHESTRATOR = "chat-orchestrator"
+// 默认智能体 = 渗透测试主控（原 chat-orchestrator，2026-10-25 改名）。
+// **它现在受服务轨过滤**（`GET /api/chat/agents` 只返回服务本轨的智能体）：
+// pentest/research 项目里它是首项，ctf 项目的列表里根本没有它——所以别处
+// 一律用 `pickAgent()` 挑一个列表里真实存在的 id，否则首屏会指着一个不存在的
+// 智能体发聊天请求（后端 422）。
+const ORCHESTRATOR = "pentest-controller"
+/** 控制器类智能体（与后端 CONTROLLER_IDS 同序同集合）：头像/图标按它们分档。 */
+const CONTROLLER_IDS = [ORCHESTRATOR, "ctf-controller", "aggressive-controller",
+                        "artex-controller"]
+const isControllerAgent = (id: string) => CONTROLLER_IDS.includes(id)
+/** 从列表里挑初始/回退智能体：优先渗透测试主控 → 其它控制器 → 首项。 */
+function pickAgent(list: ChatAgent[]): string {
+  for (const id of CONTROLLER_IDS) {
+    if (list.some((a) => a.id === id)) return id
+  }
+  return list[0]?.id ?? ORCHESTRATOR
+}
 const CHIPS = [
   "对资产进行去重",
   "对未测尽的资产继续进行测试",
@@ -272,7 +289,15 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
   // ---- 加载 ----
   useEffect(() => {
     let alive = true
-    api.chatAgents(pid).then((as) => { if (alive) setAgents(as) }).catch(() => {})
+    api.chatAgents(pid).then((as) => {
+      if (!alive) return
+      setAgents(as)
+      // 服务轨过滤后「默认主控」可能不在本轨列表里（2026-10-25）：initial
+      // state 恒是渗透测试主控，若本轨不移它（如 CTF 项目）就必须落到真实
+      // 存在的那个控制器上，否则首屏 agentId 指向不存在的智能体——发消息 422、
+      // 线程列表也永远空。**只在当前选择不在列表里时改**，不覆盖用户已选项。
+      setAgentId((cur) => (as.some((a) => a.id === cur) ? cur : pickAgent(as)))
+    }).catch(() => {})
     api.assets(pid).then((as) => { if (alive) setAssets(as) }).catch(() => {})
     return () => { alive = false }
   }, [pid])
@@ -289,19 +314,22 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
   }, [pid])
 
   // 外部聚焦线程（goto-agents，M2）：agentId 切换会触发下面的重置 effect，故先存
-  // ref、切到 ORCHESTRATOR，由重置 effect 消费 ref 选中；agentId 已是 ORCHESTRATOR
-  // 时直接 setTid（重置 effect 不重跑）。
+  // ref、切到主控，由重置 effect 消费 ref 选中；agentId 已是主控时直接 setTid
+  // （重置 effect 不重跑）。
+  // **切到哪个主控要按列表挑**（2026-10-25 服务轨过滤后）：蓝图页从逆向工作台
+  // 跳进来时项目可能是 research 轨，那里没有渗透主控而有 ctf/artex，硬切
+  // ORCHESTRATOR 会把 agentId 钉在一个列表里不存在的 id 上。
   const focusTidRef = useRef<string | null>(null)
   useEffect(() => {
     if (!focusThread) return
-    if (agentId === ORCHESTRATOR) {
-      setTid(focusThread)
-    } else {
-      focusTidRef.current = focusThread
-      setAgentId(ORCHESTRATOR)
+    if (isControllerAgent(agentId)) {
+      // 已经是某个控制器（含非渗透主控）：线程归属该控制器时别乱切
+      if (agents.some((a) => a.id === agentId)) { setTid(focusThread); onFocusConsumed?.(); return }
     }
+    focusTidRef.current = focusThread
+    setAgentId(pickAgent(agents))
     onFocusConsumed?.()
-  }, [focusThread, agentId, onFocusConsumed])
+  }, [focusThread, agentId, agents, onFocusConsumed])
 
   useEffect(() => {
     reloadThreads(agentId)
@@ -898,13 +926,22 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
 
         <div ref={scrollRef} className="wb-stream">
           {showHero ? (
-            <Hero agentName={currentAgent?.name} isOrch={agentId === ORCHESTRATOR} />
+            <Hero agentName={currentAgent?.name} isOrch={isControllerAgent(agentId)} />
           ) : (
             <div className="wb-timeline">
               {thread && thread.todo.length > 0 && <TodoCard todo={thread.todo} />}
               {items.map((it) => {
                 if (it.kind === "user") {
                   return <HumanNote key={it.m.id} m={it.m} />
+                }
+                // 系统注入消息（2026-10-24）：折叠 + Markdown 渲染 + 非人类视觉。
+                // 正文取 `origin.body`（已剥 `〔标签〕`），标签单独显示——原文里的
+                // 标签是给模型认的，不该在展开后的正文里重复一遍。
+                if (it.kind === "system") {
+                  return <SystemNote key={it.m.id}
+                    label={it.m.origin?.label ?? "系统"}
+                    body={it.m.origin?.body ?? it.m.content}
+                    at={it.m.created_at ? fmtDateTime(it.m.created_at) : ""} />
                 }
                 if (it.kind === "thinking") {
                   return <ThinkingBlock key={it.id} content={it.content} className="wb-anim" />
@@ -1217,8 +1254,8 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
                onDrop={(e) => { e.preventDefault(); pickFiles(e.dataTransfer?.files ?? null) }}>
             <div className="wb-composer-head">
               <button className="wb-composer-agent" onClick={() => setAgentMenuOpen(true)}>
-                <span className={cn("wb-avatar is-sm", agentId === ORCHESTRATOR && "is-orch")}>
-                  {agentId === ORCHESTRATOR ? <Bot size={11} /> : agentInitial(currentAgent)}
+                <span className={cn("wb-avatar is-sm", isControllerAgent(agentId) && "is-orch")}>
+                  {isControllerAgent(agentId) ? <Bot size={11} /> : agentInitial(currentAgent)}
                 </span>
                 {currentAgent?.name ?? agentId}
                 <ChevronDown size={11} className="opacity-70" />
@@ -1444,8 +1481,8 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
                   <button key={a.id}
                     className={cn("wb-agent-option", a.id === agentId && "is-current")}
                     onClick={() => { setAgentId(a.id); setAgentMenuOpen(false) }}>
-                    <span className={cn("wb-avatar", a.id === ORCHESTRATOR && "is-orch")}>
-                      {a.id === ORCHESTRATOR ? <Bot size={13} /> : agentInitial(a)}
+                    <span className={cn("wb-avatar", isControllerAgent(a.id) && "is-orch")}>
+                      {isControllerAgent(a.id) ? <Bot size={13} /> : agentInitial(a)}
                     </span>
                     <span className="wb-agent-option-body">
                       <span className="wb-agent-option-name">
@@ -1471,7 +1508,7 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
                         className={cn("wb-panel-card", a.id === agentId && "is-current")}
                         onClick={() => { setAgentId(a.id); setPanel(null) }}>
                         <div className="flex items-center gap-1.5 text-[11.5px] font-semibold">
-                          {a.id === ORCHESTRATOR ? <Bot size={11} className="text-primary" /> : <Sparkles size={11} className="text-muted-foreground" />}
+                          {isControllerAgent(a.id) ? <Bot size={11} className="text-primary" /> : <Sparkles size={11} className="text-muted-foreground" />}
                           {a.name}
                         </div>
                         <div className="wb-panel-line mt-0.5">{a.description}</div>
@@ -1623,6 +1660,7 @@ type GroupRow =
 
 type WbItem =
   | { kind: "user"; m: ChatMessage }
+  | { kind: "system"; m: ChatMessage }
   | { kind: "thinking"; id: string; content: string }
   | { kind: "activity"; id: string; steps: ActivityStep[]; rows: GroupRow[] }
 
@@ -1646,6 +1684,10 @@ function buildWbItems(messages: ChatMessage[]): (WbItem | WbProse)[] {
     pending = null
   }
   for (const m of messages) {
+    // 系统注入的 user 行单独成行（2026-10-24）：后端在 `origin` 字段里标了它是
+    // 「系统补达」这类背景事实，不是人说的话。**必须在 flush 前分流**——否则它
+    // 会和人类提问混在同一视觉族里（此前一律渲染成 `❯ 我说的话`）。
+    if (m.role === "user" && m.origin) { flush(); out.push({ kind: "system", m }); continue }
     if (m.role === "user") { flush(); out.push({ kind: "user", m }); continue }
     if (m.role === "tool") continue  // 结果挂在对应 tool_call 上，不单独出行
     const calls = m.tool_calls ?? []
@@ -1692,7 +1734,9 @@ function buildWbItems(messages: ChatMessage[]): (WbItem | WbProse)[] {
     if (pending.known.length) {
       for (let i = out.length - 1; i >= 0; i--) {
         const it = out[i]
-        if (it.kind === "activity" || it.kind === "user") break
+        // `system` 与 `user` 同为「消息行边界」：文件卡只回填给**本轮的**叙述，
+        // 跨过一条系统注入消息去回填上一轮的 prose 会把文件卡挂错地方。
+        if (it.kind === "activity" || it.kind === "user" || it.kind === "system") break
         if (it.kind === "prose") { it.known = pending.known; break }
       }
     }

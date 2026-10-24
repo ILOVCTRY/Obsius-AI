@@ -510,8 +510,18 @@ class Project:
 
     @property
     def experts(self) -> list[str]:
-        """绑定专家 id 清单（expert-pool M2，§4.4）。无绑定（存量项目）= 空表。"""
-        return [e for e in (self.meta.get("experts") or []) if str(e).strip()]
+        """绑定专家 id 清单（expert-pool M2，§4.4）。无绑定（存量项目）= 空表。
+
+        读时归一化存量 id（2026-10-25 主控改名）：`project.json` 里的 `experts`
+        清单是**建项时按当时池内 id 写入的快照**，主控改名后老项目里仍留着
+        `chat-orchestrator`。黑板库有 v49 迁移，项目 json 没有——在读取口做映射
+        而不是启动时批量改写盘上文件：改名映射是纯函数，读时算一次即可，且不会
+        为了一个显示名去动几十个用户的 `project.json`（写盘要备份、要锁）。
+        未知 id 原样返回（doctor / 换将页会把这些标出来，别静默吞掉用户数据）。
+        """
+        from core.chat.runtime import LEGACY_AGENT_IDS
+        return [LEGACY_AGENT_IDS.get(str(e).strip(), str(e).strip())
+                for e in (self.meta.get("experts") or []) if str(e).strip()]
 
     @property
     def domain(self) -> str:

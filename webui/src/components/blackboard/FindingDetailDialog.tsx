@@ -137,6 +137,10 @@ function legacyPocSteps(f: Finding): ReproStep[] {
     if (legacyPoc.http_raw || legacyPoc.artifact_id) {
       steps.push({
         desc: legacyPoc.name ?? "复现步骤",
+        // 仅处理**存量**旧 POC 的 http_raw（这条数据形态在写入口已不再产生）。
+        // 新写入的 repro_steps.type 由后端 `normalize_repro_type` 归一到
+        // {http,python,cmd,image}，这里不需要也不应该再猜第二遍
+        // （2026-10-23，VT-004：曾在前后端各判一次，容易漂移）。
         type: legacyPoc.type === "http_raw" ? "http" : legacyPoc.type,
         code: legacyPoc.http_raw,
         artifact_id: legacyPoc.artifact_id,

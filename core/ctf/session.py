@@ -874,11 +874,13 @@ class CtfSession:
         # 「后续方向别再写第四遍，去复用」。
         dup = self._duplicate_artifacts_locked(min_dirs=2)
         if dup:
-            lines.append(f"\n**⚠ 重复产物**：{len(dup)} 个方向各写了脚本 —— "
+            lines.append(f"\n**⚠ 重复产物**：{len(dup)} 个**尚未成功**的方向各写了脚本 —— "
                          + "；".join(dup))
             lines.append("正常情况一个方向写完就解出来了。**两个以上方向各写一遍"
                          "**说明它们在干同一件事：后续方向**先复用**已有脚本，"
-                         "别再写第四遍；下一轮分诊要把「载体/格式」说得更具体。")
+                         "别再写第四遍；下一轮分诊要把「载体/格式」说得更具体。"
+                         "（已拿到 flag 或自证通过的方向不计入本告警——它们写脚本是"
+                         "正常工作，不是重复劳动。）")
         table = self.claims.render_table()
         if table:
             lines.append("\n## 进行中的方向（互斥表）")
@@ -948,15 +950,27 @@ class CtfSession:
 
         ``min_dirs`` 是「至少几个不同方向各写过」才算重复。默认 2——同一方向
         写两版脚本是正常迭代，不算重复劳动。
+
+        **排除「已经成功的方向」**（dup-artifact-false-positive，2026-10-23）：
+        R3 那题的 `reverse` 方向交付了**四道双向回环的独立复核**（真产出、真结论），
+        却与另一条探索方向一起被算成「两个方向各写了脚本」→ 判 `retired/drop`。
+        主控据此以为该方向零产出。
+
+        判据：`flags_got > 0`（拿到过 flag）或 `correct`（自证核验通过）的方向
+        **不参与**重复判定——它已经产出了可验证的结果，写脚本是正常工作而不是
+        重复劳动。只把「都还没成、却各自写了一版」算作重叠信号。
         """
         with self._lock:
             return self._duplicate_artifacts_locked(min_dirs=min_dirs)
 
     def _duplicate_artifacts_locked(self, *, min_dirs: int) -> list[str]:
-        # 先按方向聚：{方向键: [脚本名...]}，只留真产出过脚本的方向
+        # 先按方向聚：{方向键: [脚本名...]}，只留真产出过脚本的**未成功**方向
         by_dir: dict[str, list[str]] = {}
         for st in self.dirs.values():
             if not st.scripts:
+                continue
+            # 已产出可验证结果的方向不算重复劳动（见 docstring）
+            if st.flags_got or st.correct:
                 continue
             key = dir_label(st, limit=20)
             by_dir.setdefault(key, [])

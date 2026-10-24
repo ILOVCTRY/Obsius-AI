@@ -33,6 +33,7 @@ import type {
   Team, TeamMemberInput, TeamPreflight, TeamRun,
   SkillResource, ArtexPlanResult, ArtexTaskGraph, ArtexIntent, ArtexEngineStatus, ArtexActivityResponse,
   SamplePackage, SampleTargetAnalysis, SampleTargetAnalyzeResponse, SampleTargetRegisterResponse, SamplePackageUploadSession, SamplePackagePreview,
+  DirListing, SamplePackageLinkResponse,
 } from "./types"
 import type { Taxonomy } from "./taxonomy"
 
@@ -262,6 +263,15 @@ export const api = {
     `/api/projects/${pid}/sample-packages/content?path=${encodeURIComponent(path)}`,
   samplePackage: (pid: string, packageId: string, versionId?: string) =>
     http<SamplePackage>(`/api/projects/${pid}/sample-packages/${packageId}${versionId ? `?version_id=${encodeURIComponent(versionId)}` : ""}`),
+  /** 「选择分析包」应用内目录浏览器（2026-10-24）：path 省略 → 返回磁盘/家目录起点。 */
+  browseDirs: (pid: string, path?: string) =>
+    http<DirListing>(`/api/projects/${pid}/workspace/dirs${path ? `?path=${encodeURIComponent(path)}` : ""}`),
+  /** 把外部文件夹**原地**登记为分析包（不复制）并作为执行工作区。
+   *  扫描可能很久（几十万文件全量 sha256）→ 后台 Job，用 pollJob 取最终分析包。 */
+  linkSamplePackageDir: (pid: string, directory: string) =>
+    http<SamplePackageLinkResponse>(`/api/projects/${pid}/sample-packages/link`, {
+      method: "POST", body: JSON.stringify({ directory }),
+    }),
   uploadSamplePackage: (pid: string, file: File) => {
     const form = new FormData()
     form.append("file", file)

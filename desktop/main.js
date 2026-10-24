@@ -1,4 +1,4 @@
-const { app, BrowserWindow, WebContentsView, ipcMain, Menu, session, shell, nativeTheme } = require("electron")
+const { app, BrowserWindow, WebContentsView, ipcMain, Menu, session, shell, nativeTheme, dialog } = require("electron")
 const { spawn } = require("child_process")
 const path = require("path")
 const fs = require("fs")
@@ -466,6 +466,21 @@ app.whenReady().then(async () => {
   ipcMain.on("terminal:write", (_event, { id, data }) => getTab(id)?.pty?.write(data))
   ipcMain.on("terminal:resize", (_event, { id, cols, rows }) => { try { getTab(id)?.pty?.resize(cols, rows) } catch (_) {} })
   ipcMain.handle("terminal:kill", (_event, id) => closeTab(id))
+  // 原生目录选择（「选择分析包」2026-10-24）：选一个**已存在的目录**作为分析包
+  // （同时也是执行工作区）。返回绝对路径；用户取消返回空串。
+  // createDirectory 允许新建（有些人是「先建个空目录再往里拷」），但默认不新建。
+  ipcMain.handle("dialog:pick-directory", async (_event, defaultPath) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return ""
+    const options = {
+      title: "选择分析包目录（同时也是执行工作区）",
+      buttonLabel: "选择此目录",
+      properties: ["openDirectory", "createDirectory"],
+    }
+    if (defaultPath && fs.existsSync(defaultPath)) options.defaultPath = defaultPath
+    const result = await dialog.showOpenDialog(mainWindow, options)
+    if (result.canceled || !result.filePaths.length) return ""
+    return result.filePaths[0]
+  })
   try { await createWindow() } catch (error) { logLine(`主窗创建失败: ${error}`); app.quit() }
 })
 
