@@ -43,6 +43,7 @@ from core.ctf import flagjudge, observe
 from core.diagnostics.failog import record_tool_failure
 from core.dimensions import load_track_dimensions
 from core.runtime.gateway import ExecutionGateway, GatewayDenied
+from core.runtime.pathguard import windows_to_wsl_path
 from core.runtime.recovery import (
     EnvironmentIssue,
     EnvironmentRecovery,
@@ -1004,7 +1005,7 @@ class ToolDispatcher:
         return wsl_note + self._cmd_receipt(cmd, r)
 
     def _cmd_receipt(self, cmd: str, r: Any) -> str:
-        """run_cmd 回执：brief(8000) 预览 + **原始 stdout 全量 spill**。
+        """run_cmd 回执：执行目录 + brief(8000) 预览 + **原始 stdout 全量 spill**。
 
         为什么必须在这里补一次 spill：dispatcher 的 `_maybe_spill` 阈值是
         32,000，而回执已被 `brief(8000)` 压到 8000 以下 → 永远触发不了。
@@ -1014,7 +1015,45 @@ class ToolDispatcher:
         还是那么多，被切掉的部分没有任何路径能取回。
         """
         receipt = self._finish_cmd_receipt(cmd, r.brief(8000))
+        ws = self.workspace_root
+        if ws is not None and r.runtime in ("host", "wsl", "docker"):
+            receipt = f"[cwd] {self._runtime_cwd(r.runtime, ws)}\n" + receipt
+            receipt += self._attachment_glob_diagnostic(cmd, r, ws)
         return self._spill_cmd_stream(receipt, r)
+
+    @staticmethod
+    def _runtime_cwd(runtime: str, workspace: Path) -> str:
+        if runtime == "docker":
+            return "/workspace/scratch"
+        if runtime == "wsl":
+            return windows_to_wsl_path(workspace / "scratch")
+        return str(workspace / "scratch")
+
+    @staticmethod
+    def _attachment_glob_diagnostic(cmd: str, result: Any, workspace: Path) -> str:
+        """Explain failed att-<sha12>/* probes without rewriting command errors."""
+        if result.exit_code == 0 or not re.search(r"att-[0-9a-fA-F]{6,16}[^\s]*\*", cmd):
+            return ""
+        matches = re.findall(r"att-[0-9a-fA-F]{6,16}", cmd)
+        if not matches:
+            return ""
+        notes = []
+        scratch = workspace / "scratch"
+        for dirname in dict.fromkeys(matches):
+            target = scratch / dirname
+            if not target.is_dir():
+                notes.append(f"{dirname}: 工作区 scratch 下目录不存在（{target}）")
+                continue
+            try:
+                files = [p for p in target.iterdir() if p.is_file()]
+            except OSError as exc:
+                notes.append(f"{dirname}: 目录存在但无法读取（{exc}）")
+                continue
+            if not files:
+                notes.append(f"{dirname}: 目录存在但没有顶层文件；请检查解压回执/子目录")
+            else:
+                notes.append(f"{dirname}: 目录存在且含 {len(files)} 个顶层文件；glob 路径可能有误或失败来自 file 本身")
+        return "\n[附件路径诊断] " + "；".join(notes)
 
     # stdout/stderr 原文落盘阈值：与 brief 上限一致，改 brief 时同步
     _CMD_STREAM_SPILL_AT = 8000
