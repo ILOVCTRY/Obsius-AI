@@ -36,7 +36,7 @@ core/browser/pool.py 的 BrowserConfig）：
     strict         置 true 时「相关性闸」不禁用（默认）：退化结果直接判失败；
                    置 false 时退化结果仍会返回（带 degraded 标记），便于排障
 
-统一结果结构（list of dict）：{"title", "url", "snippet"}，深读页面交给
+统一结果结构（list of dict）：{"title", "url", "snippet"}，情报调用可选择保留引擎和发布日期元数据；深读页面交给
 browser_navigate / browser_replay（本模块只做检索，不抓正文）。
 """
 
@@ -210,7 +210,8 @@ def _looks_degraded(query: str, rows: list[dict]) -> tuple[bool, str]:
 # ---------------------------------------------------------------- SearXNG
 
 def searxng_search(cfg: WebSearchConfig, query: str, *, num: int,
-                   engines: str, language: str) -> list[dict]:
+                   engines: str, language: str, time_range: str = "",
+                   include_metadata: bool = False) -> list[dict]:
     """SearXNG JSON API 检索（/search?format=json）。"""
     base = cfg.searxng_url.rstrip("/")
     if not base:
@@ -220,6 +221,10 @@ def searxng_search(cfg: WebSearchConfig, query: str, *, num: int,
         params["language"] = language
     if engines:
         params["engines"] = engines
+    if time_range:
+        if time_range not in _TIME_RANGE_DF:
+            raise WebSearchError(f"不支持的时间范围: {time_range}")
+        params["time_range"] = time_range
     headers = {}
     if cfg.searxng_token:
         headers["Authorization"] = f"Bearer {cfg.searxng_token}"
@@ -250,9 +255,13 @@ def searxng_search(cfg: WebSearchConfig, query: str, *, num: int,
         url = _clean(row.get("url"), 2000)
         if not url:
             continue
-        out.append({"title": _clean(row.get("title"), 300) or url,
-                    "url": url,
-                    "snippet": _clean(row.get("content"), 1000)})
+        result = {"title": _clean(row.get("title"), 300) or url,
+                  "url": url,
+                  "snippet": _clean(row.get("content"), 1000)}
+        if include_metadata:
+            result.update({"source": _clean(row.get("engine"), 120),
+                           "published_date": _clean(row.get("publishedDate"), 100)})
+        out.append(result)
     return out[:num]
 
 
@@ -273,6 +282,15 @@ def _unwrap_ddg_url(raw: str) -> str:
         if vals:
             return unquote(vals[0])
     return raw
+
+
+_TIME_RANGE_DF = {"day": "d", "week": "w", "month": "m", "year": "y",
+                  "half_year": "y"}
+
+
+def _window_label(time_range: str) -> str:
+    return {"day": "近 1 天", "week": "近 7 天", "month": "近 30 天",
+            "half_year": "近半年", "year": "近 1 年"}.get(time_range, "")
 
 
 def _parse_ddg_html(text: str, num: int) -> list[dict]:
@@ -296,11 +314,20 @@ def _parse_ddg_html(text: str, num: int) -> list[dict]:
 
 
 def ddg_html_search(cfg: WebSearchConfig, query: str, *, num: int,
-                    language: str = "") -> list[dict]:
-    """DuckDuckGo HTML 端点检索（免 Key、纯 httpx）。"""
+                    language: str = "", time_range: str = "") -> list[dict]:
+    """DuckDuckGo HTML 端点检索（免 Key、纯 httpx）。
+
+    ``df`` 只保证结果落在窗口内，DDG HTML 不提供可信的逐条发布日期，
+    因此调用方不能把它当成精确日期使用。
+    """
     data: dict[str, str] = {"q": query}
     if language and language.lower().startswith(("zh", "cn")):
         data["kl"] = "cn-zh"
+    if time_range:
+        try:
+            data["df"] = _TIME_RANGE_DF[time_range]
+        except KeyError as e:
+            raise WebSearchError(f"不支持的时间范围: {time_range}") from e
     headers = {"User-Agent": _UA, "Accept": _ACCEPT_HTML,
                "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8"}
     try:
@@ -427,7 +454,7 @@ def ddgs_search(query: str, *, num: int, timeout_s: float,
 # ---------------------------------------------------------------- 编排
 
 def search_web(query: str, *, num: int | None = None,
-               engines: str = "", language: str = "",
+               engines: str = "", language: str = "", time_range: str = "",
                config_path: str | Path = DEFAULT_CONFIG_PATH
                ) -> tuple[list[dict], str]:
     """联网检索入口：SearXNG → DuckDuckGo → Bing → ddgs，全失败抛 WebSearchError。
@@ -445,7 +472,7 @@ def search_web(query: str, *, num: int | None = None,
     if cfg.searxng_url:
         try:
             return searxng_search(cfg, query, num=n, engines=engines,
-                                  language=language), "searxng"
+                                  language=language, time_range=time_range), "searxng"
         except WebSearchError as e:
             errs.append(f"SearXNG: {e}")
     else:
@@ -453,7 +480,8 @@ def search_web(query: str, *, num: int | None = None,
 
     if not cfg.disable_ddg:
         try:
-            return ddg_html_search(cfg, query, num=n, language=language), "ddg"
+            return ddg_html_search(cfg, query, num=n, language=language,
+                                   time_range=time_range), "ddg"
         except WebSearchError as e:
             errs.append(f"DuckDuckGo: {e}")
         except _Degraded as e:

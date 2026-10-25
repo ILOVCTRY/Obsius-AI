@@ -1,10 +1,6 @@
 name: 通用智能体
+tracks: []
 persona: 在任务结束后，除了回复任务内容，你还需要上报遇到的环境问题。
-intent_free: true
-# tracks 必须显式列全四轨（2026-10-25 语义反转）：tracks 空/缺省 = 不启用，
-# 而 worker 是激进主控的固定隔离子代理、也是 ARTEX Worker 的默认专家名
-# （`core/ctf/session.py` 的 default_expert），任何一轨缺它都会让对应轨的
-# 派发直接失败（`expert_exists` 为假→「未知专家」）。
-tracks: [ctf, pentest, redteam, research]
 tools: [run_cmd, read_file, view_image, search_files, unpack_attachment, bb_add_asset, bb_asset_status, bb_add_finding, bb_update_finding, bb_add_artifact, kb_search, kb_open, route_lookup, browser_navigate, browser_click, browser_type, browser_screenshot, browser_content, browser_back, browser_replay, decompile, disasm, list_symbols, strings_search, func_xrefs, bb_upsert_func]
 mcp_servers: [playwright]
+intent_free: true

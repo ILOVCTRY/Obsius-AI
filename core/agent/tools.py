@@ -39,7 +39,7 @@ from core.blackboard.intents import (declare_intent as _declare_intent,
                                      list_intents as _list_intents,
                                      reopen_intent as _reopen_intent)
 from core.blackboard.store import UNSET, has_repro_evidence
-from core.ctf import flagjudge, observe
+from core.ctf import flagjudge
 from core.diagnostics.failog import record_tool_failure
 from core.dimensions import load_track_dimensions
 from core.runtime.gateway import ExecutionGateway, GatewayDenied
@@ -65,6 +65,7 @@ from core.skills.rules import load_kb_sources
 from core.skills.refs import normalize_module
 from core.skills.taxonomy import kb_direction_weight
 from core.skills.writing import resolve_kb, search_kb
+from core.skills.matching import query_tokens
 
 # 意图内容按轨提示（2026-10-01，不硬拦——只给方向，靠模型自觉）：
 # 同一条「目标→意图→发现」链路在不同轨登记不同内容的意图；给出本轨该写什么，
@@ -687,6 +688,28 @@ class ToolDispatcher:
         t0 = time.perf_counter()
         result = self._dispatch_once(name, args)
         result = self._maybe_spill(name, result)  # H1：超限结果落盘+预览，防淹没上下文
+        # 游离发现登记仍是独立的业务硬约束；其拒绝回执也带上通用软提醒。
+        if name == "bb_add_finding" and "[拒绝] 本会话当前没有 open 意图" in result:
+            result += "\n[提示] 意图先行：请先 declare_intent，再执行验证并登记发现。"
+        # 统一补发软提醒：_dispatch_once 内的专用校验可能提前返回，故此处
+        # 覆盖文本结果。结构化 JSON 和知识正文保持原始契约，不能把提醒拼进
+        # JSON（会破坏调用方 json.loads）或大段正文（会污染知识内容）。
+        if (self.author.startswith(("sess-", "chat-")) and not self.intent_free
+                and name not in _INTENT_PRE_ALLOWED
+                and name not in _SPILL_SKIP
+                and "[提示] 意图先行" not in result):
+            try:
+                json.loads(result)
+            except (TypeError, ValueError):
+                has_open = self.bb.conn.execute(
+                    "SELECT 1 FROM intents WHERE project_id=? AND status='open'"
+                    " AND author=? LIMIT 1",
+                    (self.project_id, self.author)).fetchone() is not None
+                if not has_open:
+                    result += (
+                        "\n[提示] 意图先行：本次工具调用已返回，但本会话当前没有 open 意图。"
+                        "请尽快调用 declare_intent，把方向落成一句可证伪假设。"
+                        + _intent_scope_hint(self.track))
         gated = name == "run_cmd" and result.startswith(REJECT_PREFIXES)
         ok = not result.startswith(_TOOL_FAIL_PREFIXES)
         if name != "run_cmd" or gated:
@@ -808,19 +831,10 @@ class ToolDispatcher:
                     "dead_reason=...)`，题还能继续解；"
                     "③ 整道题放弃 → `ctf_abandon(reason=...)`。"
                     "**不要**再对题目或其附件标 tested_clean。")
-        # 意图先行闸（口径 Y，2026-10-01；2026-10-09 升级为**每意图级**）：
-        # **任何**实质执行动作前都必须有 open 意图——先 declare_intent 把方向落成
-        # 一句可证伪假设，再 run_cmd/写黑板。逐动作都查（不再是一次性放行标志）：
-        # plan→execute→plan 自循环里，每条意图收尾后再执行必须先声明下一条，
-        # 事后声明（先干活再补票，实测 sess-b9a539e3ebfe declare 与 finding 仅隔
-        # 12 秒）在结构上不可能。人类/系统路径（author 非 sess-/chat-）不经
-        # ToolDispatcher，不受限；declare_intent 在 _INTENT_PRE_ALLOWED 内恒放行，
-        # 全轨可先声明不会死锁。
-        # intent_free（激进主控子代理，2026-10-17）：探针不声明意图，本闸整体
-        # 跳过——与其工具面上没有 declare_intent（调了也被白名单拒）配套，
-        # 否则探针的 run_cmd 会被「没有 open 意图」打回、快检直接瘫痪。
-        # 拒绝用 [拒绝] 前缀（前缀纪律：进 _TOOL_FAIL_PREFIXES/HARD_REJECT_PREFIXES，
-        # 连续 3 步硬拒走 E2 熔断挂人——照搬口径即无需新增前缀分类）。
+        # 意图先行软提醒（2026-10-25）：实质工具没有 open 意图时仍执行，
+        # 但在本次回执中提示模型尽快声明可证伪假设。保留 author/intent_free
+        # 范围与原闸一致；只读和协调原语不重复提示。
+        intent_hint = ""
         if self.author.startswith(("sess-", "chat-")) and not self.intent_free \
                 and name not in _INTENT_PRE_ALLOWED:
             has_open = self.bb.conn.execute(
@@ -828,14 +842,15 @@ class ToolDispatcher:
                 " AND author=? LIMIT 1",
                 (self.project_id, self.author)).fetchone() is not None
             if not has_open:
-                return ("[拒绝] 意图先行闸：本会话当前没有 open 意图，实质动作被拦下"
-                        "——先 declare_intent(statement=\"对 <资产> 进行 <什么尝试>\""
-                        ", target_asset_id=<资产id>) 把方向落成一句可证伪假设，再围绕"
-                        "它执行；上一条意图已收尾时同样要先声明下一条，再动手。只读"
-                        "侦察（bb_query/kb_open/kb_search/list_symbols/decompile/"
-                        "disasm/read_file/search_files/browser_navigate 等）不受本闸"
-                        "限制。"
-                        + _intent_scope_hint(self.track))
+                intent_hint = (
+                    "\n[提示] 意图先行：本次工具调用已继续执行，但本会话当前没有 "
+                    "open 意图。请尽快调用 `declare_intent(statement=\"对 <资产> "
+                    "进行 <什么尝试>\", target_asset_id=<资产id>)`，把方向落成一句"
+                    "可证伪假设；上一条意图已收尾时，也请先声明下一条再继续实质动作。"
+                    + _intent_scope_hint(self.track))
+        def _with_intent_hint(result: str) -> str:
+            return f"{result}{intent_hint}"
+
         # raw_arguments 解包垫片（2026-09-26）：部分模型在长文本参数上会把全部参数
         # 包成 {"raw_arguments": "<JSON 字符串>"}（实测 ark-code-latest 调
         # bb_upsert_func 连发 6 次全中），平铺解包的裸 TypeError 只会让模型空转重试。
@@ -846,20 +861,22 @@ class ToolDispatcher:
             if isinstance(raw, str):
                 raw = _loads_lenient_json(raw)
             if raw is None:
-                return (f"[参数格式] {name} 的参数被包在 raw_arguments 里，且内容"
-                        f"不是合法 JSON（已尝试裸十六进制自动修复仍失败——常见于 "
-                        f"0x… 没加引号之外的语法残缺）。请以顶级平铺参数直接调用 "
-                        f"{name}，不要嵌套任何外层对象。")
+                return _with_intent_hint(
+                    f"[参数格式] {name} 的参数被包在 raw_arguments 里，且内容"
+                    f"不是合法 JSON（已尝试裸十六进制自动修复仍失败——常见于 "
+                    f"0x… 没加引号之外的语法残缺）。请以顶级平铺参数直接调用 "
+                    f"{name}，不要嵌套任何外层对象。")
             if not isinstance(raw, dict):
-                return (f"[参数格式] {name} 的 raw_arguments 应为平铺参数对象，"
-                        f"实际收到 {type(raw).__name__}——请以顶级平铺参数直接调用 "
-                        f"{name}，不要嵌套。")
+                return _with_intent_hint(
+                    f"[参数格式] {name} 的 raw_arguments 应为平铺参数对象，"
+                    f"实际收到 {type(raw).__name__}——请以顶级平铺参数直接调用 "
+                    f"{name}，不要嵌套。")
             args = raw
         try:
-            return handler(**args)
+            return _with_intent_hint(handler(**args))
         except GatewayDenied as e:
             # 拒绝不是异常终止：Agent 看到原因后改道（§7 拒绝必须改道）
-            return f"[网关拒绝] {e}"
+            return _with_intent_hint(f"[网关拒绝] {e}")
         except TypeError as e:
             # 参数幻觉自纠锚点（2026-09-30）：参数名拼错/多传时附上真实参数清单，
             # 模型下一轮可直接改参重试——裸 TypeError 只会引发连环猜参数
@@ -871,9 +888,9 @@ class ToolDispatcher:
                     hint = f"（{name} 的合法参数: {', '.join(names)}）"
                 except (ValueError, TypeError):
                     pass
-            return f"[工具异常] {type(e).__name__}: {e}{hint}"
+            return _with_intent_hint(f"[工具异常] {type(e).__name__}: {e}{hint}")
         except Exception as e:  # noqa: BLE001 —— 工具失败回填文本，循环不中断
-            return f"[工具异常] {type(e).__name__}: {e}"
+            return _with_intent_hint(f"[工具异常] {type(e).__name__}: {e}")
 
     # ---------- 各工具实现 ----------
 
@@ -1097,13 +1114,8 @@ class ToolDispatcher:
                 "以后大输出优先让命令自己写文件（`命令 > out.txt`）再读。")
 
     def _finish_cmd_receipt(self, cmd: str, receipt: str) -> str:
-        """run_cmd 回执统一出口：原地打转提示 → CTF 观测摘要。
-
-        两个后处理都是**只读、零 LLM 成本、失败即原样返回**的附加信息；集中到
-        一个出口，避免恢复/重试分支漏挂（此前 `_with_ctf_observations` 就只在
-        主路径调用，环境恢复后的重试回执不带观测摘要）。
-        """
-        return self._with_ctf_observations(self._with_repeat_guard(cmd, receipt))
+        """run_cmd 回执统一出口：附加原地打转提示。"""
+        return self._with_repeat_guard(cmd, receipt)
 
     # 「原地打转」提示的阈值：第 N 次跑同一条命令时开始提示
     _REPEAT_WARN_AT = 3
@@ -1155,27 +1167,6 @@ class ToolDispatcher:
             note = (f"\n\n[重复执行] 这条命令本会话已跑 {times} 次（完全相同）：`{head}`"
                     "——若输出无变化，说明该方向已探尽，考虑换参数或换思路。")
         return receipt + note
-
-    def _with_ctf_observations(self, receipt: str) -> str:
-        """CTF 轨：在工具回执尾部附「机械抽取的观测摘要」（ctf-observe，2026-10-19）。
-
-        **为什么**：一次 nmap/ffuf/curl 的输出几十到几百行，模型转述时必丢
-        `22/tcp open ssh` 这种关键细节，上下文吃紧时干脆跳过不抽。这里用零 LLM
-        成本的正则抽取（`core.ctf.observe`）把端口/URL/凭据/要点先落成结构化
-        摘要——模型只需在此基础上判断，不必从噪音里自己捞。
-
-        非 CTF 轨、无输出、抽不出信号 → 原样返回（回执零变化）。
-        摘要本身**不写黑板**：写不写、写什么仍由模型经 bb_add_finding 决定。
-        """
-        if self.track != "ctf" or not receipt:
-            return receipt
-        try:
-            summary = observe.summarize_output(receipt)
-        except Exception:  # noqa: BLE001 —— 抽取失败绝不阻断工具链
-            return receipt
-        if not summary:
-            return receipt
-        return receipt + "\n\n" + summary
 
     def _wsl_allowed(self, threat_class: str) -> bool:
         """wsl 是否被网关威胁策略允许（自动降级前置条件）。"""
@@ -3390,21 +3381,30 @@ class ToolDispatcher:
             except Exception:  # 单域检索失败不拖垮整体
                 continue
         rows.sort(key=lambda r: (
-            -(r["matches"] * kb_direction_weight(self.track, r.get("cap"))),
+            -(r.get("relevance_score", r["matches"])
+              * kb_direction_weight(self.track, r.get("cap"))),
             r["path"]))
         rows = rows[:limit]
+        ascii_terms, cjk_terms = query_tokens(q)
+        query_terms = ascii_terms + cjk_terms
+        matched_terms = {term for r in rows for term in r.get("matched_terms", [])}
+        missing_terms = [term for term in query_terms if term not in matched_terms]
         self.bb.append_event(
             self.project_id, "kb.search",
             {"query": q[:200], "hits": len(rows)},
             session_id=self.session_id, author=self.author)
         if not rows:
-            return (f"[无命中] 知识库中没有包含 {q!r} 的文档。"
-                    "可换中英文关键词各试一次，或按技能正文对照表用 kb_open 直接开模块。")
+            return (f"[无命中] 知识库中没有找到与 {q!r} 匹配的内容。"
+                    "已尝试完整词元及组合词元的降级召回；可继续改写为更短的主题词查询，"
+                    "或按技能正文对照表用 kb_open 直接开模块。")
         boosted = [c for c in caps if kb_direction_weight(self.track, c) != 1.0]
         wnote = (f"（已按 {self.track} 轨加权：{'、'.join(boosted)} 域权重更高）"
                  if boosted else "")
-        lines = [f"kb 检索 {q!r} 命中 {len(rows)} 篇{wnote}（path 即 kb_open 的 module 参数，"
-                 "再用 kb_open 直接读取正文）:",
+        partial_note = (f"\n部分查询词未在命中文档中出现：{'、'.join(missing_terms)}"
+                        if missing_terms else "")
+        lines = [f"kb 检索 {q!r} 命中 {len(rows)} 篇{wnote}{partial_note}"
+                 "（组合查询采用分层召回；命中数按正文及标题/摘要/标签/路径计算；"
+                 "path 即 kb_open 的 module 参数，再用 kb_open 直接读取正文）:",
                  "> 提案要用 target.cap 时取 **path 的第一段**（下表的 cap=…），"
                  "不要用内部源标识（形如 `forensics-kb`，那是 KbSource.id，不是目录名）。"]
         for r in rows:

@@ -353,47 +353,56 @@ def _kb_scan_coverage(packs_root: str | Path, cap: str, ascii_terms: list[str],
     词元数 ≥ ``_KB_HIT_RATIO_MIN`` 才收。legacy 扫描器只在小语料（测试夹具/
     索引不可用）时生效，故用单遍内存统计实现 df，不做 SQL 聚合。"""
     sources = list(_sources(Path(packs_root), cap))
-    docs: list[tuple[str, str, str]] = []   # (relpath, source_id, low_text)
+    docs: list[tuple[str, str, str, str]] = []   # (relpath, source_id, searchable, body)
     for src in sources:
         for f in _iter_kb_files(src):
             try:
                 text = f.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
                 continue
-            docs.append((f.relative_to(src.root).as_posix(), src.id, text.lower()))
+            rel = f.relative_to(src.root).as_posix()
+            body = text.lower()
+            searchable = f"{body} {f.stem.lower()} {rel.lower()}"
+            docs.append((rel, src.id, searchable, body))
     if not docs:
         return []
     total = len(docs)
 
     def _df(term: str) -> int:
-        return sum(1 for _, _, low in docs if term in low)
+        return sum(1 for _, _, searchable, _ in docs if term in searchable)
 
     live = [t for t in cjk_terms if 0 < _df(t) <= total * _KB_GENERIC_DF_RATIO]
-    if not live and not ascii_terms:
+    known_ascii = [t for t in ascii_terms if _df(t) > 0]
+    # 与索引路径一致：所有 ASCII 词都未知时，不允许仅凭中文泛词猜中；
+    # 当存在可验证的 ASCII 词时，其余未知缩写才作为可缺失线索。
+    if ascii_terms and not known_ascii:
         return []
-    weights = [(t, math.log(1 + total / max(1, _df(t))) * 2.0) for t in ascii_terms]
+    if not live and not known_ascii:
+        return []
+    # 已知 ASCII 词提高权重；索引中完全不存在的缩写只作为缺失线索，不能硬阻断。
+    weights = [(t, math.log(1 + total / max(1, _df(t))) * 2.0) for t in known_ascii]
     weights += [(t, math.log(1 + total / max(1, _df(t)))) for t in live]
     total_weight = sum(w for _, w in weights) or 1.0
     need_hits = max(1, math.ceil(len(weights) * _KB_HIT_RATIO_MIN))
 
     out: list[dict] = []
-    for relpath, source_id, low in docs:
-        if not all(t in low for t in ascii_terms):
-            continue
-        matched = [(t, w) for t, w in weights if t in low]
+    all_terms = list(dict.fromkeys(ascii_terms + cjk_terms))
+    for relpath, source_id, searchable, body in docs:
+        matched = [(t, w) for t, w in weights if t in searchable]
         if len(matched) < need_hits:
             continue
         cov = sum(w for _t, w in matched)
         if cov / total_weight < _KB_COVERAGE_MIN:
             continue
-        counts = [(low.count(t), t) for t, _w in matched]
+        counts = [(searchable.count(t), t) for t, _w in matched]
         anchor = max(counts, key=lambda c: c[0])[1]
-        pos = low.find(anchor)
-        start = max(0, pos - _KB_SNIPPET_CHARS)
-        end = min(len(low), pos + len(anchor) + _KB_SNIPPET_CHARS)
+        pos = body.find(anchor)
+        snippet = (body[max(0, pos - _KB_SNIPPET_CHARS):pos + len(anchor) + _KB_SNIPPET_CHARS]
+                   if pos >= 0 else body[:2 * _KB_SNIPPET_CHARS])
         out.append({"path": relpath, "source": source_id,
                     "matches": min(sum(c for c, _t in counts), _KB_SEARCH_COUNT_CAP),
-                    "snippet": low[start:end].replace("\n", " ").strip(),
+                    "matched_terms": [t for t in all_terms if t in searchable],
+                    "snippet": snippet.replace("\n", " ").strip(),
                     "_cov": cov})
     # cov 只记「命中与否」：同一批词元都命中的文档 cov 必然完全相等，仅按它
     # 排序会退化成 relpath 字母序（与索引侧同一缺陷）。命中次数作次级键。

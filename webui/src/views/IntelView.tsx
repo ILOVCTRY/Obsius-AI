@@ -80,6 +80,14 @@ export function IntelView() {
   const [briefDate, setBriefDate] = useState<string>("")
   const [briefMd, setBriefMd] = useState<string>("")
   const [articles, setArticles] = useState<IntelArticle[]>([])
+  const [searchQuery, setSearchQuery] = useState("")
+  const [searchResults, setSearchResults] = useState<IntelArticle[]>([])
+  const [searchCacheKey, setSearchCacheKey] = useState("")
+  const [searchTotal, setSearchTotal] = useState(0)
+  const [searchOffset, setSearchOffset] = useState(0)
+  const [searchHasMore, setSearchHasMore] = useState(false)
+  const [searchBusy, setSearchBusy] = useState(false)
+  const [searchError, setSearchError] = useState("")
   const [filter, setFilter] = useState<{ kind?: string; unread?: boolean; starred?: boolean }>({})
   const [refreshing, setRefreshing] = useState(false)
   // E10：学习档案（三来源聚合）+ 周计划（planWeek=""=最新一份）
@@ -161,6 +169,34 @@ export function IntelView() {
     })
   }, [loadOverview, loadBriefs, loadArticles])
 
+  const runSearch = async (refresh = false) => {
+    if (!searchQuery.trim() || searchBusy) return
+    setSearchBusy(true)
+    setSearchError("")
+    try {
+      const response = await api.intelSearch({ q: searchQuery.trim(), limit: 10, refresh })
+      setSearchResults(response.results ?? [])
+      setSearchCacheKey(response.cache_key ?? "")
+      setSearchTotal(response.total ?? response.results?.length ?? 0)
+      setSearchOffset(response.results?.length ?? 0)
+      setSearchHasMore(Boolean(response.has_more))
+    } catch (e) { setSearchError(e instanceof Error ? e.message : String(e)) }
+    finally { setSearchBusy(false) }
+  }
+
+  const loadMoreSearch = async () => {
+    if (!searchCacheKey || searchBusy || !searchHasMore) return
+    setSearchBusy(true)
+    try {
+      const response = await api.intelSearch({ q: searchQuery.trim(), limit: 10, cache_key: searchCacheKey, offset: searchOffset })
+      setSearchResults((current) => [...current, ...(response.results ?? [])])
+      setSearchOffset((current) => current + (response.results?.length ?? 0))
+      setSearchTotal(response.total ?? searchTotal)
+      setSearchHasMore(Boolean(response.has_more))
+    } catch (e) { setSearchError(e instanceof Error ? e.message : String(e)) }
+    finally { setSearchBusy(false) }
+  }
+
   const toggle = (id: string, patch: { read?: boolean; starred?: boolean }) => {
     api.intelMarkArticle(id, patch)
       .then(() => { loadArticles(); loadOverview() })
@@ -206,7 +242,7 @@ export function IntelView() {
       </div>
       <Tabs defaultValue="briefs" className="min-h-0 flex-1 flex-col gap-0">
         <TabsList className="w-full shrink-0 justify-start rounded-none border-b bg-transparent p-0">
-          {([["briefs", "简报"], ["articles", "文章"], ["learning", "学习"]] as const).map(([k, label]) => (
+          {([["briefs", "简报"], ["articles", "文章"], ["search", "检索"], ["learning", "学习"]] as const).map(([k, label]) => (
             <TabsTrigger key={k} value={k} className="rounded-none border-b-2 px-3 py-1.5 text-xs">{label}</TabsTrigger>
           ))}
         </TabsList>
@@ -249,6 +285,26 @@ export function IntelView() {
             )}
             {articles.map((a) => <ArticleRow key={a.id} a={a} onToggle={toggle} />)}
           </div>
+        </TabsContent>
+        <TabsContent value="search" className="min-h-0 flex-1 overflow-y-auto p-3">
+          <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); void runSearch(false) }}>
+            <input value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder="输入关键词或语句" className="h-8 min-w-0 flex-1 rounded border bg-background px-2 text-xs" />
+            <Button size="sm" type="submit" disabled={searchBusy}>{searchBusy ? "检索中…" : "检索"}</Button>
+            <Button size="sm" type="button" variant="outline" disabled={searchBusy || !searchQuery.trim()} onClick={() => void runSearch(true)}>联网重查</Button>
+          </form>
+          {searchError && <p className="mt-2 text-xs text-(--status-error)">{searchError}</p>}
+          <div className="mt-2 space-y-1.5">
+            {searchResults.map((a, i) => (
+              <div key={`${a.url}-${i}`} className="rounded border p-2 text-xs">
+                <div className="flex flex-wrap items-center gap-2 text-[10px] text-muted-foreground"><span>{a.source || a.via || "未知来源"}</span><span>{a.published_day || a.published_at || (a.date_known === false ? "发布日期未提供 · 搜索结果位于近半年查询窗" : "日期未知")}</span><span>综合 {a.ranking_score ?? "—"}</span><span>内容 {a.score ?? "—"}</span></div>
+                <a href={a.url} target="_blank" rel="noreferrer" className="mt-1 block font-medium hover:text-primary">{a.title}</a>
+                {a.summary && <p className="mt-0.5 line-clamp-2 text-[10px] text-muted-foreground">{a.summary}</p>}
+              </div>
+            ))}
+            {!searchResults.length && <p className="text-xs text-muted-foreground">输入关键词后开始检索</p>}
+            {searchResults.length > 0 && <p className="text-[10px] text-muted-foreground">已显示 {searchResults.length} / {searchTotal} 条 · 近半年 · {searchResults[0]?.via === "google_news" ? "Google News" : searchResults[0]?.via === "searxng" ? "SearXNG" : "本地与联网结果"}</p>}
+          </div>
+          {searchHasMore && <Button size="sm" variant="outline" className="mt-2" disabled={searchBusy} onClick={() => void loadMoreSearch()}>{searchBusy ? "加载中…" : "加载更多"}</Button>}
         </TabsContent>
         <TabsContent value="learning" className="min-h-0 flex-1 overflow-y-auto p-4">
           <div className="space-y-4 text-xs">

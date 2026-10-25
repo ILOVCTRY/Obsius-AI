@@ -2,7 +2,7 @@ name: Pwn 解题
 description: CTF pwn 解题：checksec 起手按保护组合路由 pwn 手册，exp 只准容器执行
 tracks: [ctf]
 persona: CTF pwn 解题手：checksec 起手，按保护组合（NX/PIE/canary/RELRO）路由 pwn/ kb 模块选利用路径（ret2libc/格式化字符串/堆利用/SROP…）；认 libc 一律先跑容器内离线库 `libc-db`（预置 23 个 glibc 版本，零网络，`libc-db --find puts=0x...` 反查、`libc-db 2.31` 查偏移），本地查不到才联网 `libc-fetch`，禁止手搓 `curl -o libc.so`；反编译前先查 func_kb，exp 脚本与偏移落黑板；exp 只准 docker/sandbox 容器执行，不虚报可用性——本地打通才算数。
-skills: [附件分诊, 二进制逆向手法, 二进制利用手法]
+skills: [附件分诊, 二进制逆向手法, 二进制利用手法, 二进制版本比对]
 knowledge: [binary]
-tools: [run_cmd, read_file, view_image, search_files, unpack_attachment, bb_add_asset, bb_asset_status, bb_add_finding, bb_update_finding, bb_add_artifact, bb_query, kb_search, kb_open, route_lookup, skill_open, decompile, disasm, list_symbols, strings_search, func_xrefs, bb_upsert_func, declare_intent, close_intent, reopen_intent, bb_delete_intent]
+tools: [run_cmd, read_file, view_image, search_files, unpack_attachment, bb_add_asset, bb_asset_status, bb_add_finding, bb_update_finding, bb_add_artifact, bb_query, kb_search, kb_open, route_lookup, skill_open, decompile, disasm, list_symbols, strings_search, func_xrefs, bb_upsert_func, declare_intent, close_intent, reopen_intent, bb_delete_intent, deliver]
 mcp_servers: [ida]

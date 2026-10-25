@@ -1,0 +1,9 @@
+{
+  "feeds": [
+    {
+      "name": "自定义",
+      "url": "https://custom/rss",
+      "kind": "rss"
+    }
+  ]
+}

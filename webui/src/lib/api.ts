@@ -986,6 +986,16 @@ export const api = {
     }),
   intelFetch: () =>
     http<{ job_id: string }>("/api/intel/fetch", { method: "POST" }),
+  intelSearch: (params: { q: string; limit?: number; refresh?: boolean; cache_key?: string; offset?: number }) => {
+    const qs = new URLSearchParams({ q: params.q, limit: String(params.limit ?? 10), refresh: String(params.refresh ?? false), offset: String(params.offset ?? 0) })
+    if (params.cache_key) qs.set("cache_key", params.cache_key)
+    return http<{ results: IntelArticle[]; total?: number; has_more?: boolean; cache_key?: string; backend?: string; window_label?: string }>(`/api/intel/search?${qs}`)
+  },
+  intelSearxngStatus: () => http<Record<string, unknown>>("/api/intel/searxng/status"),
+  intelSearxngConnectionTest: () => http<Record<string, unknown>>("/api/intel/searxng/connection-test", { method: "POST" }),
+  intelSearxngValidateSearch: () => http<Record<string, unknown>>("/api/intel/searxng/validate-search", { method: "POST" }),
+  intelSearxngStart: () => http<Record<string, unknown>>("/api/intel/searxng/start", { method: "POST" }),
+  intelSearxngStop: () => http<Record<string, unknown>>("/api/intel/searxng/stop", { method: "POST" }),
   intelBriefs: () =>
     http<{ briefs: IntelBriefMeta[] }>("/api/intel/briefs"),
   intelBrief: (date: string) =>

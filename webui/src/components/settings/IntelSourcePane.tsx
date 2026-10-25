@@ -25,6 +25,10 @@ export function IntelSourcePane() {
   const [saved, setSaved] = useState(false)
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
+  const [keywordInput, setKeywordInput] = useState("")
+  const [searxStatus, setSearxStatus] = useState<Record<string, unknown> | null>(null)
+  const [searxBusy, setSearxBusy] = useState(false)
+  const [composing, setComposing] = useState(false)
 
   const flashSaved = () => {
     setSaved(true)
@@ -36,7 +40,31 @@ export function IntelSourcePane() {
     api.intelProfile().then(setProfile).catch(() => {})
     api.intelVault().then((v) => { setVaultInfo(v); setVaultPath(v.path) }).catch(() => {})
   }, [])
-  useEffect(() => { reload() }, [reload])
+  useEffect(() => { reload(); api.intelSearxngStatus().then(setSearxStatus).catch(() => {}) }, [reload])
+
+  const addKeyword = () => {
+    if (!profile) return
+    const text = keywordInput.normalize("NFKC").trim().replace(/\s+/gu, " ").slice(0, 60)
+    if (!text) return
+    const keywords = profile.keywords ?? []
+    if (keywords.length >= 20) { setMsg("关注词最多 20 条"); return }
+    if (keywords.some((k) => k.text.normalize("NFKC").toLocaleLowerCase() === text.normalize("NFKC").toLocaleLowerCase())) {
+      setMsg("这个关注词已经录入")
+      return
+    }
+    setProfile({ ...profile, keywords: [...keywords, { text, added_at: new Date().toISOString() }] })
+    setKeywordInput("")
+    setMsg(null)
+  }
+
+  const searxAction = async (action: () => Promise<Record<string, unknown>>) => {
+    if (searxBusy) return
+    setSearxBusy(true)
+    setMsg(null)
+    try { const result = await action(); setSearxStatus(result); setMsg(JSON.stringify(result)) }
+    catch (e) { setMsg(e instanceof Error ? e.message : String(e)) }
+    finally { setSearxBusy(false) }
+  }
 
   const saveFeeds = async (list: IntelFeed[]) => {
     try {
@@ -181,12 +209,41 @@ export function IntelSourcePane() {
               <Input value={profile.stage} onChange={(e) => setProfile({ ...profile, stage: e.target.value })}
                      placeholder="如：Web 入门 / 逆向进阶" className="h-7 w-56 text-xs" />
             </label>
+            <div className="space-y-1">
+              <p className="text-xs">关注词</p>
+              <div className="flex flex-wrap items-center gap-1">
+                {(profile.keywords ?? []).map((keyword, index) => (
+                  <button key={`${keyword.text}-${index}`} type="button" className="rounded border px-2 py-1 text-[10px]"
+                    title="点击删除" onClick={() => setProfile({ ...profile, keywords: (profile.keywords ?? []).filter((_, i) => i !== index) })}>{keyword.text} ×</button>
+                ))}
+                <Input value={keywordInput} onChange={(e) => setKeywordInput(e.target.value)} placeholder="输入关注词后回车" className="h-7 w-48 text-xs"
+                  onCompositionStart={() => setComposing(true)} onCompositionEnd={() => setComposing(false)}
+                  onKeyDown={(e) => { if (e.key === "Enter" && !composing && !e.nativeEvent.isComposing) { e.preventDefault(); addKeyword() } else if (e.key === "Backspace" && !keywordInput && !composing && (profile.keywords ?? []).length) setProfile({ ...profile, keywords: (profile.keywords ?? []).slice(0, -1) }) }} />
+              </div>
+            </div>
             <Button size="sm" className="h-7 px-2 text-xs" onClick={() => saveProfile(profile)}>保存画像</Button>
           </div>
         )}
         <p className="mt-2 text-[10px] text-(--status-approval)">
           抓取出站为平台自身可信请求（不经执行网关）；classifier 小模型缺席时自动降级规则打分，情报功能始终可用。
         </p>
+      </div>
+
+      <div className="mt-2 border-t pt-3">
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-sm">高级检索 · SearXNG</span><span className="flex-1" />
+          <span className="text-[10px] text-muted-foreground">{searxStatus ? JSON.stringify(searxStatus) : "状态未知"}</span>
+        </div>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <label className="flex items-center gap-1 text-xs"><input type="checkbox" checked={Boolean(((profile?.search as Record<string, unknown> | undefined)?.searxng as Record<string, unknown> | undefined)?.enabled)} onChange={(e) => profile && setProfile({ ...profile, search: { ...(profile.search ?? {}), searxng: { ...(((profile.search as Record<string, unknown> | undefined)?.searxng as Record<string, unknown> | undefined) ?? {}), enabled: e.target.checked } } })} />启用</label>
+          <label className="flex items-center gap-1 text-xs"><input type="checkbox" checked={Boolean(((profile?.search as Record<string, unknown> | undefined)?.searxng as Record<string, unknown> | undefined)?.auto_start)} onChange={(e) => profile && setProfile({ ...profile, search: { ...(profile.search ?? {}), searxng: { ...(((profile.search as Record<string, unknown> | undefined)?.searxng as Record<string, unknown> | undefined) ?? {}), auto_start: e.target.checked } } })} />随下次平台启动</label>
+          <Button size="sm" className="h-7 px-2 text-xs" onClick={() => profile && saveProfile(profile)} disabled={!profile || searxBusy}>保存配置</Button>
+          <Button size="sm" variant="outline" onClick={() => void searxAction(api.intelSearxngConnectionTest)} disabled={searxBusy}>测试连接</Button>
+          <Button size="sm" variant="outline" onClick={() => void searxAction(api.intelSearxngValidateSearch)} disabled={searxBusy}>验证检索</Button>
+          <Button size="sm" onClick={() => void searxAction(api.intelSearxngStart)} disabled={searxBusy}>立即启动</Button>
+          <Button size="sm" variant="outline" onClick={() => void searxAction(api.intelSearxngStop)} disabled={searxBusy}>停止</Button>
+        </div>
+        <p className="mt-1 text-[10px] text-muted-foreground">未启用时检索走内置 DDG 通道。</p>
       </div>
 
       <div className="mt-2 border-t pt-3">

@@ -72,6 +72,10 @@ from core.intel.intel_service import (
     week_start as intel_week_start,
 )
 from core.intel.store import IntelStore
+from core.intel.searxng import SearXNG
+from core.intel.ranking import normalize_day, ranking_score, window_start
+from core.intel.search import search_intel
+from core.websearch import WebSearchError
 from core.llm import ModelRouter, ProviderError, ProviderStore, probe_credentials
 from core.llm.providers import CONFIG_PATH as PROVIDERS_CONFIG_PATH
 from core.llm.routing import AVAILABLE_MODELS, KNOWN_ROLES
@@ -1653,9 +1657,11 @@ class IntelFeedsIn(BaseModel):
 
 
 class IntelProfileIn(BaseModel):
-    directions: dict[str, float]
-    stage: str = ""
+    directions: dict[str, float] | None = None
+    stage: str | None = None
     vault: dict | None = None  # E10：透传给 save_profile 归一化（path/enabled）
+    keywords: list[dict | str] | None = None
+    search: dict | None = None
 
 
 class IntelVaultIn(BaseModel):
@@ -2229,6 +2235,7 @@ def create_app(
     app.state.intel: IntelStore | None = None
     app.state.intel_getter = None
     app.state.intel_llm = None
+    app.state.intel_search_cache: dict[str, dict] = {}
     # C2 mission 自动派生：per-pid 防空转状态（{pid: {tip, empty}}）+ 判据模板目录
     app.state.mission_derive: dict[str, dict[str, Any]] = {}
     # llm.error 事件节流记账（"{pid}:{错误文案}" -> monotonic 时间，2026-09-18）
@@ -11687,20 +11694,147 @@ def create_app(
 
     @app.put("/api/intel/profile")
     def intel_update_profile(body: IntelProfileIn):
+        # 部分更新：画像表单不携带 vault/search/keywords 时沿用磁盘值。
+        patch = body.model_dump(exclude_unset=True)
         with pack_write_lock():
             _pack_history_backup(Path(app.state.intel_dir) / "profile.json")
-            prof = intel_config.save_profile(body.model_dump(), app.state.intel_dir)
+            prof = intel_config.save_profile(patch, app.state.intel_dir)
         return {"status": "ok", "profile": prof}
+
+    def _searxng() -> SearXNG:
+        search_cfg = (intel_config.load_profile(app.state.intel_dir).get("search") or {})
+        sx = dict(search_cfg.get("searxng") or {})
+        sx["settings_path"] = str(Path(app.state.intel_dir).parent / "searxng" / "settings.yml")
+        service = getattr(app.state, "intel_searxng", None)
+        if service is None:
+            service = SearXNG(sx)
+            app.state.intel_searxng = service
+        else:
+            service.config = {**service.config, **sx}
+        return service
+
+    app.state.get_intel_searxng = _searxng
+
+    def _search_intel(query: str, search_config: dict | None = None, **kwargs):
+        cfg = search_config if isinstance(search_config, dict) else {}
+        searx = cfg.get("searxng") or {}
+        if isinstance(searx, dict) and searx.get("enabled"):
+            service = _searxng()
+            if service.status().get("running"):
+                service._start_relay()
+        return search_intel(query, cfg, **kwargs)
+
+    @app.get("/api/intel/searxng/status")
+    def searxng_status():
+        return _searxng().status()
+
+    @app.post("/api/intel/searxng/connection-test")
+    def searxng_connection_test():
+        return _searxng().connection_test()
+
+    @app.post("/api/intel/searxng/validate-search")
+    def searxng_validate_search(body: dict | None = None):
+        return _searxng().validate_search(str((body or {}).get("query") or "权限提升"))
+
+    @app.get("/api/intel/search")
+    def intel_search(q: str = "", limit: int = 10, refresh: bool = False,
+                     cache_key: str = "", offset: int = 0):
+        query = str(q or "").strip()[:120]
+        if not query:
+            raise HTTPException(422, "检索语句不能为空")
+        limit = max(1, min(int(limit or 10), 100))
+        offset = max(0, min(int(offset or 0), 500))
+        window = "half_year"
+        # 搜索结果先缓存完整有序候选集，后续 offset 分页不重复发起网络请求。
+        cache = getattr(app.state, "intel_search_cache", {})
+        key = cache_key or query.casefold()
+        now_mono = time.monotonic()
+        cached = cache.get(key)
+        if cache_key and cached is None:
+            raise HTTPException(410, "检索缓存已过期，请重新检索")
+        if cache_key and cached.get("query") != query.casefold():
+            raise HTTPException(422, "缓存检索词与当前查询不匹配")
+        if cache_key and now_mono - cached["at"] >= 600:
+            raise HTTPException(410, "检索缓存已过期，请重新检索")
+        if cached and not refresh and now_mono - cached["at"] < 600:
+            rows = cached["rows"]
+            page = rows[offset:offset + limit]
+            return {**cached["meta"], "results": page, "total": len(rows),
+                    "has_more": offset + len(page) < len(rows), "cache_key": key,
+                    "offset": offset, "cached": True}
+        rows: list[dict] = []
+        since = window_start(window)
+        local = _intel().search_articles(query, since=since, limit=200)
+        rows.extend(local)
+        backend = "local"
+        errors: list[str] = []
+        profile = intel_config.load_profile(app.state.intel_dir)
+        try:
+            external, backend = _search_intel(
+                query, profile.get("search"), num=50, time_range=window)
+            for row in external:
+                if not isinstance(row, dict) or not row.get("url"):
+                    continue
+                day = normalize_day(row.get("published_date") or row.get("publishedDate"))
+                if day and day < since:
+                    continue
+                rows.append({"id": "search-" + hashlib.sha1(row["url"].encode("utf-8")).hexdigest()[:16],
+                             "url": row["url"], "title": row.get("title") or row["url"],
+                             "source": row.get("source") or backend, "kind": "article",
+                             "summary": row.get("snippet", ""),
+                             "published_at": row.get("published_date", ""),
+                             "published_day": day, "fetched_at": "", "score": 0,
+                             "direction": "", "is_priority": 0,
+                             "score_detail": json.dumps({"via": backend, "window": "近半年"}, ensure_ascii=False),
+                             "brief_date": None, "read": 0, "starred": 0, "via": backend})
+        except WebSearchError as exc:
+            errors.append(str(exc))
+            enabled = bool(((profile.get("search") or {}).get("searxng") or {}).get("enabled"))
+            backend = "searxng→google_news" if enabled else "google_news"
+        dedup: dict[str, dict] = {}
+        for row in rows:
+            dedup.setdefault(row.get("url", ""), row)
+        rows = list(dedup.values())
+        for row in rows:
+            row["ranking_score"] = ranking_score(row, window=window)
+            row["date_known"] = bool(row.get("published_day") or row.get("published_at"))
+        rows.sort(key=lambda r: (int(r.get("is_priority", 0)),
+                                 float(r.get("ranking_score", 0)),
+                                 float(r.get("score", 0)),
+                                 r.get("published_day", ""), r.get("fetched_at", "")),
+                  reverse=True)
+        meta = {"backend": backend, "window_label": "近半年", "errors": errors}
+        cache[key] = {"at": now_mono, "query": query.casefold(),
+                      "rows": rows, "meta": meta}
+        app.state.intel_search_cache = cache
+        page = rows[offset:offset + limit]
+        return {**meta, "results": page, "total": len(rows),
+                "has_more": offset + len(page) < len(rows), "cache_key": key,
+                "offset": offset, "cached": False}
+
+    @app.post("/api/intel/searxng/start")
+    def searxng_start():
+        return _searxng().start()
+
+    @app.post("/api/intel/searxng/stop")
+    def searxng_stop():
+        return _searxng().stop()
 
     @app.post("/api/intel/fetch")
     def intel_fetch_job():
         _intel()  # 404 前置：先确保存储就绪再提交 Job
 
         def _run() -> dict:
+            profile = intel_config.load_profile(app.state.intel_dir)
+            searcher = None
+            if ((profile.get("search") or {}).get("searxng") or {}).get("enabled"):
+                searcher = lambda query, **kwargs: _search_intel(
+                    query, profile.get("search"), **kwargs)
             return intel_run_refresh(
-                _intel(), intel_config.load_profile(app.state.intel_dir),
+                _intel(), profile,
                 intel_config.load_feeds(app.state.intel_dir),
-                llm=_intel_classifier(), getter=app.state.intel_getter)
+                llm=_intel_classifier(), getter=app.state.intel_getter,
+                searcher=searcher)
 
         # 幂等（2026-10-20）：切页回来 IntelView 会重建，自动补跑 effect 在简报
         # 落库前看到 today=None 会再 POST 一次；同一批源并发抓两遍纯浪费。

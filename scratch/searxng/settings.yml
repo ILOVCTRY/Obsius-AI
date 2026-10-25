@@ -1,6 +1,6 @@
 use_default_settings: true
 server:
-  secret_key: "cyberstrike-pro-local-test"
+  secret_key: "cyberstrike-pro-local"
   limiter: false
   image_proxy: false
 search:

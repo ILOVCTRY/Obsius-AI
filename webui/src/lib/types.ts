@@ -1833,6 +1833,10 @@ export interface IntelArticle {
   kind: string // cve | article
   summary: string
   published_at: string
+  published_day?: string
+  via?: string
+  ranking_score?: number
+  date_known?: boolean
   fetched_at: string
   score: number
   direction: string
@@ -1862,6 +1866,8 @@ export interface IntelFeed {
 export interface IntelProfile {
   directions: Record<string, number>
   stage: string
+  keywords?: { text: string; added_at: string }[]
+  search?: Record<string, unknown>
 }
 
 export interface IntelOverview {

@@ -5,18 +5,35 @@ load/save_profile 保留未知键（手编扩展字段不被抹掉）。
 """
 
 import json
+import re
+import unicodedata
+from datetime import datetime, timezone
 from pathlib import Path
 
 DEFAULT_FEEDS = [
     {"name": "安全客", "url": "https://api.anquanke.com/data/v1/rss", "kind": "rss"},
-    {"name": "FreeBuf", "url": "https://www.freebuf.com/feed", "kind": "rss"},
-    {"name": "看雪", "url": "https://www.kanxue.com/rss.php", "kind": "rss"},
     {"name": "先知社区", "url": "https://xz.aliyun.com/feed", "kind": "rss"},
     {"name": "PortSwigger Research", "url": "https://portswigger.net/blog/rss", "kind": "rss"},
-    {"name": "arXiv cs.CR", "url": "https://rsshub.app/arxiv/cs.cr", "kind": "rss"},
+    {"name": "奇安信攻防社区", "url": "https://forum.butian.net/Rss", "kind": "rss"},
+    {"name": "Seebug Paper", "url": "https://paper.seebug.org/rss/", "kind": "rss"},
+    {"name": "腾讯玄武实验室", "url": "https://xlab.tencent.com/cn/feed/", "kind": "rss"},
 ]
 
 # 七方向定稿（§16）：权重默认 1.0，stage 为学习阶段声明（E10 档案用）
+DEFAULT_SEARCH = {
+    "searxng": {
+        "enabled": False,
+        "auto_start": False,
+        "image": "docker.m.daocloud.io/searxng/searxng:latest",
+        "container": "cyberstrike-searxng",
+        "port": 8888,
+        "relay_port": 7891,
+        "upstream_proxy": "http://127.0.0.1:7890",
+        "engines": "google",
+    },
+    "window": "month",
+}
+
 DEFAULT_PROFILE = {
     "directions": {
         "web": 1.0, "ai": 1.0, "vehicle": 1.0, "reverse": 1.0,
@@ -24,11 +41,64 @@ DEFAULT_PROFILE = {
     },
     "stage": "",
     "vault": {"path": "", "enabled": False},  # E10：Obsidian vault 只读接入
+    "keywords": [],
+    "search": DEFAULT_SEARCH,
 }
 
 DEFAULT_VAULT = dict(DEFAULT_PROFILE["vault"])
 
 DIRECTIONS = tuple(DEFAULT_PROFILE["directions"])
+
+
+def normalize_keywords(value) -> list[dict]:
+    """把画像关注词归一化为可持久化的 chip 列表。"""
+    if not isinstance(value, list):
+        return []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for item in value:
+        raw = item.get("text", "") if isinstance(item, dict) else item
+        text = re.sub(r"\s+", " ", unicodedata.normalize("NFKC", str(raw))).strip()[:60]
+        if not text:
+            continue
+        key = text.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        added = item.get("added_at", "") if isinstance(item, dict) else ""
+        try:
+            added = str(added).strip() or datetime.now(timezone.utc).isoformat(timespec="seconds")
+        except Exception:
+            added = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        out.append({"text": text, "added_at": added})
+        if len(out) >= 20:
+            break
+    return out
+
+
+def normalize_search(value) -> dict:
+    raw = value if isinstance(value, dict) else {}
+    sx = {**DEFAULT_SEARCH["searxng"], **(raw.get("searxng") or {})}
+    sx["enabled"] = bool(sx.get("enabled", False))
+    sx["auto_start"] = bool(sx.get("auto_start", False))
+    sx["image"] = str(sx.get("image", DEFAULT_SEARCH["searxng"]["image"])).strip()[:300]
+    sx["container"] = str(sx.get("container", DEFAULT_SEARCH["searxng"]["container"])).strip()[:80]
+    try:
+        sx["port"] = max(1, min(int(sx.get("port", 8888)), 65535))
+    except (TypeError, ValueError):
+        sx["port"] = 8888
+    try:
+        sx["relay_port"] = max(0, min(int(sx.get("relay_port", 7891)), 65535))
+    except (TypeError, ValueError):
+        sx["relay_port"] = 7891
+    sx["upstream_proxy"] = str(sx.get("upstream_proxy", "")).strip()[:300]
+    engines = sx.get("engines", "brave")
+    sx["engines"] = ",".join(str(x).strip() for x in engines) if isinstance(engines, list) else str(engines).strip()[:200]
+    try:
+        window = str(raw.get("window", DEFAULT_SEARCH["window"]))
+    except Exception:
+        window = DEFAULT_SEARCH["window"]
+    return {"searxng": sx, "window": window if window in {"day", "week", "month", "half_year", "year"} else "month"}
 
 
 def _load(path: Path, seed: dict) -> dict:
@@ -63,23 +133,29 @@ def load_profile(intel_dir: str | Path = "config/intel") -> dict:
     dirs = {**DEFAULT_PROFILE["directions"], **(raw.get("directions") or {})}
     vault = {**DEFAULT_VAULT, **(raw.get("vault") or {})}
     out = {k: v for k, v in raw.items()
-           if k not in ("directions", "stage", "vault")}  # 未知键透传
+           if k not in ("directions", "stage", "vault", "keywords", "search")}  # 未知键透传
     out.update({"directions": dirs, "stage": str(raw.get("stage", "")),
                 "vault": {"path": str(vault.get("path", "")),
-                          "enabled": bool(vault.get("enabled", False))}})
+                          "enabled": bool(vault.get("enabled", False))},
+                "keywords": normalize_keywords(raw.get("keywords")),
+                "search": normalize_search(raw.get("search"))})
     return out
 
 
 def save_profile(profile: dict, intel_dir: str | Path = "config/intel") -> dict:
-    dirs = {**DEFAULT_PROFILE["directions"], **(profile.get("directions") or {})}
-    vault = {**DEFAULT_VAULT, **(profile.get("vault") or {})}
-    clean = {k: v for k, v in profile.items()
-             if k not in ("directions", "stage", "vault")}  # 未知键保留
+    current = load_profile(intel_dir)
+    merged = {**current, **(profile or {})}
+    dirs = {**DEFAULT_PROFILE["directions"], **(merged.get("directions") or {})}
+    vault = {**DEFAULT_VAULT, **(merged.get("vault") or {})}
+    clean = {k: v for k, v in merged.items()
+             if k not in ("directions", "stage", "vault", "keywords", "search")}  # 未知键保留
     clean.update({
         "directions": {k: max(0.0, min(float(v), 5.0)) for k, v in dirs.items()},
-        "stage": str(profile.get("stage", ""))[:100],
+        "stage": str(merged.get("stage", ""))[:100],
         "vault": {"path": str(vault.get("path", "")).strip()[:500],
                   "enabled": bool(vault.get("enabled", False))},
+        "keywords": normalize_keywords(merged.get("keywords")),
+        "search": normalize_search(merged.get("search")),
     })
     p = Path(intel_dir) / "profile.json"
     p.parent.mkdir(parents=True, exist_ok=True)

@@ -12,8 +12,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from core.blackboard.store import new_id  # 复用 <前缀>-<12hex> 约定
+from core.intel.ranking import normalize_day
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -26,7 +27,10 @@ CREATE TABLE IF NOT EXISTS articles (
     kind TEXT NOT NULL,            -- cve | article
     summary TEXT NOT NULL DEFAULT '',
     published_at TEXT NOT NULL DEFAULT '',
+    published_day TEXT NOT NULL DEFAULT '',
     fetched_at TEXT NOT NULL,
+    via TEXT NOT NULL DEFAULT '',
+    focus_keywords TEXT NOT NULL DEFAULT '[]',
     score REAL NOT NULL DEFAULT 0,
     direction TEXT NOT NULL DEFAULT '',    -- 打分命中的主方向
     is_priority INTEGER NOT NULL DEFAULT 0,-- KEV / 有公开 POC 优先标
@@ -75,6 +79,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE articles ADD COLUMN has_poc INTEGER NOT NULL DEFAULT 0")
     if "poc_url" not in cols:
         conn.execute("ALTER TABLE articles ADD COLUMN poc_url TEXT NOT NULL DEFAULT ''")
+    if "published_day" not in cols:
+        conn.execute("ALTER TABLE articles ADD COLUMN published_day TEXT NOT NULL DEFAULT ''")
+    if "via" not in cols:
+        conn.execute("ALTER TABLE articles ADD COLUMN via TEXT NOT NULL DEFAULT ''")
+    if "focus_keywords" not in cols:
+        conn.execute("ALTER TABLE articles ADD COLUMN focus_keywords TEXT NOT NULL DEFAULT '[]'")
     vcols = {r[1] for r in conn.execute("PRAGMA table_info(vault_notes)")}
     if vcols and "category" not in vcols:  # F5：frontmatter category 入索引
         conn.execute("ALTER TABLE vault_notes ADD COLUMN category TEXT NOT NULL DEFAULT ''")
@@ -93,6 +103,14 @@ class IntelStore:
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(_DDL)
         _migrate(self._conn)
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_published_day ON articles(published_day)")
+        # 一次性回填日期归一化；非法/未知日期保持空串，绝不猜测。
+        from core.intel.ranking import normalize_day
+        rows = self._conn.execute("SELECT id, published_at FROM articles WHERE published_day='' AND published_at!=''").fetchall()
+        for row in rows:
+            day = normalize_day(row["published_at"])
+            if day:
+                self._conn.execute("UPDATE articles SET published_day=? WHERE id=?", (day, row["id"]))
         self._conn.execute(
             "INSERT INTO meta(key,value) VALUES('schema_version',?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(SCHEMA_VERSION),))
@@ -111,22 +129,41 @@ class IntelStore:
         with self._lock:
             cur = self._conn.cursor()
             for it in items:
-                exists = cur.execute("SELECT 1 FROM articles WHERE url=?",
-                                     (it["url"],)).fetchone() is not None
-                if not exists:
+                existing = cur.execute("SELECT focus_keywords FROM articles WHERE url=?",
+                                       (it["url"],)).fetchone()
+                if existing is None:
                     n += 1
+                    focus_keywords = []
+                else:
+                    try:
+                        focus_keywords = json.loads(existing["focus_keywords"] or "[]")
+                    except (TypeError, ValueError):
+                        focus_keywords = []
+                    if not isinstance(focus_keywords, list):
+                        focus_keywords = []
+                keyword = str(it.get("focus_keyword") or "").strip()
+                added_focus = bool(keyword and keyword.casefold() not in {
+                    str(k).casefold() for k in focus_keywords})
+                if added_focus:
+                    focus_keywords.append(keyword)
                 cur.execute(
                     "INSERT INTO articles(id,url,title,source,kind,summary,"
-                    "published_at,fetched_at,is_priority,has_poc,poc_url) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?) "
+                    "published_at,published_day,fetched_at,via,focus_keywords,is_priority,has_poc,poc_url) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
                     "ON CONFLICT(url) DO UPDATE SET "
+                    "focus_keywords=CASE WHEN ? THEN excluded.focus_keywords ELSE articles.focus_keywords END, "
+                    "via=CASE WHEN excluded.via!='' THEN excluded.via ELSE articles.via END, "
                     "has_poc=MAX(articles.has_poc, excluded.has_poc), "
                     "poc_url=CASE WHEN excluded.has_poc=1 AND articles.has_poc=0 "
                     "THEN excluded.poc_url ELSE articles.poc_url END",
                     (new_id("art"), it["url"], it["title"], it["source"], it["kind"],
-                     it.get("summary", ""), it.get("published_at", ""), now(),
+                     it.get("summary", ""), it.get("published_at", ""),
+                     it.get("published_day") or normalize_day(it.get("published_at", "")),
+                     now(), it.get("via", ""),
+                     json.dumps(focus_keywords, ensure_ascii=False),
                      1 if it.get("is_priority") else 0,
-                     1 if it.get("has_poc") else 0, it.get("poc_url", "")))
+                     1 if it.get("has_poc") else 0, it.get("poc_url", ""),
+                     1 if added_focus else 0))
             self._conn.commit()
         return n
 
@@ -151,6 +188,24 @@ class IntelStore:
                     cur.execute("UPDATE articles SET is_priority=? WHERE id=?",
                                 (1 if s["is_priority"] else 0, s["id"]))
             self._conn.commit()
+
+    def search_articles(self, query: str, *, since: str = "", limit: int = 100) -> list[dict]:
+        """在本地文章池按标题/摘要/来源搜索，默认只收归一化日期在窗口内的文章。"""
+        query = str(query or "").strip()
+        if not query:
+            return []
+        like = f"%{query.replace('%', '\\%').replace('_', '\\_')}%"
+        sql = ("SELECT * FROM articles WHERE (title LIKE ? ESCAPE '\\' "
+               "OR summary LIKE ? ESCAPE '\\' OR source LIKE ? ESCAPE '\\')")
+        args: list = [like, like, like]
+        if since:
+            sql += " AND published_day >= ?"
+            args.append(str(since)[:10])
+        sql += " ORDER BY is_priority DESC, score DESC, published_day DESC, fetched_at DESC LIMIT ?"
+        args.append(max(1, min(int(limit or 100), 500)))
+        with self._lock:
+            rows = self._conn.execute(sql, args).fetchall()
+        return [dict(r) for r in rows]
 
     def list_articles(self, *, kind: str | None = None, unread_only: bool = False,
                       starred_only: bool = False, limit: int = 50) -> list[dict]:

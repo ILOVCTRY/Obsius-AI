@@ -1,0 +1,49 @@
+{
+  "feeds": [
+    {
+      "name": "安全客",
+      "url": "https://api.anquanke.com/data/v1/rss",
+      "kind": "rss"
+    },
+    {
+      "name": "FreeBuf",
+      "url": "https://www.freebuf.com/feed",
+      "kind": "rss"
+    },
+    {
+      "name": "看雪",
+      "url": "https://www.kanxue.com/rss.php",
+      "kind": "rss"
+    },
+    {
+      "name": "先知社区",
+      "url": "https://xz.aliyun.com/feed",
+      "kind": "rss"
+    },
+    {
+      "name": "PortSwigger Research",
+      "url": "https://portswigger.net/blog/rss",
+      "kind": "rss"
+    },
+    {
+      "name": "arXiv cs.CR",
+      "url": "https://rsshub.app/arxiv/cs.cr",
+      "kind": "rss"
+    },
+    {
+      "name": "奇安信攻防社区",
+      "url": "https://forum.butian.net/Rss",
+      "kind": "rss"
+    },
+    {
+      "name": "Seebug Paper",
+      "url": "https://paper.seebug.org/rss/",
+      "kind": "rss"
+    },
+    {
+      "name": "腾讯玄武实验室",
+      "url": "https://xlab.tencent.com/cn/feed/",
+      "kind": "rss"
+    }
+  ]
+}

@@ -18,6 +18,7 @@ import {
   type WallpaperSettings,
 } from "@/lib/wallpaper"
 import { cn } from "@/lib/utils"
+import { getProjectLoadingEnabled, setProjectLoadingEnabled } from "@/lib/projectLoading"
 
 // 每张卡用 data-theme 作用域自身，预览即该主题的真实配色（token 选择器是属性匹配，
 // 不限于 :root，所以嵌套元素也能局部套用整套主题变量）。
@@ -265,6 +266,7 @@ export function AppearancePane() {
   const [selected, setSelected] = useState<ThemeId>(() => getStoredTheme())
   // 毛玻璃质感与配色正交：开关只改 html[data-glass]，卡片预览同步带上该属性
   const [glass, setGlass] = useState<boolean>(() => getGlassMode())
+  const [projectLoading, setProjectLoading] = useState<boolean>(() => getProjectLoadingEnabled())
 
   const selectTheme = (id: ThemeId) => setSelected(applyTheme(id))
   const selectedLabel = THEMES.find((t) => t.id === selected)?.label ?? selected
@@ -276,6 +278,37 @@ export function AppearancePane() {
         <div>
           <p className="font-medium text-foreground">界面主题</p>
           <p className="mt-1 text-muted-foreground">点击卡片即时切换并记住选择；主题只影响 WebUI 外观，不改变任务、规则或执行策略。</p>
+        </div>
+      </div>
+      <div className="mb-4 max-w-3xl rounded-lg border border-border bg-card p-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="font-medium text-foreground">项目进入加载动画</p>
+            <p className="mt-0.5 text-[11px] text-muted-foreground">
+              进入项目时先显示壁纸和加载状态，首屏数据就绪后再显示工作区
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={projectLoading}
+            aria-label="项目进入加载动画"
+            title={projectLoading ? "关闭项目进入加载动画" : "开启项目进入加载动画"}
+            onClick={() => setProjectLoading(setProjectLoadingEnabled(!projectLoading))}
+            className={cn(
+              "relative h-4 w-7 shrink-0 rounded-full border transition-colors",
+              projectLoading
+                ? "border-(--brand-border) bg-(--brand-bg)"
+                : "border-border bg-(--surface-1)",
+            )}
+          >
+            <span
+              className={cn(
+                "absolute top-1/2 h-2.5 w-2.5 -translate-y-1/2 rounded-full transition-all",
+                projectLoading ? "left-[16px] bg-(--brand)" : "left-0.5 bg-(--muted-foreground)",
+              )}
+            />
+          </button>
         </div>
       </div>
       <div className="grid max-w-3xl gap-3 sm:grid-cols-2 lg:grid-cols-3">

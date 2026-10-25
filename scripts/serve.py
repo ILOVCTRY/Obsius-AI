@@ -66,6 +66,31 @@ def _make_server(port: int):
     app = create_app(workspace_root="workspaces", packs_root="packs",
                      tools_root="tools", static_dir=_static_dir_if_built())
 
+    from core.intel import config as intel_config
+    from core.intel.searxng import SearXNG
+    searx_config = dict((intel_config.load_profile("config/intel").get("search") or {}).get("searxng", {}))
+    searx_config["settings_path"] = str(_ROOT / "config" / "searxng" / "settings.yml")
+    searxng = SearXNG(searx_config)
+    app.state.intel_searxng = searxng
+    app.state.searxng_started_by_platform = False
+    if searxng.config.get("enabled") and searxng.config.get("auto_start"):
+        def _start_searxng() -> None:
+            try:
+                result = searxng.start()
+                app.state.searxng_started_by_platform = (
+                    result.get("status") == "started" and not result.get("reused"))
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception("SearXNG 自动启动失败")
+        threading.Thread(target=_start_searxng, daemon=True, name="searxng-autostart").start()
+
+    def _stop_platform_searxng() -> None:
+        if app.state.searxng_started_by_platform:
+            searxng.stop()
+        else:
+            searxng._stop_relay()
+    app.router.on_shutdown.append(_stop_platform_searxng)
+
     @app.post("/api/admin/shutdown")
     def _shutdown() -> dict:
         """优雅停机（仅 serve.py 进程注册；库/测试用法不受影响）：

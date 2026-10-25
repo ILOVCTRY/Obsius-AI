@@ -1,4 +1,4 @@
-import { Component, useCallback, useEffect, useState, type ErrorInfo, type ReactNode } from "react"
+import { Component, useCallback, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from "react"
 import { Group, Panel, Separator, useDefaultLayout } from "react-resizable-panels"
 import type { LucideIcon } from "lucide-react"
 import {
@@ -57,6 +57,8 @@ import { DiagnosticsView } from "@/views/DiagnosticsView"
 import { ProposalsView } from "@/views/ProposalsView"
 import { cn } from "@/lib/utils"
 import { bindingBadge } from "@/lib/taxonomy"
+import { getProjectLoadingEnabled } from "@/lib/projectLoading"
+import { ProjectLoadingScreen } from "@/components/project/ProjectLoadingScreen"
 
 // 三栏指挥台（DESIGN.md §12 定稿）：左窄导航 / 中主区 / 直播间页右侧黑板常驻侧栏
 // F1（2026-09-17）：左导航与右侧黑板侧栏 react-resizable-panels v4 可拖拽调宽
@@ -342,6 +344,21 @@ function EventsDebouncedRefresh({ pid, onBump }: {
 export default function App() {
   const [pid, setPid] = useState<string | null>(null)
   const [meta, setMeta] = useState<ProjectDetail | null>(null)
+  const [projectLoadingEnabled, setProjectLoadingEnabled] = useState(getProjectLoadingEnabled)
+  useEffect(() => {
+    const onSettingChange = (event: Event) => {
+      const enabled = (event as CustomEvent<boolean>).detail
+      setProjectLoadingEnabled(enabled)
+    }
+    window.addEventListener("project-loading-setting-changed", onSettingChange)
+    return () => window.removeEventListener("project-loading-setting-changed", onSettingChange)
+  }, [])
+  const [bootstrap, setBootstrap] = useState<{
+    pid: string | null; status: "idle" | "loading" | "ready" | "error" | "timeout"
+    error?: string; retry: number
+  }>({ pid: null, status: "idle", retry: 0 })
+  const [continueAfterBootstrapError, setContinueAfterBootstrapError] = useState(false)
+  const bootstrapGeneration = useRef(0)
   // CTF 轨顶栏题目进度（2026-10-22）：「已测干净 X/Y」是渗透攻击面覆盖率，CTF 没有
   // 资产树这个概念，恒显 0/0·0% 是把渗透语义错带到 CTF。改为按轨分叉显示题目进度。
   const [ctfStats, setCtfStats] = useState<CtfProgressStats | null>(null)
@@ -439,20 +456,68 @@ export default function App() {
   }, [])
 
   const openProject = useCallback((id: string) => {
+    setContinueAfterBootstrapError(false)
+    setBootstrap({ pid: id, status: projectLoadingEnabled ? "loading" : "ready", retry: 0 })
+    setMeta(null)
     setPid(id)
     // 进入项目即定位到「智能体」会话窗口（2026-10-11）：此前落 live（会话直播间
     // 的指挥/空态落地页），改为直接打开左导航「智能体」= AgentWorkbenchView
     // （agent 触发卡 + 线程列表 + 对话挖洞），少一次手动切换。
     setView("agents")
-  }, [])
+  }, [projectLoadingEnabled])
 
   // 项目页返回入口由悬浮控件承载；保留回调供跨视图调用。
   const goHome = useCallback(() => {
     // 首页是无项目上下文的入口；清掉 pid 让项目入口和全局导航恢复。
+    bootstrapGeneration.current += 1
+    setBootstrap({ pid: null, status: "idle", retry: 0 })
+    setContinueAfterBootstrapError(false)
     setPid(null)
     setMeta(null)
     setView("projects")
   }, [])
+
+  useEffect(() => {
+    if (!pid || !projectLoadingEnabled) return
+    const generation = ++bootstrapGeneration.current
+    let alive = true
+    setBootstrap((prev) => ({ ...prev, pid, status: "loading", error: undefined }))
+    let timeoutId = 0
+    const timeout = new Promise<never>((_, reject) => {
+      timeoutId = window.setTimeout(() => reject(new Error("项目首屏数据加载超时")), 25000)
+    })
+    const load = async () => {
+      try {
+        const [project, availableAgents] = await Promise.race([
+          Promise.all([api.getProject(pid), api.chatAgents(pid), api.assets(pid)]).then(
+            ([loadedProject, loadedAgents]) => [loadedProject, loadedAgents] as const),
+          timeout,
+        ])
+        if (!alive || generation !== bootstrapGeneration.current) return
+        const agentId = availableAgents[0]?.id
+        if (agentId) await Promise.race([api.chatThreads(pid, agentId), timeout])
+        if (!alive || generation !== bootstrapGeneration.current) return
+        window.clearTimeout(timeoutId)
+        setMeta(project)
+        setBootstrap({ pid, status: "ready", retry: 0 })
+      } catch (error) {
+        window.clearTimeout(timeoutId)
+        if (!alive || generation !== bootstrapGeneration.current) return
+        if (error instanceof ApiError && error.status === 404) {
+          setPid(null)
+          return
+        }
+        setBootstrap((prev) => ({
+          ...prev,
+          pid,
+          status: error instanceof Error && error.message.includes("超时") ? "timeout" : "error",
+          error: error instanceof Error ? error.message : "项目首屏数据加载失败",
+        }))
+      }
+    }
+    void load()
+    return () => { alive = false; window.clearTimeout(timeoutId) }
+  }, [pid, projectLoadingEnabled, bootstrap.retry])
 
   useEffect(() => {
     if (!pid) {
@@ -513,6 +578,23 @@ export default function App() {
     refreshProposalsN()  // 新事件里可能含 proposal.created（Agent 自动提案）
   }, [pid, refreshProposalsN])
   const eventsWatcher = <EventsDebouncedRefresh pid={pid} onBump={bumpMeta} />
+
+  useEffect(() => {
+    if (pid && !projectLoadingEnabled && bootstrap.pid === pid && bootstrap.status !== "ready") {
+      setBootstrap({ pid, status: "ready", retry: 0 })
+    }
+  }, [pid, projectLoadingEnabled, bootstrap.pid, bootstrap.status])
+
+  const retryProjectBootstrap = useCallback(() => {
+    bootstrapGeneration.current += 1
+    setBootstrap((prev) => ({ pid, status: "loading", retry: prev.retry + 1 }))
+  }, [pid])
+  const continueAfterBootstrapFailure = useCallback(() => {
+    setContinueAfterBootstrapError(true)
+  }, [])
+  const showProjectLoading = !!pid && projectLoadingEnabled
+    && bootstrap.pid === pid && bootstrap.status !== "ready"
+    && !continueAfterBootstrapError
 
   // 工作台 profile：research+binary ⇒ rev-generic 逆向工作台（其他轨保持渗透模板）
   const profile = deriveWorkbenchProfile(meta)
@@ -583,8 +665,13 @@ export default function App() {
 
   return (
     <NavRailSlotContext.Provider value={railActive ? railSlot : null}>
-    <div className="app-shell flex h-screen flex-col overflow-hidden">
+    <div className="app-shell relative flex h-screen flex-col overflow-hidden">
       {eventsWatcher}
+      {showProjectLoading && <ProjectLoadingScreen
+        error={bootstrap.status === "error" || bootstrap.status === "timeout" ? bootstrap.error : undefined}
+        onRetry={retryProjectBootstrap}
+        onContinue={continueAfterBootstrapFailure}
+      />}
       <div className="flex min-h-0 flex-1">
         <Group orientation="horizontal" className="flex min-h-0 w-full"
                defaultLayout={navLayout.defaultLayout}

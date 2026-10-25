@@ -185,6 +185,8 @@ _NOT_USER = frozenset((
     # 账号字段名本身（`user=root` 的 root 是账号，不是 `user:pass` 对）
     "user", "username", "login", "account", "uid", "owner", "realm", "domain",
     "hostname", "value", "flag", "database", "port", "path", "url", "type",
+    # 工具/协议输出字段与文件诊断前缀不是账号（2026-10-25）。
+    "size", "length", "hdr", "header", "xxd", "tcpdump", "tshark",
     # 日志级别前缀（2026-10-20）：`Warning: _curses.error: setupterm ...` 曾被
     # 抽成「凭据 Warning:_curses.error」，回执里凭空多一条假的账号口令线索，
     # 还会被后续弹药管线拿去撞登录。级别词后面跟的是**消息**，不是账号。
@@ -198,6 +200,9 @@ _NOT_USER = frozenset((
 # （`_curses.error:`、`pwnlib.exception:`）看着像 `key: value`，实际是
 # 异常类名。真实口令几乎不会长成「小写点分标识符+冒号」。
 _NOT_SECRET_RX = re.compile(r"^[A-Za-z_][\w.]*\.[A-Za-z_]\w*:$")
+_LOG_OR_ERROR_LINE_RX = re.compile(
+    r"(?i)^\s*(?:\[?\w+\]?\s+)?(?:warning|warn|error|err|fatal|critical|traceback|"
+    r"exception|debug|info|notice|stderr)\s*:")
 
 # 凭据语境键名（`password: admin:Pass` 里 password 是字段名，值是凭据本体）
 _CRED_KEYS = frozenset((
@@ -209,8 +214,9 @@ _CRED_KEYS = frozenset((
     "db_pass", "dbpass", "db_pwd", "root_password", "user_password",
 ))
 
-# 「像口令」的形态：含数字或特殊字符（纯字母单词更像普通值，需凭据语境才收）
-_PWISH_RX = re.compile(r"[0-9!@#$%^&*_\-+=.]")
+# 无语境的纯数字字段值通常是协议计数/尺寸，不当作凭据。
+_PLAIN_NUMERIC_RX = re.compile(r"\d+(?:\.\d+)?")
+_PATHISH_SECRET_RX = re.compile(r"(?:^|[/\\])att-[A-Za-z0-9_-]+(?:\.[A-Za-z0-9._-]+)+:?$", re.I)
 
 # URL 内嵌凭据：`mysql://root:root123@10.0.0.5:3306/db`（CTF 与配置泄露都常见）
 _URL_CRED_RX = re.compile(
@@ -299,6 +305,10 @@ def parse_credentials(text: str, *, limit: int = 30) -> list[dict]:
         return len(out) < limit
 
     for line in (text or "").splitlines():
+        # 日志/异常行中的后续 `setupterm: could` 等冒号片段仍是错误文本，
+        # 整行跳过，避免只过滤首个 `Warning:` 后继续误抽。
+        if _LOG_OR_ERROR_LINE_RX.match(line):
+            continue
         # ⓪ `Authorization: Basic <b64>` —— 值里是 `user:pass`
         for am in _AUTH_BASIC_RX.finditer(line):
             blob = am.group(1)
@@ -322,6 +332,9 @@ def parse_credentials(text: str, *, limit: int = 30) -> list[dict]:
                 continue
             key, secret = m.group(1), m.group(2)
             if secret.startswith("//"):  # scheme 尾部残留
+                continue
+            # 工具错误中的附件路径（例如 `xxd:att-...pcapng:`）不是凭据。
+            if _PATHISH_SECRET_RX.search(secret):
                 continue
             # `Warning: _curses.error:` —— 值是异常类名而非口令（2026-10-20）
             if _NOT_SECRET_RX.match(secret):
@@ -354,12 +367,16 @@ def parse_credentials(text: str, *, limit: int = 30) -> list[dict]:
                 continue
             if klow in _NOT_USER:
                 continue
-            # 无凭据语境时，只收 base64 能解出 user:pass、或值明显像口令的
+            # 无凭据语境时，只收 base64 能解出 user:pass 的值；普通 key:value
             if restored is not None:
                 pw = restored
-            elif has_ctx or _PWISH_RX.search(secret):
+            elif (has_ctx and not _PLAIN_NUMERIC_RX.fullmatch(secret)) or (
+                    not has_ctx and re.search(r"[:=][ \t]+", m.group(0))
+                    and not _PLAIN_NUMERIC_RX.fullmatch(secret)):
                 pw = secret
             else:
+                # 无语境时只保留 `admin: Passw0rd` 这种明确分隔的成对写法，
+                # 不把紧凑协议字段 `size:9074`、`hdr:65535` 或路径 token 当凭据。
                 continue
             if not _push(klow, pw, m.group(0)):
                 return out

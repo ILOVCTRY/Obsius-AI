@@ -289,8 +289,7 @@ class KbSearchIndex:
             # fall back to LIKE so Chinese filenames and prose retain old behavior.
             has_cjk = any("\u4e00" <= c <= "\u9fff" for c in query)
             if not has_cjk:
-                # 只在 content 列匹配；title/summary/relpath 是展示元数据，不能
-                # 改变正文搜索结果（否则 README.md 这类文件名会制造假命中）。
+                # 纯 ASCII 精确查询仍只匹配正文；避免单词恰好出现在文件名就当正文命中。
                 match = " AND ".join(
                     'content : "' + t.replace('"', '""') + '"' for t in terms)
                 sql = """SELECT d.*, bm25(kb_documents_fts, 1.0, 2.0, 1.5, 1.0, 1.0) rank
@@ -361,11 +360,35 @@ class KbSearchIndex:
         for row in rows:
             text = row["content"]
             low = text.lower()
+            title = str(row["title"] or "").lower()
+            searchable_fields = {
+                "content": low,
+                "title": title,
+                "summary": str(row["summary"] or "").lower(),
+                "tags": str(row["tags"] or "").lower(),
+                "path": str(row["relpath"] or "").lower(),
+            }
+            matched_terms = [t for t in terms
+                             if any(t in value for value in searchable_fields.values())]
+            title_terms = [t for t in matched_terms if t in title]
+            summary_terms = [t for t in matched_terms if t in searchable_fields["summary"]]
+            tags_terms = [t for t in matched_terms if t in searchable_fields["tags"]]
+            relevance_score = (
+                len(matched_terms)
+                + 5 * len(title_terms)
+                + 3 * len(summary_terms)
+                + 3 * len(tags_terms)
+                + 0.01 * sum(low.count(t) for t in matched_terms)
+            )
+            # Keep the historical matches contract (正文出现次数); field-aware ranking
+            # is exposed separately for the Agent wrapper.
             positions = [low.find(t) for t in terms if low.find(t) >= 0]
             pos = min(positions) if positions else 0
             snippet = text[max(0, pos - 60):pos + 180].replace("\n", " ").strip()
             out.append({"path": row["relpath"], "source": row["source"],
                         "matches": sum(low.count(t) for t in terms),
+                        "relevance_score": relevance_score,
+                        "matched_terms": matched_terms,
                         "snippet": snippet, "kind": row["kind"],
                         "layer": row["layer"], "title": row["title"],
                         "is_attachment": bool(row["is_attachment"])})
@@ -416,17 +439,16 @@ class KbSearchIndex:
         tag_sql = " AND lower(d.tags) LIKE ?" if tag else ""
         tag_params: list[Any] = ["%" + tag.lower() + "%"] if tag else []
 
-        # **一次扫描算完全部词元的 df**（2026-10-21 性能修复）：中文没有 FTS 支持，
-        # 每个 df 查询都是一次全表 LIKE 扫描（31MB × 6 域）。旧实现对每个词元各查
-        # 一次、且在 live/weights 两处重复查，6 个词元 = 十几次全表扫描 → 单次检索
-        # 1.2~2.2s。而 kb_search 正要被提升为「动手前必做」，2s 的工具调用本身就是
-        # 模型不爱用它的理由。改成一条 SELECT 里用 SUM(CASE…) 一次扫完，词元数
-        # 不再影响扫描次数。
+        # IDF 以正文统计，避免标题/路径泛词稀释正文分布；ASCII 缩写额外检查元数据，
+        # 使文件名/标题中的产品名可以参与召回。中文字段召回仍由下方候选查询完成。
         _all_terms = list(dict.fromkeys(list(ascii_terms) + list(cjk_terms)))
+        _search_text = "lower(d.content || ' ' || d.title || ' ' || d.summary || ' ' || d.tags || ' ' || d.relpath)"
+        _body_text = "lower(d.content)"
         _df_map: dict[str, int] = {}
+        _meta_df_map: dict[str, int] = {}
         if _all_terms:
             _exprs = ", ".join(
-                "SUM(CASE WHEN lower(d.content) LIKE ? THEN 1 ELSE 0 END)"
+                f"SUM(CASE WHEN {_body_text} LIKE ? THEN 1 ELSE 0 END)"
                 for _ in _all_terms)
             _row = con.execute(
                 "SELECT " + _exprs + " FROM kb_documents d WHERE 1=1"
@@ -434,7 +456,23 @@ class KbSearchIndex:
                 ["%" + t + "%" for t in _all_terms] + cap_list + tag_params
             ).fetchone()
             _df_map = {t: int(_row[i] or 0) for i, t in enumerate(_all_terms)}
-        _df = lambda t: _df_map.get(t, 0)  # noqa: E731 —— 之后走内存映射，不再触库
+            _meta_exprs = ", ".join(
+                f"SUM(CASE WHEN {_search_text} LIKE ? THEN 1 ELSE 0 END)"
+                for _ in _all_terms)
+            _meta_row = con.execute(
+                "SELECT " + _meta_exprs + " FROM kb_documents d WHERE 1=1"
+                + cap_sql + tag_sql,
+                ["%" + t + "%" for t in _all_terms] + cap_list + tag_params
+            ).fetchone()
+            _meta_df_map = {t: int(_meta_row[i] or 0) for i, t in enumerate(_all_terms)}
+        for term in ascii_terms:
+            if _df_map.get(term, 0) == 0:
+                _row = con.execute(
+                    "SELECT count(*) FROM kb_documents d WHERE "
+                    + _search_text + " LIKE ?" + cap_sql + tag_sql,
+                    ["%" + term + "%"] + cap_list + tag_params).fetchone()
+                _df_map[term] = int(_row[0] or 0)
+        _df = lambda t: _df_map.get(t, 0)  # noqa: E731
 
         total_docs = con.execute("SELECT count(*) FROM kb_documents d WHERE 1=1"
                                  + cap_sql + tag_sql,
@@ -443,27 +481,46 @@ class KbSearchIndex:
             return []
 
         live = [t for t in cjk_terms
-                if 0 < _df(t) <= total_docs * self._GENERIC_DF_RATIO]
-        if not live and not ascii_terms:
+                if 0 < _meta_df_map.get(t, _df(t)) <= total_docs * self._GENERIC_DF_RATIO]
+        # ASCII 与中文词元都作为分层召回线索，不把组合查询中的所有词强制要求
+        # 共现于同一篇文档。ASCII 词提高权重；df=0 的缩写/新术语不进入分母，
+        # 因而不会把整条混合查询清零。纯 ASCII 精确/OR 契约由上层路径保留。
+        known_ascii = [t for t in ascii_terms if _df(t) > 0]
+        # 含 ASCII 缩写但一个都没有索引证据时，仍保持“技术词未知不可凭泛词猜中”
+        # 的安全护栏；只有存在至少一个已知 ASCII 词，未知缩写才作为可缺失线索降级。
+        # 若全部 ASCII 词都未知，保留既有安全护栏，避免 jwt 等技术词缺失时
+        # 仅凭中文泛词误召回；当存在已知 ASCII 词时，其他未知缩写不再阻断。
+        if ascii_terms and not known_ascii:
+            return []
+        candidate_terms = known_ascii + live
+        if not candidate_terms:
             return []
 
-        # ASCII 词元权重 ×2：技术词（sql/jwt/ssti）特异性远高于中文 2-gram。
-        weights = [(t, math.log(1 + total_docs / max(1, _df(t))) * 2.0)
-                   for t in ascii_terms]
-        weights += [(t, math.log(1 + total_docs / max(1, _df(t)))) for t in live]
+        effective_df = lambda t: _df(t) or _meta_df_map.get(t, 0)  # noqa: E731
+        weights = [(t, math.log(1 + total_docs / max(1, effective_df(t))) * 2.0)
+                   for t in known_ascii]
+        weights += [(t, math.log(1 + total_docs / max(1, effective_df(t)))) for t in live]
         total_weight = sum(w for _, w in weights) or 1.0
         score_terms = [t for t, _ in weights]
         if min_hits is None:
-            need_hits = max(1, math.ceil(len(score_terms) * self._HIT_RATIO_MIN))
+            # 组合查询采用召回优先：单篇命中一条有效线索即可入候选，排序由 IDF、
+            # 正文/元数据字段权重决定；全未知词仍由 candidate_terms 空集护栏拒绝。
+            need_hits = 1
         else:
             need_hits = max(1, min_hits)
-        need_cov = self._COVERAGE_MIN if min_coverage is None else min_coverage
+        need_cov = 0.0 if min_coverage is None else min_coverage
 
+        body_score_expr = "+".join(
+            f"(CASE WHEN {_body_text} LIKE ? THEN {w:.5f} ELSE 0 END)"
+            for _, w in weights)
         score_expr = "+".join(
-            f"(CASE WHEN lower(d.content) LIKE ? THEN {w:.5f} ELSE 0 END)"
+            f"(CASE WHEN {_search_text} LIKE ? THEN {w:.5f} ELSE 0 END)"
             for _, w in weights)
         hit_expr = "+".join(
-            "(CASE WHEN lower(d.content) LIKE ? THEN 1 ELSE 0 END)"
+            f"(CASE WHEN {_search_text} LIKE ? THEN 1 ELSE 0 END)"
+            for _ in score_terms)
+        body_hit_expr = "+".join(
+            f"(CASE WHEN {_body_text} LIKE ? THEN 1 ELSE 0 END)"
             for _ in score_terms)
         # 词频（tf）：cov 只记「命中与否」，同一批词元都命中的文档 cov 必然完全
         # 相等——「如何测试文件上传漏洞」实测 10 篇全是 cov=9.544/hits=5，排序
@@ -476,20 +533,26 @@ class KbSearchIndex:
             "(LENGTH(lower(d.content))"
             f"-LENGTH(REPLACE(lower(d.content),?, '')))/{max(1, len(t))}"
             for t in score_terms)
-        where = " AND ".join("lower(d.content) LIKE ?" for _ in ascii_terms)
-        where += (" AND " if ascii_terms else "") + "(" + " OR ".join(
-            "lower(d.content) LIKE ?" for _ in score_terms) + ")"
-        sql = (f"SELECT d.*, ({score_expr}) AS cov, ({hit_expr}) AS hits, "
-               f"({tf_expr}) AS tf "
+        where = "(" + " OR ".join(f"{_search_text} LIKE ?" for _ in score_terms) + ")"
+        sql = (f"SELECT d.*, ({body_score_expr}) AS body_cov, ({score_expr}) AS cov, "
+               f"({hit_expr}) AS hits, ({body_hit_expr}) AS body_hits, ({tf_expr}) AS tf "
                f"FROM kb_documents d WHERE {where}" + cap_sql + tag_sql
-               + " ORDER BY cov DESC, tf DESC, d.layer DESC, d.relpath LIMIT ?")
+               + " ORDER BY body_cov DESC, cov DESC, tf DESC, d.layer DESC, d.relpath LIMIT ?")
         params = ([f"%{t}%" for t in score_terms]
                   + [f"%{t}%" for t in score_terms]
+                  + [f"%{t}%" for t in score_terms]
+                  + [f"%{t}%" for t in score_terms]
                   + list(score_terms)          # tf 用纯词元，不能带 LIKE 通配符
-                  + [f"%{t}%" for t in ascii_terms]
                   + [f"%{t}%" for t in score_terms]
                   + cap_list + tag_params + [max(1, limit)])
         rows = list(con.execute(sql, params))
-        return [r for r in rows
-                if (r["cov"] or 0) / total_weight >= need_cov
-                and (r["hits"] or 0) >= need_hits]
+        filtered = [r for r in rows
+                    if (r["cov"] or 0) / total_weight >= need_cov
+                    and (r["hits"] or 0) >= need_hits]
+        # 合并正文高相关候选与标题/路径补充候选，正文结果保持在前面。
+        meta_sql = (f"SELECT d.* FROM kb_documents d WHERE {where}" + cap_sql + tag_sql
+                    + " ORDER BY d.layer DESC, d.relpath LIMIT ?")
+        meta_rows = list(con.execute(meta_sql,
+            [f"%{t}%" for t in score_terms] + cap_list + tag_params + [max(1, limit)]))
+        seen = {r["path"] for r in filtered}
+        return filtered + [r for r in meta_rows if r["path"] not in seen]

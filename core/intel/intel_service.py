@@ -12,6 +12,9 @@ from datetime import datetime, timedelta, timezone
 
 from core.intel.config import DIRECTIONS
 from core.intel.fetch import _CVE_RE, fetch_all
+from core.intel.discover import discover_by_keywords
+from core.intel.ranking import ranking_score
+from core.intel.search import search_intel
 
 MAX_TOKENS_BUDGET = 2000
 
@@ -39,8 +42,36 @@ _HOT_KEYWORDS = ("在野利用", "0day", "0-day", "nday", "poc 公开", "exp 公
 _REPRO_KWS = ("复现", "poc", "exp", "exploit", "利用", "分析")
 
 
+def _matched_focus_keywords(item: dict, profile: dict) -> list[str]:
+    text = f"{item.get('title', '')} {item.get('summary', '')}".casefold()
+    values = item.get("focus_keywords") or []
+    if isinstance(values, str):
+        try:
+            values = json.loads(values)
+        except ValueError:
+            values = []
+    if not isinstance(values, list):
+        values = []
+    configured = profile.get("keywords") or []
+    for entry in configured:
+        value = entry.get("text", "") if isinstance(entry, dict) else entry
+        value = str(value).strip()
+        if value and value.casefold() in text and value.casefold() not in {str(v).casefold() for v in values}:
+            values.append(value)
+    seen: set[str] = set()
+    matched = []
+    for value in values:
+        keyword = str(value).strip()
+        if keyword and keyword.casefold() not in seen:
+            seen.add(keyword.casefold())
+            matched.append(keyword)
+    return matched
+
+
 def _rule_score(item: dict, profile: dict) -> dict:
     text = f"{item.get('title', '')} {item.get('summary', '')}".lower()
+    matched = _matched_focus_keywords(item, profile)
+    focus = matched[0] if matched else ""
     best_dir, best_hits = "", 0
     for d, kws in _DIRECTION_KEYWORDS.items():
         hits = sum(1 for k in kws if k.lower() in text)
@@ -50,8 +81,11 @@ def _rule_score(item: dict, profile: dict) -> dict:
     hot = sum(1 for k in _HOT_KEYWORDS if k.lower() in text)
     weight = float(profile.get("directions", {}).get(best_dir, 1.0)) if best_dir else 1.0
     base = min(60, best_hits * 15) + depth * 8 + (15 if item.get("is_priority") else 0)
+    if matched:
+        base += min(30, 15 * len(matched))
     return {"score": round(min(100.0, base * weight), 1), "direction": best_dir,
-            "hot": hot > 0, "by": "rule"}
+            "hot": hot > 0, "by": "rule", "matched_keyword": focus or None,
+            "matched_keywords": matched, "via": item.get("via", "")}
 
 
 def score_articles(items: list[dict], profile: dict, llm=None) -> list[dict]:
@@ -75,7 +109,10 @@ def score_articles(items: list[dict], profile: dict, llm=None) -> list[dict]:
         r = _rule_score(it, profile)
         out.append({"id": it["id"], "score": r["score"], "direction": r["direction"],
                     "is_priority": None,
-                    "score_detail": {"by": "rule", "hot": r["hot"]}})
+                    "score_detail": {"by": "rule", "hot": r["hot"],
+                                     "matched_keyword": r.get("matched_keyword"),
+                                     "matched_keywords": r.get("matched_keywords", []),
+                                     "via": r.get("via", "")}})
     return out
 
 
@@ -105,10 +142,15 @@ def _llm_scores(pending: list[tuple[int, dict]], profile: dict, llm) -> list[dic
         it = pending[i][1]
         d = p.get("direction", "")
         w = float(profile.get("directions", {}).get(d, 1.0)) if d else 1.0
-        score = round(min(100.0, float(p.get("score", 0)) * w), 1)
+        matched = _matched_focus_keywords(it, profile)
+        focus_bonus = min(30, 15 * len(matched))
+        score = round(min(100.0, float(p.get("score", 0)) * w + focus_bonus), 1)
         out.append({"id": it["id"], "score": score, "direction": d,
                     "is_priority": None,
-                    "score_detail": {"by": "llm", "hot": bool(p.get("hot"))}})
+                    "score_detail": {"by": "llm", "hot": bool(p.get("hot")),
+                                     "matched_keyword": matched[0] if matched else None,
+                                     "matched_keywords": matched,
+                                     "via": it.get("via", "")}})
     return out
 
 
@@ -207,10 +249,21 @@ def _top(store, kind: str, limit: int) -> list[dict]:
 
 
 def run_refresh(store, profile: dict, feeds: list[dict], *, llm=None,
-                getter=None, date: str | None = None) -> dict:
+                getter=None, date: str | None = None, searcher=None) -> dict:
     """整批刷新并落当日简报；返回 stats（写进简报 + Job 结果）。"""
     date = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
     items, errors = fetch_all(getter, feeds)
+    search_cfg = profile.get("search") or {}
+    focus_window = "day"  # 搜索适配器将 day 映射为 Google News 的最近两天
+    searcher = searcher or profile.get("searcher") or (
+        lambda query, **kwargs: search_intel(
+            query, search_cfg, num=kwargs.get("num", 10),
+            time_range=kwargs.get("time_range", focus_window)))
+    focus_items, focus_errors = discover_by_keywords(
+        profile.get("keywords", []), time_range=focus_window, limit_per=10,
+        searcher=searcher) if profile.get("keywords") else ([], [])
+    items.extend(focus_items)
+    errors.extend(focus_errors)
     new_n = store.upsert_articles(items)
     rows = store.unscored()
     store.apply_scores(score_articles(rows, profile, llm))
