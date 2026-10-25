@@ -1,0 +1,21 @@
+{
+  "use_default_settings": true,
+  "server": {
+    "secret_key": "D_NS4GuMO1lpM2VXU-qMN7nV0f4zfqT-GtVD-Q23h1pi4436y1ev7YG8GWQ4o2Jn",
+    "limiter": false
+  },
+  "search": {
+    "safe_search": 0,
+    "formats": [
+      "html",
+      "json"
+    ]
+  },
+  "outgoing": {
+    "proxies": {
+      "all://": [
+        "http://Y3liZXJzdHJpa2U6bHZWMHpBc3VKTnBBSVZmb1dwUngyUzc2bWlFOVpYMWw2am1uRktXWndPUk1PanhzSXl3dGFCS2hEVzgyd3d0Zw==@host.docker.internal:7891"
+      ]
+    }
+  }
+}

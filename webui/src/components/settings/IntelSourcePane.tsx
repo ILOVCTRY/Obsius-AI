@@ -15,6 +15,25 @@ const DIRECTION_LABELS: Record<string, string> = {
   android: "Android", pwn: "PWN", forensics: "取证",
 }
 
+type SearxngStatus = {
+  ok?: boolean
+  docker?: boolean
+  image?: boolean
+  container?: boolean
+  running?: boolean
+  http?: boolean
+  proxy?: boolean | null
+  proxy_configured?: boolean
+  count?: number
+  engines?: string[]
+  detail?: string
+}
+
+type SearxngNotice = { text: string; tone: "success" | "error" | "pending" }
+type SearxngAction = "connection" | "validate" | "start" | "stop"
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
 export function IntelSourcePane() {
   const [feeds, setFeeds] = useState<IntelFeed[]>([])
   const [profile, setProfile] = useState<IntelProfile | null>(null)
@@ -26,8 +45,9 @@ export function IntelSourcePane() {
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
   const [keywordInput, setKeywordInput] = useState("")
-  const [searxStatus, setSearxStatus] = useState<Record<string, unknown> | null>(null)
+  const [searxStatus, setSearxStatus] = useState<SearxngStatus | null>(null)
   const [searxBusy, setSearxBusy] = useState(false)
+  const [searxNotice, setSearxNotice] = useState<SearxngNotice | null>(null)
   const [composing, setComposing] = useState(false)
 
   const flashSaved = () => {
@@ -57,13 +77,80 @@ export function IntelSourcePane() {
     setMsg(null)
   }
 
-  const searxAction = async (action: () => Promise<Record<string, unknown>>) => {
+  const searxAction = async (action: SearxngAction) => {
     if (searxBusy) return
     setSearxBusy(true)
-    setMsg(null)
-    try { const result = await action(); setSearxStatus(result); setMsg(JSON.stringify(result)) }
-    catch (e) { setMsg(e instanceof Error ? e.message : String(e)) }
-    finally { setSearxBusy(false) }
+    setSearxNotice(action === "start"
+      ? { text: "正在启动 SearXNG…", tone: "pending" }
+      : action === "stop" ? { text: "正在停止 SearXNG…", tone: "pending" } : null)
+    try {
+      if (action === "start") {
+        const result = await api.intelSearxngStart()
+        if (result.status === "error") {
+          const detail = typeof result.detail === "string" ? result.detail : "启动请求失败"
+          const status = await api.intelSearxngStatus().catch(() => null)
+          if (status) setSearxStatus(status as SearxngStatus)
+          setSearxNotice({ text: `启动失败：${detail}`, tone: "error" })
+          return
+        }
+        let status: SearxngStatus | null = null
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+          status = await api.intelSearxngStatus() as SearxngStatus
+          setSearxStatus(status)
+          if (status.running && status.http) break
+          await sleep(500)
+        }
+        if (status?.running && status.http) {
+          setSearxNotice({
+            text: result.reused ? "SearXNG 已运行（复用了现有容器）" : "SearXNG 已启动并通过 HTTP 探测",
+            tone: "success",
+          })
+        } else {
+          setSearxNotice({ text: "启动命令已执行，但服务未通过 HTTP 探测；请检查容器状态", tone: "error" })
+        }
+        return
+      }
+      if (action === "stop") {
+        const result = await api.intelSearxngStop()
+        const status = await api.intelSearxngStatus() as SearxngStatus
+        setSearxStatus(status)
+        setSearxNotice(result.status === "error" || status.running
+          ? { text: "停止失败：容器仍在运行或 Docker 返回错误", tone: "error" }
+          : { text: "SearXNG 已停止", tone: "success" })
+        return
+      }
+      if (action === "connection") {
+        const result = await api.intelSearxngConnectionTest()
+        setSearxStatus(result as SearxngStatus)
+        const issues = [
+          !result.docker && "Docker 不可用",
+          !result.image && "镜像不存在（不会自动拉取）",
+          !result.container && "容器不存在",
+          result.container && !result.running && "容器未运行",
+          result.running && !result.http && "HTTP 端口未响应",
+          result.proxy_configured && result.proxy === false && "代理地址不可达",
+        ].filter((item): item is string => typeof item === "string")
+        setSearxNotice(issues.length
+          ? { text: `连接检查未通过：${issues.join("；")}`, tone: "error" }
+          : { text: "连接检查通过；未发起真实搜索", tone: "success" })
+        return
+      }
+      const result = await api.intelSearxngValidateSearch()
+      const count = typeof result.count === "number" ? result.count : 0
+      const engines = Array.isArray(result.engines) ? result.engines.join("、") : "未知"
+      const detail = typeof result.detail === "string" ? `：${result.detail}` : ""
+      setSearxNotice(result.ok
+        ? { text: `检索验证通过：${count} 条，搜索引擎 ${engines}`, tone: "success" }
+        : { text: `检索验证失败：${count} 条，搜索引擎 ${engines}${detail}`, tone: "error" })
+      const status = await api.intelSearxngStatus().catch(() => null)
+      if (status) setSearxStatus(status as SearxngStatus)
+    } catch (e) {
+      setSearxNotice({ text: e instanceof Error ? e.message : String(e), tone: "error" })
+      const status = await api.intelSearxngStatus().catch(() => null)
+      if (status) setSearxStatus(status as SearxngStatus)
+    } finally {
+      setSearxBusy(false)
+    }
   }
 
   const saveFeeds = async (list: IntelFeed[]) => {
@@ -232,17 +319,38 @@ export function IntelSourcePane() {
       <div className="mt-2 border-t pt-3">
         <div className="flex items-center gap-2">
           <span className="font-mono text-sm">高级检索 · SearXNG</span><span className="flex-1" />
-          <span className="text-[10px] text-muted-foreground">{searxStatus ? JSON.stringify(searxStatus) : "状态未知"}</span>
+          <span aria-live="polite" className={cn(
+            "text-[10px]",
+            searxStatus?.running && searxStatus.http ? "text-(--status-running)"
+              : searxStatus ? "text-(--status-error)" : "text-muted-foreground",
+          )}>
+            {searxBusy ? "操作中…" : searxStatus?.running && searxStatus.http ? "运行中 · HTTP 正常"
+              : searxStatus?.running ? "容器运行中 · HTTP 未响应"
+                : searxStatus ? "未运行" : "状态未知"}
+          </span>
+        </div>
+        <div className="mt-1 text-[10px] text-muted-foreground" aria-live="polite">
+          {searxStatus ? <>
+            Docker {searxStatus.docker ? "可用" : "不可用"} · 镜像 {searxStatus.image ? "已缓存" : "不存在"} ·
+            容器 {searxStatus.container ? (searxStatus.running ? "运行中" : "已停止") : "不存在"} ·
+            HTTP {searxStatus.http ? "正常" : "无响应"} · 代理 {searxStatus.proxy_configured
+              ? searxStatus.proxy ? "可达" : "不可达" : "未配置"}
+          </> : "正在读取容器状态…"}
         </div>
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <label className="flex items-center gap-1 text-xs"><input type="checkbox" checked={Boolean(((profile?.search as Record<string, unknown> | undefined)?.searxng as Record<string, unknown> | undefined)?.enabled)} onChange={(e) => profile && setProfile({ ...profile, search: { ...(profile.search ?? {}), searxng: { ...(((profile.search as Record<string, unknown> | undefined)?.searxng as Record<string, unknown> | undefined) ?? {}), enabled: e.target.checked } } })} />启用</label>
           <label className="flex items-center gap-1 text-xs"><input type="checkbox" checked={Boolean(((profile?.search as Record<string, unknown> | undefined)?.searxng as Record<string, unknown> | undefined)?.auto_start)} onChange={(e) => profile && setProfile({ ...profile, search: { ...(profile.search ?? {}), searxng: { ...(((profile.search as Record<string, unknown> | undefined)?.searxng as Record<string, unknown> | undefined) ?? {}), auto_start: e.target.checked } } })} />随下次平台启动</label>
           <Button size="sm" className="h-7 px-2 text-xs" onClick={() => profile && saveProfile(profile)} disabled={!profile || searxBusy}>保存配置</Button>
-          <Button size="sm" variant="outline" onClick={() => void searxAction(api.intelSearxngConnectionTest)} disabled={searxBusy}>测试连接</Button>
-          <Button size="sm" variant="outline" onClick={() => void searxAction(api.intelSearxngValidateSearch)} disabled={searxBusy}>验证检索</Button>
-          <Button size="sm" onClick={() => void searxAction(api.intelSearxngStart)} disabled={searxBusy}>立即启动</Button>
-          <Button size="sm" variant="outline" onClick={() => void searxAction(api.intelSearxngStop)} disabled={searxBusy}>停止</Button>
+          <Button size="sm" variant="outline" onClick={() => void searxAction("connection")} disabled={searxBusy}>测试连接</Button>
+          <Button size="sm" variant="outline" onClick={() => void searxAction("validate")} disabled={searxBusy}>验证检索</Button>
+          <Button size="sm" onClick={() => void searxAction("start")} disabled={searxBusy || Boolean(searxStatus?.running && searxStatus.http)}>{searxBusy ? "处理中…" : "立即启动"}</Button>
+          <Button size="sm" variant="outline" onClick={() => void searxAction("stop")} disabled={searxBusy || !searxStatus?.running}>停止</Button>
         </div>
+        {searxNotice && <p role="status" className={cn(
+          "mt-1 text-[10px]",
+          searxNotice.tone === "success" ? "text-(--status-running)"
+            : searxNotice.tone === "error" ? "text-(--status-error)" : "text-muted-foreground",
+        )}>{searxNotice.text}</p>}
         <p className="mt-1 text-[10px] text-muted-foreground">未启用时检索走内置 DDG 通道。</p>
       </div>
 
