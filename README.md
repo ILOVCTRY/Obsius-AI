@@ -14,15 +14,7 @@
 - **知识与规则**：技能、角色、红线、知识库和项目级约束参与智能体路由与审批。
 - **多模型接入**：支持项目配置的模型供应商，以及 OpenAI/Anthropic 兼容协议；LLM 默认请求超时为 600 秒，传输失败按错误类别有限重试。
 
-## 渗透测试
-
-![](https://raw.githubusercontent.com/ILOVCTRY/note-gen-image-sync/main/blog-img/2026-10-10/image_1791618494_82a.png)
-
-![](https://raw.githubusercontent.com/ILOVCTRY/note-gen-image-sync/main/blog-img/2026-10-10/image_1791618587_1663.png)
-
-![](https://raw.githubusercontent.com/ILOVCTRY/note-gen-image-sync/main/blog-img/2026-10-10/image_1791618654_ffbb.png)
-
-### 启动平台
+## 启动平台
 
 最简单的方式是双击项目根目录的 `启动平台.bat`：
 
@@ -45,6 +37,12 @@ python scripts/serve.py --window
 
 或双击 `启动平台（窗口）.bat`。窗口模式会优先加载静态前端，其次探测 Vite；关闭最后一个 owner 窗口时会优雅停止服务并保存任务现场。停止平台请使用 `停止平台.bat`，它会先请求后端保存现场，再在超时后结束进程。
 
+## 渗透测试
+
+
+
+
+
 ## 样本与逆向分析
 
 ![](https://cdn.jsdelivr.net/gh/ILOVCTRY/note-gen-image-sync@main/blog-img20261014235212027.png)
@@ -53,7 +51,7 @@ python scripts/serve.py --window
 
 ## CTF
 
-![](https://raw.githubusercontent.com/ILOVCTRY/note-gen-image-sync/main/blog-img/2026-10-16/image_1792124131_8bb0.png)
+
 
 ## 系统架构
 
