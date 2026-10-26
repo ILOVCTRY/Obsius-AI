@@ -81,7 +81,7 @@ from core.llm.pseudo_toolcall import (PSEUDO_TC_FINAL_TEXT, PSEUDO_TC_MAX,
 from core.runtime.gateway import ExecutionGateway
 from core.runtime.recovery import EnvironmentUnavailable
 from core.skills import kspec
-from core.skills.experts import load_expert
+from core.skills.experts import expert_exists, load_expert
 from core.skills.registry import SkillRegistry
 from core.skills.rules import build_rules_preamble, rating_profile_active
 
@@ -304,6 +304,8 @@ _CTF_DISPATCH_TOOL_SPEC = {
         "③ **轮次记账**——每派一次记一轮，超过上限自动放弃；\n"
         "④ **执行自证**——worker 上轮声称拿到执行时，本轮任务里会自动附加"
         "「让目标机自证」的题目。\n"
+        "未指定专家时默认使用 worker（仅当 worker 在本轨可用池中）；否则每个方向都必须"
+        "明确指定一个下方可用专家。\n"
         "拿到计划后，**同一轮**用多个 call_expert 并发派出准派的方向（task 直接用"
         "返回里的 task 文本，不要自己改写——里面有代码拼的上下文与自证段）。"),
     "input_schema": {
@@ -2609,6 +2611,7 @@ class ChatTurn:
             return self._ctf_session
         try:
             from core.ctf import pacing as ctf_pacing
+            from core.ctf.ledger import CtfLedger
             from core.ctf.session import CtfSession
             proj = self.bb.get_project(self.project_id) or {}
             cfg = (proj.get("config") or {}).get("ctf") or {}
@@ -2619,7 +2622,16 @@ class ChatTurn:
             p = (ctf_pacing.Pacing.from_deadline(ts, n_tasks=n_tasks,
                                                  started_at=started)
                  if ts else ctf_pacing.Pacing(n_tasks=n_tasks, started_at=started))
-            self._ctf_session = CtfSession(p, holder=f"chat-{self.thread_id[-12:]}")
+            # 持久账本（ctf-direction-ledger，2026-10-25）：把方向组/执行尝试
+            # 落库，`ctf_review` 才能跨轮看见上一轮派过什么。账本构造失败时
+            # 退回纯内存调度（`CtfSession` 的 ledger 允许为 None）。
+            ledger = None
+            try:
+                ledger = CtfLedger(self.bb, self.project_id, self.thread_id)
+            except Exception:  # noqa: BLE001 —— 账本不可用不阻断调度
+                log.exception("chat ctf 账本构造失败 thread=%s", self.thread_id)
+            self._ctf_session = CtfSession(
+                p, holder=f"chat-{self.thread_id[-12:]}", ledger=ledger)
         except Exception:  # noqa: BLE001 —— 调度不可用不阻断主控基本能力
             log.exception("chat ctf 会话构造失败 thread=%s", self.thread_id)
             return None
@@ -2647,6 +2659,8 @@ class ChatTurn:
         dirs = args.get("directions")
         if not isinstance(dirs, list) or not dirs:
             return "[错误] ctf_dispatch 失败：directions 必须是非空数组"
+        available = [e for e in self._delegatable_experts()
+                     if expert_exists(self.packs_root, e, self.track)]
         clean: list[dict] = []
         for d in dirs:
             if not isinstance(d, dict):
@@ -2655,14 +2669,31 @@ class ChatTurn:
             if not sg:
                 continue
             item: dict = {"subgoal": sg}
-            if d.get("expert"):
-                item["expert"] = str(d["expert"]).strip()
+            expert = str(d.get("expert") or "").strip()
+            if expert:
+                item["expert"] = expert
+            elif "worker" in available:
+                item["expert"] = "worker"
             if d.get("need") not in (None, ""):
                 item["need"] = d["need"]
             clean.append(item)
         if not clean:
             return "[错误] ctf_dispatch 失败：所有方向都缺 subgoal"
-        plan = sess.plan(clean, breadth_starved=bool(args.get("breadth_starved")))
+        missing_expert = any(not item.get("expert") for item in clean)
+        if missing_expert:
+            options = ", ".join(available) or "（无）"
+            return ("[错误] ctf_dispatch 失败：worker 未在当前 CTF 轨启用，"
+                    "请为每个方向明确指定可用专家。"
+                    f"当前可用专家：{options}。")
+        invalid = sorted({item["expert"] for item in clean
+                          if item["expert"] not in available})
+        if invalid:
+            options = ", ".join(available) or "（无）"
+            return ("[错误] ctf_dispatch 失败：以下专家未在当前 CTF 轨启用："
+                    f"{', '.join(invalid)}。可用专家：{options}。"
+                    "请改用可用专家，或在专家池中启用服务 ctf 轨的专家。")
+        plan = sess.plan(clean, breadth_starved=bool(args.get("breadth_starved")),
+                         default_expert="worker" if "worker" in available else "")
         if plan.triage_blocked:
             # 分诊闸不是「你这几个方向都不行」，是「先改编排」——不要报
             # 「准派 0 拦下 N」，那会让模型以为方向本身有问题去换措辞。
@@ -2748,11 +2779,14 @@ class ChatTurn:
             return ""
 
     def _tool_ctf_review(self, args: dict) -> str:
-        """`ctf_review`：代码侧 verdict 表 + 互斥表。"""
+        """`ctf_review`：代码侧 verdict 表 + 互斥表 + 持久账本。"""
         sess = self._ctf_session_for()
         if sess is None:
             return ("[错误] ctf_review 不可用：本线程没有装配 CTF 调度器"
                     "（只有 ctf-controller 主控可用）")
+        # 摘要批次的正文生成放在**复核**这一步做（不放派发热路径）：它要读
+        # 一批回执拼文本，是「给人看」的活，不该拖慢 call_expert 的收尾。
+        sess.flush_summaries()
         return sess.review()
 
     # 只读头部字节数：够判魔数（zip=PK\x03\x04、png=\x89PNG、elf=\x7fELF、
@@ -6442,6 +6476,21 @@ class ChatTurn:
         # 回文本，主控可改派或向人类说明。
         sub_id = ""
         artex_intent_id = ""
+        # CTF 执行尝试（ctf-direction-ledger）：spawn **之前**就登记 queued。
+        # 这样「spawn 抛错」「子线程被删」都能落一个明确的终态，而不是在账本里
+        # 留一条永远 running 的记录（那与「还在跑」无法区分）。
+        ctf_run_id = ""
+        if ctf_sess is not None:
+            try:
+                group = ctf_sess.ledger.get_group_by_key(ctf_key_of(task)) \
+                    if ctf_sess.ledger is not None else None
+                if group is not None:
+                    ctf_run_id = ctf_sess.ledger.start_run(
+                        group["id"], expert=expert, task=task)
+            except Exception:  # noqa: BLE001 —— 账本故障不阻断委派
+                log.exception("call_expert ctf 执行尝试登记失败 thread=%s",
+                              self.thread_id)
+                ctf_run_id = ""
         try:
             # ARTEX Intent 记账（**尽力而为**，2026-10-19 事故修复）：
             #
@@ -6491,6 +6540,14 @@ class ChatTurn:
                 # 白名单据此双边放行；主控关着则子代理也不拿该工具。
                 web_search=self._web_search_on())
             sub_id = sub["id"]
+            if ctf_run_id and ctf_sess is not None:
+                # spawn 成功 → running 并挂上子线程。`ask_expert` 续跑要凭这条
+                # 反查方向组（同方向续投不重复计组）。
+                try:
+                    ctf_sess.ledger.attach_run(ctf_run_id, sub_id)
+                except Exception:  # noqa: BLE001
+                    log.exception("call_expert ctf 执行尝试挂线程失败 run=%s",
+                                  ctf_run_id)
             self._emit("chat.spawn", {"thread_id": sub_id, "expert": worker_agent,
                                       "task_head": task[:200],
                                       "asset_ids": assigned})
@@ -6533,6 +6590,12 @@ class ChatTurn:
                                             error="子线程被人工删除")
                 except Exception:  # noqa: BLE001
                     log.exception("ARTEX Intent 取消失败 id=%s", artex_intent_id)
+            if ctf_run_id and ctf_sess is not None:
+                try:
+                    ctf_sess.ledger.finish_run(ctf_run_id, "cancelled",
+                                               error="子线程被人工删除")
+                except Exception:  # noqa: BLE001
+                    log.exception("call_expert ctf 执行尝试取消失败 run=%s", ctf_run_id)
             return (f"专家线程 {sub_id}（{expert}）已被人工删除，本次委派中止。"
                     "需要这个方向请重新委派或改用 artex_plan 建 Intent。")
         except Exception as e:  # noqa: BLE001 —— 专家失败回文本，主控可改派
@@ -6544,6 +6607,12 @@ class ChatTurn:
                                             "failed", error=str(e))
                 except Exception:
                     log.exception("ARTEX Intent 失败回写失败 id=%s", artex_intent_id)
+            if ctf_run_id and ctf_sess is not None:
+                try:
+                    ctf_sess.ledger.finish_run(ctf_run_id, "failed", error=str(e))
+                except Exception:  # noqa: BLE001
+                    log.exception("call_expert ctf 执行尝试失败回写失败 run=%s",
+                                  ctf_run_id)
             return (f"[错误] call_expert 专家线程 {expert} 执行失败：{e}"
                     + (f"（线程 {sub_id} 已留档）" if sub_id else ""))
         if artex_intent_id:
@@ -6591,6 +6660,14 @@ class ChatTurn:
                 })
             except Exception:  # noqa: BLE001 —— 记账失败不阻断派发结果回传
                 log.exception("chat ctf 轮次记账失败 thread=%s", self.thread_id)
+        if ctf_run_id and ctf_sess is not None:
+            # 执行尝试落终态。**放在 ctf 记账之后**：这里的 result 是子线程
+            # 原始回执，与方向组的 `last_summary`（截断后供判据用）同源但不
+            # 同用途——账本要能回答「这一轮到底输出了什么原文」。
+            try:
+                ctf_sess.ledger.finish_run(ctf_run_id, "completed", result=summary)
+            except Exception:  # noqa: BLE001
+                log.exception("call_expert ctf 执行尝试完成回写失败 run=%s", ctf_run_id)
         return (f"专家线程 {sub_id}（{expert}）已完成。\n"
                 f"收尾摘要：\n{summary[:4000]}\n"
                 f"（人类可在工作台打开该线程查看全过程与追问；"
@@ -6686,6 +6763,27 @@ class ChatTurn:
             return (f"[拒绝] ask_expert：线程 {thread_id} 正在运行，"
                     "它的上下文此刻锁在那一轮里，追加消息读不进去。"
                     "等它跑完（工作台显示空闲）再问；或先用 call_expert 派新任务。")
+        # 续跑也要落一条执行尝试，但**挂在原方向组下**（同组不重复计组；
+        # `ctf_summary_items` 的唯一键在 group 上，续跑不会多切一批）。
+        # 反查失败（不是 CTF 派发的子线程 / 账本不可用）就静默跳过。
+        #
+        # **`review=true` 不记账**：那条通道的契约是「只读复盘、无副作用」——
+        # 它连写黑板工具都被剥掉了，却在这里留一条执行尝试，会让「已解出后
+        # 复盘」凭空改变方向组的尝试次数，账本与事实不符。
+        ctf_run_id = ""
+        ctf_sess = (self._ctf_session_for()
+                    if getattr(self, "is_ctf_controller", False) else None)
+        if not review and ctf_sess is not None and ctf_sess.ledger is not None:
+            try:
+                group = ctf_sess.ledger.group_for_sub_thread(thread_id)
+                if group is not None:
+                    ctf_run_id = ctf_sess.ledger.start_run(
+                        group["id"], expert=str(row.get("agent_id") or ""),
+                        task=message)
+                    ctf_sess.ledger.attach_run(ctf_run_id, thread_id)
+            except Exception:  # noqa: BLE001 —— 账本故障不阻断续跑
+                log.exception("ask_expert ctf 执行尝试登记失败 thread=%s", thread_id)
+                ctf_run_id = ""
         try:
             sub_turn = ChatTurn(
                 bb=self.bb, llm=self.llm, project_id=self.project_id,
@@ -6719,12 +6817,28 @@ class ChatTurn:
         try:
             reply = sub_turn.run(message)
         except chat_store.ThreadGone:
+            if ctf_run_id and ctf_sess is not None:
+                try:
+                    ctf_sess.ledger.finish_run(ctf_run_id, "cancelled",
+                                               error="子线程被人工删除")
+                except Exception:  # noqa: BLE001
+                    log.exception("ask_expert ctf 尝试取消失败 run=%s", ctf_run_id)
             return (f"专家线程 {thread_id} 已被人工删除，本次续跑中止。"
                     "需要这个方向请重新 call_expert 派发。")
         except Exception as e:  # noqa: BLE001 —— 续跑失败回文本，主控可改道
             log.exception("ask_expert 续跑失败 thread=%s", thread_id)
+            if ctf_run_id and ctf_sess is not None:
+                try:
+                    ctf_sess.ledger.finish_run(ctf_run_id, "failed", error=str(e))
+                except Exception:  # noqa: BLE001
+                    log.exception("ask_expert ctf 尝试失败回写失败 run=%s", ctf_run_id)
             return (f"[错误] ask_expert 续跑失败：{e}"
                     f"（线程 {thread_id} 已留档，可改用 call_expert 重派）")
+        if ctf_run_id and ctf_sess is not None:
+            try:
+                ctf_sess.ledger.finish_run(ctf_run_id, "completed", result=reply)
+            except Exception:  # noqa: BLE001
+                log.exception("ask_expert ctf 尝试完成回写失败 run=%s", ctf_run_id)
         expert = str(row.get("agent_id") or "")
         return (f"专家线程 {thread_id}（{expert}）已续跑完成。\n"
                 f"答复：\n{reply[:4000]}\n"

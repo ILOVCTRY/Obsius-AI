@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useState, type MouseEvent } from "react"
 import { api, pollJob } from "@/lib/api"
 import type {
   IntelArticle, IntelBriefMeta, IntelLearningProfile, IntelOverview,
-  IntelPlan, IntelPlanMeta, IntelProfile,
+  IntelPlan, IntelPlanMeta, IntelProfile, IntelSearchHistoryItem,
 } from "@/lib/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -88,6 +88,10 @@ export function IntelView() {
   const [searchHasMore, setSearchHasMore] = useState(false)
   const [searchBusy, setSearchBusy] = useState(false)
   const [searchError, setSearchError] = useState("")
+  // 检索降级/过滤的非致命提示（引擎部分不可用、丢弃垃圾条数）。
+  // 与 searchError 分开：这里仍有结果可看，只是需要解释为什么少。
+  const [searchNotice, setSearchNotice] = useState("")
+  const [searchHistory, setSearchHistory] = useState<IntelSearchHistoryItem[]>([])
   const [filter, setFilter] = useState<{ kind?: string; unread?: boolean; starred?: boolean }>({})
   const [refreshing, setRefreshing] = useState(false)
   // E10：学习档案（三来源聚合）+ 周计划（planWeek=""=最新一份）
@@ -97,6 +101,25 @@ export function IntelView() {
   const [planWeek, setPlanWeek] = useState<string>("")
   const [planBusy, setPlanBusy] = useState(false)
   const [copied, setCopied] = useState(false)
+
+  // 把「为什么结果少」讲清楚：引擎被限流/部分不可用、以及丢弃了多少垃圾页。
+  // 不给解释的话，用户只会看到数量变少却不知道是代码问题还是外部限流。
+  const buildSearchNotice = (response: {
+    backend?: string; errors?: string[]; dropped_spam?: number
+  }): string => {
+    const parts: string[] = []
+    const errors = (response.errors ?? []).filter(Boolean)
+    if (errors.length) {
+      parts.push(`部分检索不可用：${errors.join("；")}`)
+    } else if (response.backend === "searxng+throttled") {
+      // 后端明确回报「有扩展词但处于冷却期」，不是猜的
+      parts.push("引擎冷却中，本次仅单轮检索；稍后再搜可获得更多结果")
+    }
+    if (response.dropped_spam && response.dropped_spam > 0) {
+      parts.push(`已过滤 ${response.dropped_spam} 条垃圾/不相关内容`)
+    }
+    return parts.join(" · ")
+  }
 
   const loadOverview = useCallback(() =>
     api.intelOverview().then(setOverview).catch(() => {}), [])
@@ -134,6 +157,31 @@ export function IntelView() {
   useEffect(() => { loadPlan(planWeek) }, [planWeek, loadPlan])
   useEffect(() => { loadArticles() }, [loadArticles])
   useEffect(() => { loadBrief(briefDate) }, [briefDate, loadBrief])
+  useEffect(() => {
+    let cancelled = false
+    const restoreLatestSearch = async () => {
+      try {
+        const response = await api.intelSearchHistory()
+        const items = response.items ?? []
+        if (cancelled) return
+        setSearchHistory(items)
+        const latest = items[0]
+        if (!latest) return
+        const saved = await api.intelSearchHistoryGet(latest.cache_key, 10, 0)
+        if (cancelled) return
+        setSearchQuery(saved.query || latest.query)
+        setSearchResults(saved.results ?? [])
+        setSearchCacheKey(saved.cache_key ?? latest.cache_key)
+        setSearchTotal(saved.total ?? latest.total)
+        setSearchOffset(saved.results?.length ?? 0)
+        setSearchHasMore(Boolean(saved.has_more))
+      } catch {
+        // A missing or expired history entry must not block the rest of the view.
+      }
+    }
+    void restoreLatestSearch()
+    return () => { cancelled = true }
+  }, [])
 
   const refresh = useCallback(async () => {
     // 已有在跑的一轮（含上一个组件实例发起的）→ 只跟随，不重复提交
@@ -173,6 +221,7 @@ export function IntelView() {
     if (!searchQuery.trim() || searchBusy) return
     setSearchBusy(true)
     setSearchError("")
+    setSearchNotice("")
     try {
       const response = await api.intelSearch({ q: searchQuery.trim(), limit: 10, refresh })
       setSearchResults(response.results ?? [])
@@ -180,8 +229,30 @@ export function IntelView() {
       setSearchTotal(response.total ?? response.results?.length ?? 0)
       setSearchOffset(response.results?.length ?? 0)
       setSearchHasMore(Boolean(response.has_more))
+      setSearchQuery(response.query || searchQuery.trim())
+      setSearchNotice(buildSearchNotice(response))
+      api.intelSearchHistory().then((history) => setSearchHistory(history.items ?? [])).catch(() => {})
     } catch (e) { setSearchError(e instanceof Error ? e.message : String(e)) }
     finally { setSearchBusy(false) }
+  }
+
+  const restoreSearch = async (item: IntelSearchHistoryItem) => {
+    if (searchBusy) return
+    setSearchBusy(true)
+    setSearchError("")
+    // 历史结果是当初检索的快照，不带本次的限流/过滤信息，清掉免得误导。
+    setSearchNotice("")
+    try {
+      const response = await api.intelSearchHistoryGet(item.cache_key, 10, 0)
+      setSearchQuery(response.query || item.query)
+      setSearchResults(response.results ?? [])
+      setSearchCacheKey(response.cache_key ?? item.cache_key)
+      setSearchTotal(response.total ?? item.total)
+      setSearchOffset(response.results?.length ?? 0)
+      setSearchHasMore(Boolean(response.has_more))
+    } catch (e) {
+      setSearchError(e instanceof Error ? e.message : String(e))
+    } finally { setSearchBusy(false) }
   }
 
   const loadMoreSearch = async () => {
@@ -195,6 +266,51 @@ export function IntelView() {
       setSearchHasMore(Boolean(response.has_more))
     } catch (e) { setSearchError(e instanceof Error ? e.message : String(e)) }
     finally { setSearchBusy(false) }
+  }
+
+  const openSearchResult = async (event: MouseEvent<HTMLAnchorElement>, article: IntelArticle) => {
+    if (event.button !== 0 && event.button !== 1) return
+    let source: URL
+    try { source = new URL(article.url) } catch { return }
+    if (source.hostname !== "news.google.com" || !/^\/(?:rss\/)?articles\/[A-Za-z0-9_-]+\/?$/.test(source.pathname)) return
+    event.preventDefault()
+    setSearchError("")
+    // 桌面壳的 setWindowOpenHandler 对任何 window.open 一律 deny（返回 null），
+    // 所以不能靠「先开空白页再改 location」承接异步解析——那会被误报成弹窗拦截。
+    // 有原生通道就先解析、再交系统浏览器；纯浏览器环境才回落到新标签页。
+    const nativeOpen = window.desktopBrowser?.openExternal
+    const target = nativeOpen ? null : window.open("about:blank", "_blank")
+    if (!nativeOpen && !target) {
+      setSearchError("浏览器阻止了新窗口，请允许本站弹出窗口后重试")
+      return
+    }
+    if (target) target.opener = null
+    try {
+      const result = await api.intelResolveNewsUrl(article.url)
+      const resolved = new URL(result.url)
+      if (!["http:", "https:"].includes(resolved.protocol) || resolved.hostname === "news.google.com") {
+        throw new Error("Google News 未返回有效的来源文章链接")
+      }
+      if (nativeOpen) {
+        const opened = await nativeOpen(resolved.toString())
+        if (!opened) throw new Error("系统浏览器未能打开该地址")
+      } else {
+        target!.location.replace(resolved.toString())
+      }
+    } catch (error) {
+      target?.close()
+      // Google 中转链接在浏览器里本身也打不开（实测显示「无效重定向」），
+      // 解析被限流时唯一可靠的出口是 RSS 给出的发布方站点。
+      const site = article.source_site?.trim()
+      let hint = ""
+      if (site) {
+        try { hint = new URL(site).hostname } catch { hint = "" }
+      }
+      const reason = error instanceof Error ? error.message : String(error)
+      setSearchError(hint
+        ? `${reason}。发布方为 ${article.source || hint}（${hint}），可在其站内搜索标题。`
+        : reason)
+    }
   }
 
   const toggle = (id: string, patch: { read?: boolean; starred?: boolean }) => {
@@ -293,16 +409,31 @@ export function IntelView() {
             <Button size="sm" type="button" variant="outline" disabled={searchBusy || !searchQuery.trim()} onClick={() => void runSearch(true)}>联网重查</Button>
           </form>
           {searchError && <p className="mt-2 text-xs text-(--status-error)">{searchError}</p>}
+          {searchHistory.length > 0 && <div className="mt-2 flex flex-wrap items-center gap-1.5">
+            <span className="text-[10px] text-muted-foreground">最近搜索</span>
+            {searchHistory.map((item) => <Button key={item.cache_key} type="button" size="sm" variant="outline"
+              className="h-6 max-w-56 truncate px-2 text-[10px]" disabled={searchBusy}
+              title={`${item.query} · ${item.total} 条 · ${fmtDateTimeMin(item.created_at)}`}
+              onClick={() => void restoreSearch(item)}>{item.query} ({item.total})</Button>)}
+          </div>}
           <div className="mt-2 space-y-1.5">
             {searchResults.map((a, i) => (
               <div key={`${a.url}-${i}`} className="rounded border p-2 text-xs">
                 <div className="flex flex-wrap items-center gap-2 text-[10px] text-muted-foreground"><span>{a.source || a.via || "未知来源"}</span><span>{a.published_day || a.published_at || (a.date_known === false ? "发布日期未提供 · 搜索结果位于近半年查询窗" : "日期未知")}</span><span>综合 {a.ranking_score ?? "—"}</span><span>内容 {a.score ?? "—"}</span></div>
-                <a href={a.url} target="_blank" rel="noreferrer" className="mt-1 block font-medium hover:text-primary">{a.title}</a>
+                <a href={a.url} target="_blank" rel="noreferrer" onClick={(event) => void openSearchResult(event, a)} className="mt-1 block font-medium hover:text-primary">{a.title}</a>
                 {a.summary && <p className="mt-0.5 line-clamp-2 text-[10px] text-muted-foreground">{a.summary}</p>}
               </div>
             ))}
             {!searchResults.length && <p className="text-xs text-muted-foreground">输入关键词后开始检索</p>}
-            {searchResults.length > 0 && <p className="text-[10px] text-muted-foreground">已显示 {searchResults.length} / {searchTotal} 条 · 近半年 · {searchResults[0]?.via === "google_news" ? "Google News" : searchResults[0]?.via === "searxng" ? "SearXNG" : "本地与联网结果"}</p>}
+            {searchResults.length > 0 && <p className="text-[10px] text-muted-foreground">已显示 {searchResults.length} / {searchTotal} 条 · 近半年 · {(() => {
+              const via = searchResults[0]?.via
+              if (via === "google_news") return "Google News"
+              if (via === "searxng") return "SearXNG"
+              if (via === "searxng+expand") return "SearXNG（多角度扩展）"
+              if (via === "searxng+throttled") return "SearXNG（引擎冷却）"
+              return "本地与联网结果"
+            })()}</p>}
+            {searchNotice && <p className="text-[10px] text-amber-600 dark:text-amber-500">{searchNotice}</p>}
           </div>
           {searchHasMore && <Button size="sm" variant="outline" className="mt-2" disabled={searchBusy} onClick={() => void loadMoreSearch()}>{searchBusy ? "加载中…" : "加载更多"}</Button>}
         </TabsContent>

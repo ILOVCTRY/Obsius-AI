@@ -409,9 +409,14 @@ export interface IntentInfo {
 }
 
 // 项目级意图推导图（GET /api/projects/{pid}/intent-graph，2026-10-13 逆向轨）：
-// 样本 → 意图 → 收尾（发现|死路），只读逻辑层（无执行层 attempts）
-export type IntentGraphNodeType = "sample" | "intent" | "finding"
-export type IntentGraphEdgeKind = "derive" | "outcome" | "bypass"
+// 样本 → 意图 → 收尾（发现|死路），只读逻辑层（无执行层 attempts）。
+//
+// `direction`（ctf-direction-ledger，2026-10-25）：CTF 主控派出去的一条**方向组**。
+// 它**不是** intent——intent 是「可证伪假设、必须收尾为 vuln/finding/dead_end」，
+// 而方向组是「派过的一条活」，可能只是执行失败或被人工删线程。两层分开才能让
+// 「发现」这个词保持证据含义。边 `direction` 只从题目（sample）指向方向组。
+export type IntentGraphNodeType = "sample" | "intent" | "finding" | "direction"
+export type IntentGraphEdgeKind = "derive" | "outcome" | "bypass" | "direction"
 
 export interface IntentGraphNode {
   id: string
@@ -437,6 +442,19 @@ export interface IntentGraphNode {
   severity?: string
   category?: string
   vuln_class?: string
+  // direction（CTF 方向组）：subgoal 是方向原文，attempts 是累计执行次数，
+  // last_run 只给最近一次尝试（重试细节去工作台开子线程看）
+  subgoal?: string
+  expert?: string
+  attempts?: number
+  flags_got?: number
+  terminal?: boolean
+  last_summary?: string
+  last_run?: {
+    status: string
+    sub_thread_id: string
+    at: string
+  }
 }
 
 export interface IntentGraphEdge {
@@ -451,6 +469,7 @@ export interface IntentGraph {
   counts: {
     samples: number; intents: number; open: number
     closed: number; dead_end: number; findings: number
+    directions?: number                 // 仅在存在方向组时出现
   }
 }
 
@@ -1835,6 +1854,8 @@ export interface IntelArticle {
   published_at: string
   published_day?: string
   via?: string
+  // Google News RSS <source url>：发布方站点根地址，解析中转链接失败时的兜底入口
+  source_site?: string
   ranking_score?: number
   date_known?: boolean
   fetched_at: string
@@ -1861,6 +1882,15 @@ export interface IntelFeed {
   name: string
   url: string
   kind: string
+}
+
+export interface IntelSearchHistoryItem {
+  id: string
+  query: string
+  cache_key: string
+  total: number
+  created_at: string
+  meta: { backend?: string; window_label?: string; errors?: string[] }
 }
 
 export interface IntelProfile {

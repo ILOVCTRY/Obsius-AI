@@ -348,16 +348,14 @@ class ProxyServer:
             return remote_socket
         except Exception as e:
             self.log(f"[!] 上游代理 {addr} 错误: {e}")
-            should_failover, failure_count = self._record_target_failure(
-                target_host, target_port
-            )
-            if not should_failover:
-                if self._target_failure_enabled:
-                    self.log(
-                        f"[目标失败] {self._target_key(target_host, target_port)} "
-                        f"连续失败 {failure_count}/{self._target_failure_threshold}，暂不切换。"
-                    )
-                return None
+            if self._target_failure_enabled:
+                _, failure_count = self._record_target_failure(
+                    target_host, target_port
+                )
+                self.log(
+                    f"[目标失败] {self._target_key(target_host, target_port)} "
+                    f"当前请求立即排除 {addr} 并尝试其它出口（连续失败 {failure_count} 次）。"
+                )
             return self._try_domain_failover(
                 target_host, target_port, failed_proxy=addr
             )

@@ -12,7 +12,7 @@ import type {
   KbSearchHit, KbSourceTree,
   KbWriteResult, LlmProvider, McpServer, ModelInfo, ExecutorLlmView,
   IntelArticle, IntelBrief, IntelBriefMeta,
-  IntelFeed, IntelOverview, IntelProfile, IntelVaultConfig, IntelVaultInfo, VaultNode,
+  IntelFeed, IntelOverview, IntelProfile, IntelSearchHistoryItem, IntelVaultConfig, IntelVaultInfo, VaultNode,
   VaultSearchHit, IntelLearningProfile, IntelPlan, IntelPlanMeta,
   Expert, ExpertBody, GatewayConfig, CapabilityInventory, OrchPersona, OwnerRule, PackRole, PhaseGoal, PhaseInfo, ProjectDetail, ProjectMeta, RatingRule,
   AgentToolsResponse,
@@ -66,6 +66,45 @@ async function httpUpload<T>(path: string, form: FormData, method = "POST"): Pro
   const r = await fetch(path, { method, body: form })
   if (!r.ok) return raise(r)
   return r.json() as Promise<T>
+}
+
+/** 附件分片大小：必须与服务端 `ATTACHMENT_CHUNK_BYTES` 一致——服务端建会话时
+ *  会按它校验 `total_chunks`，对不上直接 422（宁可立刻报错，也不要拼出个
+ *  「大小对、内容错」的文件）。 */
+export const ATTACHMENT_CHUNK_BYTES = 16 * 1024 * 1024
+
+/** 超过这个体量就走分片：单请求没有进度、不能续传，几 GB 必挂。
+ *  取 32MB 而不是服务端的 64MB 上限——留一半余量，让"接近上限"的文件也走
+ *  能看进度的那条路。 */
+export const ATTACHMENT_CHUNKED_THRESHOLD = 32 * 1024 * 1024
+
+export interface AttachmentUploadSession {
+  upload_id: string
+  filename: string
+  total_size: number
+  total_chunks: number
+  chunk_bytes?: number
+  status: "uploading" | "complete" | "failed"
+  received_chunks?: number[]
+  received_size?: number
+}
+
+/** 把任意异常折成一句能给用户看的话。
+ *
+ *  `ApiError` 的 message 形如 `413: 文件超过 64MB 上限`——状态码对用户没意义，
+ *  去掉前缀只留服务端那句话；网络中断（TypeError: Failed to fetch）要换成
+ *  人能读懂的中文，否则界面上一片 "Failed to fetch"。 */
+export function errText(e: unknown): string {
+  if (e instanceof ApiError) {
+    const m = /^\d{3}:\s*(.*)$/s.exec(e.message)
+    return (m?.[1] ?? e.message).trim() || `请求失败（${e.status}）`
+  }
+  if (e instanceof Error) {
+    if (/failed to fetch|networkerror|load failed/i.test(e.message)) return "网络中断，请重试"
+    if (e.name === "AbortError") return "已取消"
+    return e.message
+  }
+  return String(e ?? "上传失败")
 }
 
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
@@ -416,11 +455,81 @@ export const api = {
     form.append("file", file)
     return httpUpload<ArtifactUploadResponse>(`/api/projects/${pid}/artifacts/upload`, form)
   },
-  // 附件随发（2026-09-19）：≤64MB 任意类型，落 artifact（kind=attachment，同 sha 服务端去重）
+  // 附件随发（2026-09-19）：任意类型，落 artifact（kind=attachment，同 sha 服务端去重）。
+  // **仅小文件走这条**（≤64MB 一次 body 到位）；大文件走 uploadAttachmentResumable，
+  // 否则几 GB 的 pcapng 会被 413 挡死，而且全程没有进度。
   uploadAttachment: (pid: string, file: File) => {
     const form = new FormData()
     form.append("file", file)
     return httpUpload<AttachmentInfo>(`/api/projects/${pid}/attachments`, form)
+  },
+  /** 附件上传总入口（2026-10-25）：按体积自动选路，调用方不用关心两种协议。
+   *
+   * - < 32MB → 单请求（一次往返，快）
+   * - ≥ 32MB → 分片续传（16MB/片，带进度，断线可续）
+   *
+   * 单请求若仍撞 413（比如服务端上限被调小），**自动降级重试分片**——用户
+   * 永远不该看到「文件超过 64MB 上限」这种把人堵死的话。 */
+  uploadAttachmentAuto: async (
+    pid: string, file: File,
+    opts?: { onProgress?: (sent: number, total: number) => void
+             signal?: AbortSignal },
+  ): Promise<AttachmentInfo> => {
+    const chunked = () => api.uploadAttachmentResumable(pid, file, opts)
+    if (file.size >= ATTACHMENT_CHUNKED_THRESHOLD) return chunked()
+    try {
+      const att = await api.uploadAttachment(pid, file)
+      opts?.onProgress?.(file.size, file.size)
+      return att
+    } catch (e) {
+      // 只有"体量太大"值得换路；其它错误（422 空文件、权限、网络断）原样抛，
+      // 否则会把一件明确的小错误变成一次几 GB 的无效重传。
+      if (e instanceof ApiError && e.status === 413) return chunked()
+      throw e
+    }
+  },
+  /** 附件分片续传（2026-10-25）：不设大小上限，逐片 16MB，带进度。
+   *
+   * 与样本包那条 `uploadSamplePackageResumable` 的差别：那边 complete 会跑
+   * `import_source`（解压/扫盘/生成分析包），这边只是把字节原样落到
+   * `artifacts/attachments/`，回的是 attachment artifact。共用一套 UI，
+   * **协议不共用**（分片大小 16MB 是服务端 `ATTACHMENT_CHUNK_BYTES` 的对端常量）。 */
+  uploadAttachmentResumable: async (
+    pid: string, file: File,
+    opts?: { onProgress?: (sent: number, total: number) => void
+             onSession?: (uploadId: string) => void
+             signal?: AbortSignal },
+  ): Promise<AttachmentInfo> => {
+    const chunkSize = ATTACHMENT_CHUNK_BYTES
+    const totalChunks = Math.max(1, Math.ceil(file.size / chunkSize))
+    const session = await http<AttachmentUploadSession>(
+      `/api/projects/${pid}/attachments/uploads`, {
+        method: "POST",
+        body: JSON.stringify({ filename: file.name, total_size: file.size,
+          total_chunks: totalChunks }),
+      })
+    opts?.onSession?.(session.upload_id)
+    // 续传：开局问一次已收到哪些片（刷新/断线后不必从头再传一遍）
+    const status = await http<AttachmentUploadSession>(
+      `/api/projects/${pid}/attachments/uploads/${session.upload_id}`)
+    const received = new Set(status.received_chunks ?? [])
+    let sent = 0
+    for (let index = 0; index < totalChunks; index += 1) {
+      const start = index * chunkSize
+      const end = Math.min(file.size, start + chunkSize)
+      if (!received.has(index)) {
+        const response = await fetch(
+          `/api/projects/${pid}/attachments/uploads/${session.upload_id}/chunks/${index}`,
+          { method: "PUT", headers: { "Content-Type": "application/octet-stream" },
+            body: file.slice(start, end), signal: opts?.signal })
+        if (!response.ok) return raise(response)
+      }
+      sent += end - start
+      opts?.onProgress?.(sent, file.size)
+    }
+    return http<AttachmentInfo>(
+      `/api/projects/${pid}/attachments/uploads/${session.upload_id}/complete`,
+      { method: "POST" })
   },
   // 附件下载（原始文件名经 content-disposition）
   downloadArtifact: async (pid: string, aid: string) => {
@@ -989,8 +1098,14 @@ export const api = {
   intelSearch: (params: { q: string; limit?: number; refresh?: boolean; cache_key?: string; offset?: number }) => {
     const qs = new URLSearchParams({ q: params.q, limit: String(params.limit ?? 10), refresh: String(params.refresh ?? false), offset: String(params.offset ?? 0) })
     if (params.cache_key) qs.set("cache_key", params.cache_key)
-    return http<{ results: IntelArticle[]; total?: number; has_more?: boolean; cache_key?: string; backend?: string; window_label?: string }>(`/api/intel/search?${qs}`)
+    return http<{ results: IntelArticle[]; total?: number; has_more?: boolean; cache_key?: string; backend?: string; window_label?: string; query?: string; created_at?: string; errors?: string[]; dropped_spam?: number }>(`/api/intel/search?${qs}`)
   },
+  intelSearchHistory: () => http<{ items: IntelSearchHistoryItem[] }>("/api/intel/search/history"),
+  intelSearchHistoryGet: (cacheKey: string, limit = 10, offset = 0) =>
+    http<{ results: IntelArticle[]; total?: number; has_more?: boolean; cache_key?: string; backend?: string; window_label?: string; query?: string; created_at?: string }>(
+      `/api/intel/search/history/${encodeURIComponent(cacheKey)}?limit=${limit}&offset=${offset}`),
+  intelResolveNewsUrl: (url: string) =>
+    http<{ url: string }>(`/api/intel/search/resolve?url=${encodeURIComponent(url)}`),
   intelSearxngStatus: () => http<Record<string, unknown>>("/api/intel/searxng/status"),
   intelSearxngConnectionTest: () => http<Record<string, unknown>>("/api/intel/searxng/connection-test", { method: "POST" }),
   intelSearxngValidateSearch: () => http<Record<string, unknown>>("/api/intel/searxng/validate-search", { method: "POST" }),

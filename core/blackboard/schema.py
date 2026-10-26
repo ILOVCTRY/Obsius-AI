@@ -9,7 +9,13 @@
 
 import sqlite3
 
-SCHEMA_VERSION = 49
+SCHEMA_VERSION = 50
+
+# v49→v50（CTF 方向组账本，ctf-direction-ledger，2026-10-25）：新增
+# ctf_session_state / ctf_direction_groups / ctf_direction_runs /
+# ctf_summary_batches / ctf_summary_items 五张表。表注释在 DDL 里（建表处
+# 就近说明职责与幂等键）。纯建表、无 ALTER，旧库打开即建；**存量方向不回溯
+# 补建**——内存账本从未落库，凭消息文本反推会把「讨论过」当成「派过」。
 
 # v48→v49（主控改名，pentest-controller，2026-10-25）：chat_threads.agent_id 的
 # 存量值 `chat-orchestrator` 归一为 `pentest-controller`。该列的取值直接决定
@@ -644,6 +650,107 @@ CREATE TABLE IF NOT EXISTS chat_threads (
 CREATE INDEX IF NOT EXISTS idx_chat_threads_agent
     ON chat_threads(project_id, agent_id, updated_at);
 
+-- v49→v50（CTF 方向组账本，ctf-direction-ledger，2026-10-25）：把 CTF 主控的
+-- 「派过哪些方向、每条跑了几次、有没有拿到东西」从 `ChatTurn` 内存搬到库里。
+--
+-- **为什么必须落库**：`CtfSession.dirs`/`rounds` 是实例内存。新一轮聊天新建
+-- `ChatTurn` → 新建 `CtfSession` → `ctf_review` 报「尚无方向记账」，上一轮
+-- 明明派过；`rounds` 归零还会让「无条件首轮分诊」闸**再拦一次**（复盘里 WP
+-- 深挖被分诊闸拒绝就是这个）。
+--
+-- 三层结构，职责不重叠：
+--   ctf_session_state   —— 线程级轮次（只为恢复分诊闸，不含方向）
+--   ctf_direction_groups—— **逻辑解题方向**（同方向重试/续跑不重复计组）
+--   ctf_direction_runs  —— 每次真实 spawn 一条执行尝试
+--   ctf_summary_batches/items —— 每新增 5 个**终态**方向组切一批压缩摘要
+--
+-- **不复用 intents/artex_intents**：前者是「可证伪假设及其收尾」，要求证据链；
+-- 后者是 ARTEX Planner 的任务生命周期。把普通 CTF 派发塞进去会让「发现」这个
+-- 词贬值，还会在任务树里造出没有 Planner/目标的假任务。
+CREATE TABLE IF NOT EXISTS ctf_session_state (
+    project_id  TEXT NOT NULL REFERENCES projects(id),
+    thread_id   TEXT NOT NULL,                  -- 主控线程（CTF 会话即一个线程）
+    rounds      INTEGER NOT NULL DEFAULT 0,     -- 派发轮数（含被拦的），跨轮恢复
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY(project_id, thread_id)
+);
+
+CREATE TABLE IF NOT EXISTS ctf_direction_groups (
+    id           TEXT PRIMARY KEY,
+    project_id   TEXT NOT NULL REFERENCES projects(id),
+    thread_id    TEXT NOT NULL,
+    challenge_id TEXT NOT NULL DEFAULT '',      -- 题目归属（''=未绑定；跨题不混）
+    key          TEXT NOT NULL,                 -- 归一键（core/ctf/lease.py::direction_key）
+    subgoal      TEXT NOT NULL DEFAULT '',      -- 方向原文（展示用，键是 2-gram 碎片）
+    expert       TEXT NOT NULL DEFAULT '',
+    need         INTEGER,                       -- 该方向须拿几条 flag（NULL=未声明）
+    status       TEXT NOT NULL DEFAULT 'open',  -- open/requeued/solved/dropped/retired
+    -- terminal 是**派生位**（status ∈ 终态即 1），单独存是为了让「每新增 5 组」
+    -- 的查询走索引而不必在 SQL 里枚举状态；写入点只有一个（ledger.update_group）。
+    terminal     INTEGER NOT NULL DEFAULT 0,
+    passes       INTEGER NOT NULL DEFAULT 0,    -- 累计执行次数
+    correct      INTEGER NOT NULL DEFAULT 0,
+    flags_got    INTEGER NOT NULL DEFAULT 0,    -- 由 flag 台账差值写入，不信自述
+    last_summary TEXT NOT NULL DEFAULT '',      -- 最近一次回执（截断）
+    first_epoch  REAL NOT NULL DEFAULT 0.0,
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL,
+    UNIQUE(project_id, thread_id, key)
+);
+CREATE INDEX IF NOT EXISTS idx_ctf_groups_thread
+    ON ctf_direction_groups(project_id, thread_id, status);
+CREATE INDEX IF NOT EXISTS idx_ctf_groups_terminal
+    ON ctf_direction_groups(project_id, thread_id, terminal);
+
+CREATE TABLE IF NOT EXISTS ctf_direction_runs (
+    id            TEXT PRIMARY KEY,
+    project_id    TEXT NOT NULL REFERENCES projects(id),
+    thread_id     TEXT NOT NULL,
+    group_id      TEXT NOT NULL REFERENCES ctf_direction_groups(id) ON DELETE CASCADE,
+    sub_thread_id TEXT NOT NULL DEFAULT '',     -- spawn 出的子线程（ask_expert 据此挂回原组）
+    expert        TEXT NOT NULL DEFAULT '',
+    task          TEXT NOT NULL DEFAULT '',
+    -- queued → running → completed/failed/cancelled。失败路径必须落终态，否则
+    -- 账本里会留一条永远 running 的记录，与「线程被删」无法区分。
+    status        TEXT NOT NULL DEFAULT 'queued',
+    result        TEXT NOT NULL DEFAULT '',
+    error         TEXT NOT NULL DEFAULT '',
+    started_at    TEXT,
+    finished_at   TEXT,
+    created_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ctf_runs_group
+    ON ctf_direction_runs(project_id, group_id);
+CREATE INDEX IF NOT EXISTS idx_ctf_runs_subthread
+    ON ctf_direction_runs(project_id, sub_thread_id);
+
+CREATE TABLE IF NOT EXISTS ctf_summary_batches (
+    id           TEXT PRIMARY KEY,
+    project_id   TEXT NOT NULL REFERENCES projects(id),
+    thread_id    TEXT NOT NULL,
+    challenge_id TEXT NOT NULL DEFAULT '',
+    seq          INTEGER NOT NULL,              -- 线程内递增批次号（从 1 起）
+    status       TEXT NOT NULL DEFAULT 'pending',  -- pending/running/completed/failed
+    group_ids    TEXT NOT NULL DEFAULT '[]',    -- 冗余快照（items 是权威关联）
+    summary      TEXT NOT NULL DEFAULT '',
+    error        TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL,
+    UNIQUE(project_id, thread_id, seq)
+);
+
+-- **幂等键就在这张表上**：group_id 全局唯一 → 同一方向组永远只能进一个批次。
+-- 并发下两个线程同时判定「够 5 个」时，后插入的一方整批回滚，不会重复摘要。
+CREATE TABLE IF NOT EXISTS ctf_summary_items (
+    batch_id   TEXT NOT NULL REFERENCES ctf_summary_batches(id) ON DELETE CASCADE,
+    group_id   TEXT NOT NULL REFERENCES ctf_direction_groups(id) ON DELETE CASCADE,
+    project_id TEXT NOT NULL REFERENCES projects(id),
+    PRIMARY KEY(batch_id, group_id),
+    UNIQUE(group_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ctf_summary_items_batch
+    ON ctf_summary_items(project_id, batch_id);
+
 -- v25 对话消息（K9）：API 消息数组按序落库——user / assistant（content=文本段，
 -- tool_calls=JSON [{id,name,args}]）/ tool（content=结果文本，tool_use_id 对应）。
 -- 重放即 LLM messages 数组（assistant 行重建 tool_use 块）；工具结果全文存此，
@@ -861,7 +968,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
       子代理继承，见文件头版本注释）。历史行默认 0 不回填。
     - v47→v48：chat_threads 幂等补 thinking_effort（线程级思考强度，''=跟随
       供应商配置，见文件头版本注释）。历史行保持空值——空 ≠ high，语义是
-      「没覆写」，回填 high 会把「跟随供应商」变成「钉死 high」。"""
+      「没覆写」，回填 high 会把「跟随供应商」变成「钉死 high」。
+    - v49→v50：ctf_session_state / ctf_direction_groups / ctf_direction_runs /
+      ctf_summary_batches / ctf_summary_items 由 DDL 的 IF NOT EXISTS 直接建表
+      （CTF 方向组账本，无 ALTER，旧库打开即建）。**历史方向不回溯补建**：内存
+      账本从未落库，凭消息文本反推方向会把「讨论过」当成「派过」；需要历史
+      归档时另做显式导入。"""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(projects)")}
     if "track" not in cols:
         conn.execute("ALTER TABLE projects ADD COLUMN track TEXT NOT NULL DEFAULT ''")

@@ -28,6 +28,7 @@ const Y_GAP = 20
 const SAMPLE_H = 64
 const INTENT_H = 132
 const FINDING_H = 72
+const DIRECTION_H = 96
 
 const SEV_COLOR: Record<string, string> = {
   critical: "var(--viz-sev-critical)", high: "var(--viz-sev-high)",
@@ -44,8 +45,22 @@ const OUTCOME_BADGE: Record<string, { color: string; background: string; label: 
   dead_end: { color: "var(--viz-node-deadend)", background: "var(--viz-node-deadend-bg)", label: "死路" },
 }
 
+// CTF 方向组状态（后端 ctf_direction_groups.status，与 core/ctf/session.py 的
+// STATUS_* 同口径）。**不复用意图的 open/closed**：方向组的 retired 是「分诊
+// 使命完成」，与「已收尾为发现」不是一回事，混用会让模型读错语义。
+const DIRECTION_BADGE: Record<string, { color: string; background: string; label: string }> = {
+  open: { color: "var(--viz-sev-low)", background: "var(--viz-sev-info-bg)", label: "进行中" },
+  requeued: { color: "var(--viz-sev-medium)", background: "var(--viz-sev-info-bg)", label: "让位" },
+  solved: { color: "var(--viz-success)", background: "var(--viz-node-finding-bg)", label: "已解" },
+  dropped: { color: "var(--viz-node-deadend)", background: "var(--viz-node-deadend-bg)", label: "已判死" },
+  retired: { color: "var(--viz-text-muted)", background: "var(--viz-sev-info-bg)", label: "已退役" },
+}
+
 function heightOf(n: IntentGraphNode): number {
-  return n.type === "sample" ? SAMPLE_H : n.type === "intent" ? INTENT_H : FINDING_H
+  if (n.type === "sample") return SAMPLE_H
+  if (n.type === "intent") return INTENT_H
+  if (n.type === "direction") return DIRECTION_H
+  return FINDING_H
 }
 
 /** 按依赖层级自动分层 + 自底向上 tidy 落位（口径同 AttackPath.layoutGraph，
@@ -150,7 +165,8 @@ function layoutGraph(data: IntentGraph, showDeadEnd: boolean): Node[] {
 
 function SampleNode({ data }: { data: Record<string, unknown> }) {
   const n = data.node as IntentGraphNode
-  const stats = (data.stats ?? { intents: 0, findings: 0 }) as { intents: number; findings: number }
+  const stats = (data.stats ?? { intents: 0, findings: 0, directions: 0 }) as
+    { intents: number; findings: number; directions: number }
   const isBinary = n.asset_type === "binary"
   return (
     <div
@@ -170,9 +186,10 @@ function SampleNode({ data }: { data: Record<string, unknown> }) {
         {isBinary
           ? <span className="truncate font-mono opacity-70">{(n.value ?? "").slice(0, 16)}…</span>
           : <span className="truncate opacity-70">非二进制锚点</span>}
-        {!!(stats.intents || stats.findings) && (
+        {!!(stats.intents || stats.findings || stats.directions) && (
           <span className="ml-auto shrink-0">
             意图 {stats.intents} · 发现 {stats.findings}
+            {!!stats.directions && ` · 方向 ${stats.directions}`}
           </span>
         )}
       </div>
@@ -273,14 +290,70 @@ function FindingNode({ data }: { data: Record<string, unknown> }) {
   )
 }
 
-const nodeTypes = { sample: SampleNode, intent: IntentNode, finding: FindingNode }
+// CTF 方向组节点（ctf-direction-ledger，2026-10-25）：一条派出去的方向 +
+// 它的累计执行次数。**与意图节点视觉上必须可区分**——它没有「收尾发现/死路」
+// 的语义，只有「跑了N次、现在什么状态」。点开看最近一次回执与子线程入口。
+function DirectionNode({ data }: { data: Record<string, unknown> }) {
+  const n = data.node as IntentGraphNode
+  const onOpen = data.onOpenThread as ((id: string) => void) | undefined
+  const badge = DIRECTION_BADGE[n.status ?? "open"] ?? DIRECTION_BADGE.open
+  const sub = n.last_run?.sub_thread_id ?? ""
+  return (
+    <div
+      className="flex flex-col rounded-md border bg-(--viz-card) px-3 py-2"
+      style={{
+        width: CARD_W, height: DIRECTION_H,
+        borderColor: badge.color, borderStyle: "dashed",
+      }}
+    >
+      <div className="flex items-center gap-1.5">
+        <span className="shrink-0 rounded px-1 text-[9px]"
+              style={{ background: badge.background, color: badge.color }}>
+          {badge.label}
+        </span>
+        <span className="shrink-0 text-[10px] text-muted-foreground">
+          执行 {n.attempts ?? 0} 次
+        </span>
+        {!!n.flags_got && (
+          <span className="shrink-0 rounded px-1 text-[9px]"
+                style={{ background: "var(--viz-node-finding-bg)", color: "var(--viz-success)" }}>
+            flag×{n.flags_got}
+          </span>
+        )}
+        <span className="ml-auto shrink-0 truncate text-[10px] text-muted-foreground/70">
+          {n.expert}
+        </span>
+      </div>
+      <p
+        className="mt-1 min-h-0 flex-1 overflow-hidden break-words text-[11px] leading-snug [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2]"
+        title={n.subgoal}
+      >
+        {n.subgoal}
+      </p>
+      {sub && (
+        <button
+          type="button"
+          onClick={() => onOpen?.(sub)}
+          title="在工作台打开这条子线程（看每轮原始回执）"
+          className="mt-0.5 truncate text-left font-mono text-[9.5px] text-muted-foreground hover:text-foreground"
+        >
+          {sub}
+        </button>
+      )}
+      <Handle type="target" position={Position.Left} style={{ background: "var(--viz-handle)" }} />
+    </div>
+  )
+}
 
+const nodeTypes = { sample: SampleNode, intent: IntentNode, finding: FindingNode, direction: DirectionNode }
 // ---------- 主画布 ----------
 
-function Canvas({ pid, onLocateFinding, onChanged, focusSampleId }: {
+function Canvas({ pid, onLocateFinding, onChanged, onOpenThread, focusSampleId }: {
   pid: string
   onLocateFinding: (findingId: string) => void
   onChanged?: () => void
+  /** 点方向组节点上的子线程 id → 在工作台打开该线程（看每轮原始回执） */
+  onOpenThread?: (threadId: string) => void
   /** 聚焦某题目（sample）子图：题目页「链路」入口用（2026-10-14）。缺省=全项目图 */
   focusSampleId?: string
 }) {
@@ -311,6 +384,7 @@ function Canvas({ pid, onLocateFinding, onChanged, focusSampleId }: {
       closed: cnt((n) => n.type === "intent" && n.status === "closed"),
       dead_end: cnt((n) => n.type === "intent" && n.outcome === "dead_end"),
       findings: cnt((n) => n.type === "finding"),
+      directions: cnt((n) => n.type === "direction"),
     } }
   }, [data, focusSampleId])
 
@@ -335,13 +409,14 @@ function Canvas({ pid, onLocateFinding, onChanged, focusSampleId }: {
     return () => { alive = false; clearInterval(t) }
   }, [reload])
 
-  // 样本 → 名下意图/发现计数（节点上直读，省得点开才知道有没有料）
+  // 样本 → 名下意图/发现/方向计数（节点上直读，省得点开才知道有没有料）
   const sampleStats = useMemo(() => {
-    const m = new Map<string, { intents: number; findings: number }>()
+    const m = new Map<string, { intents: number; findings: number; directions: number }>()
     for (const n of view?.nodes ?? []) {
       if (n.type === "sample" || !n.sample_id) continue
-      const cur = m.get(n.sample_id) ?? { intents: 0, findings: 0 }
+      const cur = m.get(n.sample_id) ?? { intents: 0, findings: 0, directions: 0 }
       if (n.type === "intent") cur.intents += 1
+      else if (n.type === "direction") cur.directions += 1
       else cur.findings += 1
       m.set(n.sample_id, cur)
     }
@@ -422,9 +497,11 @@ function Canvas({ pid, onLocateFinding, onChanged, focusSampleId }: {
       }
     } else if (n.type === "finding") {
       n.data = { ...n.data, onLocate: onLocateFinding }
+    } else if (n.type === "direction") {
+      n.data = { ...n.data, onOpenThread: onOpenThread ?? (() => {}) }
     }
     return n
-  }), [laid, sampleStats, selIntent, onLocateFinding, curMatchId])
+  }), [laid, sampleStats, selIntent, onLocateFinding, curMatchId, onOpenThread])
 
   const nodeById = useMemo(
     () => new Map((view?.nodes ?? []).map((n) => [n.id, n])), [view])
@@ -451,6 +528,10 @@ function Canvas({ pid, onLocateFinding, onChanged, focusSampleId }: {
       } else if (e.kind === "bypass") {
         out.push(mk(`${e.source}->${e.target}:bypass`, e.source, e.target,
           { stroke: "var(--viz-sev-info)", strokeWidth: 1.1, opacity: 0.5, strokeDasharray: "5 4" }))
+      } else if (e.kind === "direction") {
+        // 方向层：虚线 + 低透明度，视觉上明确「这不是证据链的推导边」
+        out.push(mk(`${e.source}->${e.target}:direction`, e.source, e.target,
+          { stroke: "var(--viz-sev-low)", strokeWidth: 1.1, opacity: 0.45, strokeDasharray: "2 3" }))
       }
     }
     return out
@@ -470,7 +551,7 @@ function Canvas({ pid, onLocateFinding, onChanged, focusSampleId }: {
     }
   }
 
-  const empty = !!view && view.counts.intents === 0
+  const empty = !!view && view.counts.intents === 0 && !view.counts.directions
 
   return (
     <div className="fc-dark absolute inset-0 bg-(--viz-canvas)">
@@ -480,6 +561,7 @@ function Canvas({ pid, onLocateFinding, onChanged, focusSampleId }: {
           <span className="shrink-0 text-muted-foreground">
             样本 {view.counts.samples} · 意图 {view.counts.intents}（待收尾 {view.counts.open}）·
             发现 {view.counts.findings}
+            {!!view.counts.directions && <> · 方向 {view.counts.directions}</>}
           </span>
         )}
         {view && view.counts.dead_end > 0 && (
@@ -645,6 +727,8 @@ export function IntentGraphView(props: {
   pid: string
   onLocateFinding: (findingId: string) => void
   onChanged?: () => void
+  /** 点方向组的子线程 id → 在工作台打开（CTF 方向层，2026-10-25） */
+  onOpenThread?: (threadId: string) => void
   /** 聚焦某题目子图（题目页「链路」入口，2026-10-14）；缺省=全项目图 */
   focusSampleId?: string
 }) {

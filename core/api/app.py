@@ -73,8 +73,9 @@ from core.intel.intel_service import (
 )
 from core.intel.store import IntelStore
 from core.intel.searxng import SearXNG
-from core.intel.ranking import normalize_day, ranking_score, window_start
+from core.intel.ranking import normalize_day, ranking_score, spam_score, window_start
 from core.intel.search import search_intel
+from core.intel import search as intel_search_module
 from core.websearch import WebSearchError
 from core.llm import ModelRouter, ProviderError, ProviderStore, probe_credentials
 from core.llm.providers import CONFIG_PATH as PROVIDERS_CONFIG_PATH
@@ -176,6 +177,23 @@ HYGIENE_BLOAT_ERROR_MB = 500.0
 # FOFA 中转配置文件路径（cyberspace-mapping M2）：模块级常量供测试 monkeypatch
 # （真实 config/fofa.json 含 key，不入库，测试绝不触达）。
 FOFA_CONFIG_PATH = fofa_mod.CONFIG_PATH
+
+# ---- 附件上传配额（2026-10-25 提到模块级） ----
+#
+# 原先藏在 create_app 里当局部名，导致：① 测试无法直接引用（只能写死 64MB 魔数，
+# 常量一调测试就假绿）；② 前端 `ATTACHMENT_CHUNK_BYTES` 没有可对照的单一真相源。
+# 与建会话时的分片数校验强绑定，必须是同一个数。
+#
+# 单请求上限：只有小于它的文件还走一次 body 到位那条路（快，但无进度、不可续传）。
+ATTACHMENT_MAX_BYTES = 64 * 1024 * 1024
+# 分片大小：附件一律可切这么一片逐片 PUT。单片小到任何网关都不会拦。
+# **服务端建会话时按它校验 total_chunks**，前端改这里必须同步改
+# `webui/src/lib/api.ts` 的 ATTACHMENT_CHUNK_BYTES，否则 422。
+ATTACHMENT_CHUNK_BYTES = 16 * 1024 * 1024
+# 总量护栏：只防「磁盘被写爆」，不承担产品限额职责（64GiB 对附件=实际无限）。
+ATTACHMENT_MAX_TOTAL_BYTES = 64 * 1024 * 1024 * 1024
+# 放弃的上传会话留存时长：刷新页面/关标签会留下半截分片，过期清掉。
+ATTACHMENT_UPLOAD_TTL_SECONDS = 7 * 24 * 3600
 
 
 def _loads_meta(art: dict) -> dict:
@@ -507,6 +525,20 @@ class SampleUploadCreateIn(BaseModel):
     total_size: int = Field(gt=0)
     total_chunks: int = Field(gt=0, le=1_000_000)
     source_type: str = "auto"
+
+
+class AttachmentUploadCreateIn(BaseModel):
+    """POST .../attachments/uploads：附件分片续传建会话（2026-10-25）。
+
+    与 SampleUploadCreateIn 分开是刻意的：样本包会话建完要跑 `import_source`
+    （解压/扫盘/生成 manifest），附件只是把字节原样落到工作区，产物语义完全不同，
+    共用一张 metadata 会让两边的 `complete` 分支互相误判。
+    """
+
+    filename: str = Field(min_length=1, max_length=4096)
+    total_size: int = Field(gt=0)
+    total_chunks: int = Field(gt=0, le=10_000_000)
+    sha256: str | None = Field(default=None, max_length=64)
 
 
 class SampleLinkIn(BaseModel):
@@ -1542,6 +1574,8 @@ class LlmProviderIn(BaseModel):
     # 此前该字段被本模型白名单抹掉（设置页保存一次即丢），思考链静默消失
     thinking: bool | None = None
     proxy: str | None = None  # 供应商专属 HTTP/HTTPS 代理；缺省沿用系统代理环境
+    # 视觉能力（vision 通道）：None=未声明，True/False=显式支持/不支持。
+    vision: bool | None = None
 
 
 class ProvidersIn(BaseModel):
@@ -2848,7 +2882,8 @@ def create_app(
     # 都拒自动分析，引导改走「从 IDA 拉取函数」（前端同口径 SAMPLE_AUTO_MAX_BYTES）。
     from core.tools.decompiler import SAMPLE_AUTO_MAX_BYTES
     DEBUGLOG_MAX_BYTES = 16 * 1024 * 1024
-    ATTACHMENT_MAX_BYTES = 64 * 1024 * 1024   # 直播间输入行附件随发（2026-09-19）
+    # 附件配额见模块级 ATTACHMENT_MAX_BYTES / ATTACHMENT_CHUNK_BYTES 等常量
+    # （2026-10-25 上提：测试要能引用同一份真相，前端分片大小也要跟它对齐）。
     PACKER_ENTROPY = 7.2
     _BAD_NAME_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
     _WIN_RESERVED = re.compile(r"(?i)^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)")
@@ -3539,6 +3574,73 @@ def create_app(
             return root, json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             raise HTTPException(409, "上传会话元数据损坏") from exc
+
+    # ---------- 附件分片续传（2026-10-25） ----------
+    #
+    # 与 sample_uploads 平行的**另一套**会话目录（`attachment_uploads/`）：
+    # 两边 complete 的产物不同（一个 import_source 出分析包，一个原样落
+    # artifacts/attachments 注册 artifact），共用目录会让"这个 upload_id 到底
+    # 完成成什么"要靠 metadata 猜。分开后各自 glob 自己的 .part 即可。
+
+    def _attachment_upload_dir(proj: Project, upload_id: str) -> Path:
+        if not re.fullmatch(r"[0-9a-f]{24}", upload_id):
+            raise HTTPException(422, "非法上传会话 ID")
+        return _inside(proj, "attachment_uploads", upload_id)
+
+    def _attachment_upload_meta(proj: Project, upload_id: str) -> tuple[Path, dict]:
+        root = _attachment_upload_dir(proj, upload_id)
+        path = root / "metadata.json"
+        if not path.is_file():
+            raise HTTPException(404, "上传会话不存在")
+        try:
+            return root, json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise HTTPException(409, "上传会话元数据损坏") from exc
+
+    def _write_attachment_upload_meta(root: Path, metadata: dict) -> None:
+        """metadata.json 原子替换：分片 PUT 是并发的，读到半个 JSON 会 409 误判。"""
+        temp = root / "metadata.json.tmp"
+        temp.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temp, root / "metadata.json")
+
+    def _received_attachment_chunks(root: Path) -> list[int]:
+        return sorted(int(p.stem) for p in (root / "chunks").glob("*.part") if p.stem.isdigit())
+
+    def _purge_stale_attachment_uploads(proj: Project) -> None:
+        """清理过期会话（刷新/关标签会留半截分片）。best-effort，失败不影响上传。"""
+        base = Path(proj.path) / "attachment_uploads"
+        if not base.is_dir():
+            return
+        cutoff = time.time() - ATTACHMENT_UPLOAD_TTL_SECONDS
+        for entry in base.iterdir():
+            try:
+                if entry.is_dir() and entry.stat().st_mtime < cutoff:
+                    shutil.rmtree(entry, ignore_errors=True)
+            except OSError:
+                continue
+
+    def _finalize_attachment(proj: Project, assembled: Path, name: str, sha: str,
+                            size: int) -> dict:
+        """把已合并的临时文件登记为 kind=attachment 的 artifact（去重 → 落盘 → 建行）。
+
+        单请求端点与分片 `complete` **共用这一个出口**，否则两条路的去重语义、
+        文件名清洗、meta 形状会随着后续改动慢慢漂移。
+        """
+        dup = proj.bb.find_artifact_by_sha(proj.id, sha, kind="attachment")
+        if dup is not None:
+            old_meta = _loads_meta(dup)
+            return {"id": dup["id"], "path": dup["path"], "name": name,
+                    "size": int(old_meta.get("size") or size), "sha256": sha}
+        out_dir = _inside(proj, "artifacts", "attachments")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        final = out_dir / f"{sha[:12]}_{name}"
+        with open(assembled, "rb") as src, open(final, "wb") as dst:
+            shutil.copyfileobj(src, dst, 1 << 20)
+        rel = str(final.relative_to(Path(proj.path))).replace("\\", "/")
+        art_id = proj.bb.add_artifact(
+            proj.id, rel, kind="attachment", description=name, sha256=sha,
+            meta={"original_name": name, "size": size}, author="human")
+        return {"id": art_id, "path": rel, "name": name, "size": size, "sha256": sha}
 
     def _parse_hex_addr(addr: str) -> int:
         try:
@@ -7074,30 +7176,172 @@ def create_app(
 
     @app.post("/api/projects/{pid}/attachments", status_code=201)
     def upload_attachment(pid: str, file: UploadFile = File(...)):
-        """通用附件上传（2026-09-19 直播间输入行「+」随发附件）：任意类型 ≤64MB，
-        落 artifacts/attachments/<sha12>_<name> 并注册 artifact 行 kind=attachment
+        """通用附件上传（2026-09-19 直播间输入行「+」随发附件）：任意类型，落
+        artifacts/attachments/<sha12>_<name> 并注册 artifact 行 kind=attachment
         （meta.original_name/size 供渲染与下载命名）。同项目同内容（sha256）去重
-        返回既有行，不产生重复 artifact。"""
+        返回既有行，不产生重复 artifact。
+
+        **本端点只承接 ≤64MB 的小文件**（一次 body 到位、无进度、不可续传）。
+        超过上限的走 `/attachments/uploads` 分片续传（2026-10-25：附件不再设大小
+        限制，几 GB 也照传）。413 里回 `chunked: true` 让前端知道该换路，而不是
+        把用户堵死在"文件超过 64MB 上限"。"""
         proj = _project(pid)
         name = _safe_upload_name(file.filename or "attachment.bin")
         spool, sha, size = _spool_upload(file, ATTACHMENT_MAX_BYTES)
-        dup = proj.bb.find_artifact_by_sha(pid, sha, kind="attachment")
-        if dup is not None:
+        # tmp_path 必须**先绑定**再进 try：若下面副本抛错，finally 里对未绑定名
+        # 求值会抛 UnboundLocalError，把真实异常顶掉（dump.py 踩过同一个坑）。
+        tmp_path: Path | None = None
+        try:
+            # 已落 spool 的内容直接进共用出口；finalize 只从临时文件读，故先转存。
+            with tempfile.NamedTemporaryFile(suffix=".attachment", delete=False) as tmp:
+                tmp_path = Path(tmp.name)
+                shutil.copyfileobj(spool, tmp, 1 << 20)
+            return _finalize_attachment(proj, tmp_path, name, sha, size)
+        finally:
             spool.close()
-            meta = _loads_meta(dup)
-            return {"id": dup["id"], "path": dup["path"], "name": name,
-                    "size": int(meta.get("size") or size), "sha256": sha}
-        out_dir = _inside(proj, "artifacts", "attachments")
-        out_dir.mkdir(parents=True, exist_ok=True)
-        final = out_dir / f"{sha[:12]}_{name}"
-        with open(final, "wb") as fh:
-            shutil.copyfileobj(spool, fh)
-        spool.close()
-        rel = str(final.relative_to(proj.path)).replace("\\", "/")
-        art_id = proj.bb.add_artifact(
-            pid, rel, kind="attachment", description=name, sha256=sha,
-            meta={"original_name": name, "size": size}, author="human")
-        return {"id": art_id, "path": rel, "name": name, "size": size, "sha256": sha}
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
+
+    # ---------- 附件分片续传（2026-10-25 用户口径：无论大小，显示上传进度） ----------
+
+    @app.post("/api/projects/{pid}/attachments/uploads", status_code=201)
+    def create_attachment_upload(pid: str, body: AttachmentUploadCreateIn):
+        """建分片会话。**声明值只作交叉校验，不预先分配空间**：总量在每片累加时
+        再检查，避免"先按 4GB 建会话"的空头承诺。"""
+        proj = _project(pid)
+        _purge_stale_attachment_uploads(proj)
+        if body.total_size > ATTACHMENT_MAX_TOTAL_BYTES:
+            raise HTTPException(
+                413, f"附件超过 {ATTACHMENT_MAX_TOTAL_BYTES // (1024 ** 3)}GiB 上限")
+        name = _safe_upload_name(body.filename)
+        expected_chunks = -(-body.total_size // ATTACHMENT_CHUNK_BYTES)  # 向上取整
+        if body.total_chunks != expected_chunks:
+            # 分片大小是前后端共享常量；对不上说明版本不齐，宁可立刻报错——
+            # 否则合并时按各自的数算，会拼出个大小对、内容错的文件。
+            raise HTTPException(
+                422, f"分片数应为 {expected_chunks}（每片 {ATTACHMENT_CHUNK_BYTES // (1024 ** 2)}MB）")
+        upload_id = uuid.uuid4().hex[:24]
+        root = _inside(proj, "attachment_uploads", upload_id)
+        (root / "chunks").mkdir(parents=True, exist_ok=False)
+        metadata = {
+            "upload_id": upload_id,
+            "filename": name,
+            "total_size": body.total_size,
+            "total_chunks": body.total_chunks,
+            "chunk_bytes": ATTACHMENT_CHUNK_BYTES,
+            "sha256": (body.sha256 or "").lower() or None,
+            "received_chunks": [],
+            "status": "uploading",
+            "created_at": _utc_now(),
+        }
+        _write_attachment_upload_meta(root, metadata)
+        return {k: metadata[k] for k in
+                ("upload_id", "filename", "total_size", "total_chunks", "chunk_bytes", "status")}
+
+    @app.get("/api/projects/{pid}/attachments/uploads/{upload_id}")
+    def attachment_upload_status(pid: str, upload_id: str):
+        """续传用：回已收到的分片号。前端开局先问一次，断线重连/刷新后跳过已传片。"""
+        proj = _project(pid)
+        root, metadata = _attachment_upload_meta(proj, upload_id)
+        received = _received_attachment_chunks(root)
+        metadata["received_chunks"] = received
+        metadata["received_size"] = sum(
+            (root / "chunks" / f"{i}.part").stat().st_size for i in received)
+        if metadata.get("status") == "complete":
+            metadata["result"] = metadata.get("result")
+        return metadata
+
+    @app.put("/api/projects/{pid}/attachments/uploads/{upload_id}/chunks/{chunk_index}")
+    async def upload_attachment_chunk(pid: str, upload_id: str, chunk_index: int,
+                                      request: Request):
+        """PUT 单个分片。幂等：同号同内容重复 PUT 视为成功（网络重试不报错），
+        同号不同内容 409（说明客户端拼错了，不能静默覆盖）。"""
+        proj = _project(pid)
+        root, metadata = _attachment_upload_meta(proj, upload_id)
+        if metadata.get("status") != "uploading":
+            raise HTTPException(409, "上传会话已结束")
+        total_chunks = int(metadata["total_chunks"])
+        if chunk_index < 0 or chunk_index >= total_chunks:
+            raise HTTPException(422, "分片序号越界")
+        chunk = await request.body()
+        # 上限防「分片号合法但内容超长」把单请求内存顶爆；最后一片允许更短。
+        if len(chunk) > ATTACHMENT_CHUNK_BYTES:
+            raise HTTPException(
+                413, f"单个分片不能超过 {ATTACHMENT_CHUNK_BYTES // (1024 ** 2)}MB")
+        if not chunk:
+            raise HTTPException(422, "空分片")
+        path = root / "chunks" / f"{chunk_index}.part"
+        if path.exists():
+            if path.read_bytes() != chunk:
+                raise HTTPException(409, "同一分片已存在且内容不同")
+        else:
+            temp = root / "chunks" / f"{chunk_index}.tmp"
+            temp.write_bytes(chunk)
+            os.replace(temp, path)
+        return {"upload_id": upload_id, "chunk_index": chunk_index,
+                "size": len(chunk), "status": "received"}
+
+    @app.post("/api/projects/{pid}/attachments/uploads/{upload_id}/complete",
+              status_code=201)
+    def complete_attachment_upload(pid: str, upload_id: str):
+        """合并分片 → 计算真实 sha256 → 走与单请求相同的登记出口。
+
+        **幂等**：重复调用回同一结果（前端重试/网络抖动不该造出两个 artifact）。
+        合并后立刻删分片目录——几 GB 的分片留着等于把占用翻倍。
+        """
+        proj = _project(pid)
+        root, metadata = _attachment_upload_meta(proj, upload_id)
+        if metadata.get("status") == "complete":
+            return metadata.get("result") or metadata
+        if metadata.get("status") != "uploading":
+            raise HTTPException(409, "上传会话不可完成")
+        chunks_dir = root / "chunks"
+        expected = list(range(int(metadata["total_chunks"])))
+        actual = _received_attachment_chunks(root)
+        if actual != expected:
+            missing = sorted(set(expected) - set(actual))
+            raise HTTPException(409, f"仍缺少分片: {missing[:20]}")
+        total_size = int(metadata["total_size"])
+        assembled = root / "assembled.part"
+        digest = hashlib.sha256()
+        total = 0
+        try:
+            with assembled.open("wb") as out:
+                for index in expected:
+                    part = chunks_dir / f"{index}.part"
+                    with part.open("rb") as src:
+                        while True:
+                            block = src.read(1 << 20)
+                            if not block:
+                                break
+                            total += len(block)
+                            if total > total_size:
+                                raise HTTPException(422, "分片总大小超过声明值")
+                            digest.update(block)
+                            out.write(block)
+            if total != total_size:
+                raise HTTPException(422, "分片总大小与声明值不一致")
+            sha = digest.hexdigest()
+            declared = (metadata.get("sha256") or "").lower()
+            if declared and declared != sha:
+                # 客户端算了 sha 就一定要对上；对不上说明传输中变了（曾被代理截断/
+                # 磁盘写坏），此时落盘等于给用户一个"看起来传好了"的坏文件。
+                raise HTTPException(422, "附件内容校验失败（sha256 不一致），请重传")
+            result = _finalize_attachment(
+                proj, assembled, str(metadata["filename"]), sha, total)
+        except HTTPException:
+            metadata["status"] = "failed"
+            metadata["error"] = "合并/校验失败"
+            _write_attachment_upload_meta(root, metadata)
+            raise
+        finally:
+            assembled.unlink(missing_ok=True)
+        metadata["status"] = "complete"
+        metadata["completed_at"] = _utc_now()
+        metadata["result"] = result
+        _write_attachment_upload_meta(root, metadata)
+        shutil.rmtree(chunks_dir, ignore_errors=True)
+        return result
 
     @app.get("/api/projects/{pid}/artifacts/{aid}/download")
     def download_artifact(pid: str, aid: str):
@@ -11736,6 +11980,24 @@ def create_app(
     def searxng_validate_search(body: dict | None = None):
         return _searxng().validate_search(str((body or {}).get("query") or "权限提升"))
 
+    @app.get("/api/intel/search/history")
+    def intel_search_history(limit: int = 20):
+        return {"items": _intel().list_searches(limit)}
+
+    @app.get("/api/intel/search/history/{cache_key}")
+    def intel_search_history_get(cache_key: str, limit: int = 10, offset: int = 0):
+        item = _intel().get_search(cache_key)
+        if item is None:
+            raise HTTPException(404, "搜索历史不存在")
+        limit = max(1, min(int(limit or 10), 100))
+        offset = max(0, min(int(offset or 0), 500))
+        rows = item["rows"]
+        page = rows[offset:offset + limit]
+        return {**item["meta"], "query": item["query"], "results": page,
+                "total": item["total"], "has_more": offset + len(page) < len(rows),
+                "cache_key": item["cache_key"], "offset": offset, "cached": True,
+                "created_at": item["created_at"]}
+
     @app.get("/api/intel/search")
     def intel_search(q: str = "", limit: int = 10, refresh: bool = False,
                      cache_key: str = "", offset: int = 0):
@@ -11747,15 +12009,19 @@ def create_app(
         window = "half_year"
         # 搜索结果先缓存完整有序候选集，后续 offset 分页不重复发起网络请求。
         cache = getattr(app.state, "intel_search_cache", {})
-        key = cache_key or query.casefold()
+        key = cache_key or hashlib.sha256(query.casefold().encode("utf-8")).hexdigest()[:40]
         now_mono = time.monotonic()
         cached = cache.get(key)
-        if cache_key and cached is None:
-            raise HTTPException(410, "检索缓存已过期，请重新检索")
+        if cache_key and (cached is None or now_mono - cached["at"] >= 600):
+            saved = _intel().get_search(key)
+            if saved is None:
+                raise HTTPException(410, "搜索历史已不存在，请重新检索")
+            cached = {"at": now_mono, "query": saved["query"].casefold(),
+                      "rows": saved["rows"], "meta": saved["meta"]}
+            cache[key] = cached
+            app.state.intel_search_cache = cache
         if cache_key and cached.get("query") != query.casefold():
             raise HTTPException(422, "缓存检索词与当前查询不匹配")
-        if cache_key and now_mono - cached["at"] >= 600:
-            raise HTTPException(410, "检索缓存已过期，请重新检索")
         if cached and not refresh and now_mono - cached["at"] < 600:
             rows = cached["rows"]
             page = rows[offset:offset + limit]
@@ -11770,6 +12036,8 @@ def create_app(
         errors: list[str] = []
         profile = intel_config.load_profile(app.state.intel_dir)
         try:
+            # num 放宽到 50：SearXNG 走通用网页索引，单次可稳定给出 20~30 条，
+            # 后续排序/过滤才有腾挪空间（Google News 时代 50 也只能召回 18 条）。
             external, backend = _search_intel(
                 query, profile.get("search"), num=50, time_range=window)
             for row in external:
@@ -11781,6 +12049,7 @@ def create_app(
                 rows.append({"id": "search-" + hashlib.sha1(row["url"].encode("utf-8")).hexdigest()[:16],
                              "url": row["url"], "title": row.get("title") or row["url"],
                              "source": row.get("source") or backend, "kind": "article",
+                             "source_site": row.get("source_site") or "",
                              "summary": row.get("snippet", ""),
                              "published_at": row.get("published_date", ""),
                              "published_day": day, "fetched_at": "", "score": 0,
@@ -11789,28 +12058,49 @@ def create_app(
                              "brief_date": None, "read": 0, "starred": 0, "via": backend})
         except WebSearchError as exc:
             errors.append(str(exc))
-            enabled = bool(((profile.get("search") or {}).get("searxng") or {}).get("enabled"))
-            backend = "searxng→google_news" if enabled else "google_news"
+            backend = "searxng"
         dedup: dict[str, dict] = {}
         for row in rows:
             dedup.setdefault(row.get("url", ""), row)
         rows = list(dedup.values())
+        # 垃圾页直接丢弃（色情导流、博彩、标题符号堆砌），不进结果也不占分页额度。
+        before = len(rows)
+        rows = [r for r in rows if spam_score(r) > 0]
+        dropped_spam = before - len(rows)
         for row in rows:
-            row["ranking_score"] = ranking_score(row, window=window)
+            row["ranking_score"] = ranking_score(row, window=window, query=query)
             row["date_known"] = bool(row.get("published_day") or row.get("published_at"))
         rows.sort(key=lambda r: (int(r.get("is_priority", 0)),
                                  float(r.get("ranking_score", 0)),
                                  float(r.get("score", 0)),
                                  r.get("published_day", ""), r.get("fetched_at", "")),
                   reverse=True)
-        meta = {"backend": backend, "window_label": "近半年", "errors": errors}
+        meta = {"backend": backend, "window_label": "近半年", "errors": errors,
+                "dropped_spam": dropped_spam}
         cache[key] = {"at": now_mono, "query": query.casefold(),
                       "rows": rows, "meta": meta}
         app.state.intel_search_cache = cache
+        _intel().save_search(query, rows, meta, cache_key=key)
         page = rows[offset:offset + limit]
         return {**meta, "results": page, "total": len(rows),
                 "has_more": offset + len(page) < len(rows), "cache_key": key,
                 "offset": offset, "cached": False}
+
+    @app.get("/api/intel/search/resolve")
+    def intel_search_resolve(url: str):
+        source = str(url or "")
+        if intel_search_module._google_article_id(source):
+            cached_url = _intel().get_resolved_url(source)
+            if cached_url:
+                return {"url": cached_url}
+        try:
+            resolved = intel_search_module.resolve_google_news_url(
+                intel_search_module.WebSearchConfig.from_file(
+                    intel_search_module.DEFAULT_CONFIG_PATH), source)
+        except WebSearchError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        _intel().save_resolved_url(source, resolved)
+        return {"url": resolved}
 
     @app.post("/api/intel/searxng/start")
     def searxng_start():

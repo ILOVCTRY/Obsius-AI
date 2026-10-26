@@ -27,6 +27,8 @@ contextBridge.exposeInMainWorld("desktopBrowser", {
   // 原生目录选择（「选择分析包」2026-10-24）：只有桌面壳有系统对话框；
   // 浏览器里这个能力不存在，前端据此回落应用内目录浏览器。
   pickDirectory: (defaultPath) => ipcRenderer.invoke("dialog:pick-directory", defaultPath || ""),
+  /** 把已算好的 http(s) 地址交系统浏览器打开（异步解析后才能跳转时用）。 */
+  openExternal: (url) => ipcRenderer.invoke("shell:open-external", url),
 })
 
 contextBridge.exposeInMainWorld("desktopWindow", {

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
-import { api } from "@/lib/api"
+import { api, errText } from "@/lib/api"
 import { VULNERABILITY_TYPES, type Finding, type FindingPoc as FindingPocModel } from "@/lib/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -618,19 +618,19 @@ export function FindingDetailDialog({ pid, finding, assetLabel, track, onClose, 
                     ) : (
                       <label className={cn("flex h-28 w-full cursor-pointer flex-col items-center justify-center gap-1 rounded border border-dashed text-[10px] text-muted-foreground", pocUploading[index] && "opacity-60")}>
                         <ImageIcon className="size-4" />
-                        {pocUploading[index] ? "上传中…" : "点击上传截图（≤64MB，同内容服务端去重）"}
+                        {pocUploading[index] ? "上传中…" : "点击上传截图（同内容服务端去重）"}
                         <input type="file" accept="image/*" className="hidden" disabled={pocUploading[index]}
                                onChange={(e) => {
                                  const file = e.target.files?.[0]
                                  e.target.value = ""
                                  if (!file) return
                                  setPocUploading((m) => ({ ...m, [index]: true }))
-                                 api.uploadAttachment(pid, file)
+                                 api.uploadAttachmentAuto(pid, file)
                                    .then((r) => setForm((f) => ({
                                      ...f, pocs: f.pocs.map((p, i) => i === index
                                        ? { ...p, artifact_id: r.id } : p),
                                    })))
-                                   .catch((err) => setEditErr(String(err)))
+                                   .catch((err) => setEditErr(errText(err)))
                                    .finally(() => setPocUploading((m) => ({ ...m, [index]: false })))
                                }} />
                       </label>

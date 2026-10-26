@@ -79,8 +79,10 @@ def _probe_body(record: dict, url: str, timeout: int) -> dict:
     except ImportError as exc:  # noqa: BLE001 —— 缺依赖=不具备内容探测能力
         return {"ok": False, "status": None, "body": b"", "error": f"requests 缺失: {exc}"}
     try:
+        connect_timeout = max(1, min(int(timeout), 5))
+        read_timeout = max(connect_timeout, int(timeout))
         resp = requests.get(url, proxies={"http": proxy_url, "https": proxy_url},
-                            timeout=timeout, allow_redirects=True)
+                            timeout=(connect_timeout, read_timeout), allow_redirects=True)
         body = resp.content or b""
         return {"ok": True, "status": resp.status_code, "body": body, "error": ""}
     except Exception as exc:  # noqa: BLE001
@@ -194,7 +196,10 @@ def _probe_direct(url: str, timeout: int) -> dict:
     except ImportError as exc:  # noqa: BLE001
         return {"ok": False, "status": None, "body": b"", "error": f"requests 缺失: {exc}"}
     try:
-        resp = requests.get(url, timeout=timeout, allow_redirects=True)
+        connect_timeout = max(1, min(int(timeout), 5))
+        read_timeout = max(connect_timeout, int(timeout))
+        resp = requests.get(url, timeout=(connect_timeout, read_timeout),
+                            allow_redirects=True)
         return {"ok": True, "status": resp.status_code,
                 "body": resp.content or b"", "error": ""}
     except Exception as exc:  # noqa: BLE001
@@ -214,7 +219,7 @@ def _looks_blocked(status, body: bytes) -> bool:
 
 def check_urls(records: list[dict], url: str, timeout: int, workers: int,
                probe_factory=None, direct_factory=None,
-               on_progress=None) -> dict:
+               on_progress=None, confirm_anomalies: bool = True) -> dict:
     """经每个代理 GET ``url``，与**直连基线**对比判定「可达 / 被该站封禁」。
 
     判据（参考 M1「内容注入交叉验证」思路，但这里对**指定站点**）：
@@ -227,7 +232,8 @@ def check_urls(records: list[dict], url: str, timeout: int, workers: int,
     返回 ``{"url","baseline","results":[{proxy,protocol,ok,status_code,latency,
     blocked,reason}]}``。``on_progress(payload)`` 每 ~20 条回调一次。
     """
-    out: dict = {"url": url, "baseline": None, "results": []}
+    out: dict = {"url": url, "baseline": None, "baseline_valid": False,
+                 "verdict": "indeterminate", "blocked": None, "results": []}
     if not records:
         return out
 
@@ -241,6 +247,8 @@ def check_urls(records: list[dict], url: str, timeout: int, workers: int,
         "ok": bool(base.get("ok")), "status_code": base.get("status"),
         "error": base.get("error") or "",
     }
+    out["baseline_valid"] = base_fp is not None
+    out["verdict"] = "comparable" if base_fp is not None else "indeterminate"
 
     def one(record: dict) -> dict:
         t0 = time.time()
@@ -253,7 +261,9 @@ def check_urls(records: list[dict], url: str, timeout: int, workers: int,
         reason = ""
         if ok:
             fp = _content_fingerprint(status, body)
-            if base_fp is not None and fp == base_fp:
+            if base_fp is None:
+                reason = "直连基线失败，无法判定是否被该站拦截"
+            elif fp == base_fp:
                 reason = "与直连基线一致（正常内容）"
             elif _looks_blocked(status, body):
                 blocked = True
@@ -267,7 +277,9 @@ def check_urls(records: list[dict], url: str, timeout: int, workers: int,
             "proxy": record.get("proxy"), "protocol": record.get("protocol"),
             "ok": ok, "status_code": status,
             "latency": round(dt, 3) if ok else None,
-            "blocked": blocked, "reason": reason,
+            "blocked": blocked if base_fp is not None else None,
+            "verdict": "comparable" if base_fp is not None else "indeterminate",
+            "reason": reason,
         }
 
     total = len(records)
@@ -281,6 +293,42 @@ def check_urls(records: list[dict], url: str, timeout: int, workers: int,
             if on_progress is not None and (done % 20 == 0 or done == total):
                 on_progress({"event": "progress", "phase": "check-url",
                              "done": done, "total": total})
+    if confirm_anomalies:
+        by_proxy = {r.get("proxy"): r for r in results}
+        for row in results:
+            if not (row.get("blocked") is True or row.get("ok") is False):
+                continue
+            alternatives = [r for r in records if r.get("proxy") != row.get("proxy")]
+            if not alternatives:
+                row["confirmation"] = {
+                    "confirmed": None, "verdict": "unconfirmed",
+                    "reason": "没有第二个不同出口可复测",
+                }
+                continue
+            secondary = alternatives[0]
+            secondary_result = by_proxy.get(secondary.get("proxy"))
+            # Reuse an already collected result where possible; otherwise make a fresh probe.
+            if secondary_result is None:
+                secondary_result = one(secondary)
+            confirmed = None
+            if row.get("blocked") is True and secondary_result.get("blocked") is True:
+                confirmed = True
+            elif row.get("blocked") is True and secondary_result.get("blocked") is False:
+                confirmed = False
+            elif row.get("ok") is False and secondary_result.get("ok") is False:
+                confirmed = True
+            elif row.get("ok") is False and secondary_result.get("ok") is True:
+                confirmed = False
+            row["confirmation"] = {
+                "proxy": secondary.get("proxy"),
+                "ok": secondary_result.get("ok"),
+                "status_code": secondary_result.get("status_code"),
+                "latency": secondary_result.get("latency"),
+                "blocked": secondary_result.get("blocked"),
+                "confirmed": confirmed,
+                "verdict": "confirmed" if confirmed is True else
+                           "contradicted" if confirmed is False else "indeterminate",
+            }
     out["results"] = results
     return out
 

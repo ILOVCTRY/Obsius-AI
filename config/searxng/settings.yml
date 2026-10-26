@@ -13,9 +13,27 @@
   },
   "outgoing": {
     "proxies": {
-      "all://": [
-        "http://Y3liZXJzdHJpa2U6bHZWMHpBc3VKTnBBSVZmb1dwUngyUzc2bWlFOVpYMWw2am1uRktXWndPUk1PanhzSXl3dGFCS2hEVzgyd3d0Zw==@host.docker.internal:7891"
-      ]
+      "all://": "http://cyberstrike:lvV0zAsuJNpAIVfoWpRx2S76miE9ZX1l6jmnFKWZwORMOjxsIywtaBKhDW82wwtg@host.docker.internal:7891"
     }
-  }
+  },
+  "engines": [
+    {
+      "name": "google",
+      "engine": "google",
+      "shortcut": "go",
+      "disabled": false
+    },
+    {
+      "name": "bing",
+      "engine": "bing",
+      "shortcut": "bi",
+      "disabled": false
+    },
+    {
+      "name": "brave",
+      "engine": "brave",
+      "shortcut": "br",
+      "disabled": false
+    }
+  ]
 }

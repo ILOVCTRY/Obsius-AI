@@ -84,6 +84,16 @@ def _intent_scope_hint(track: str | None) -> str:
     return ("\n[意图口径] " + hint) if hint else ""
 
 
+def _append_tool_text(result: str, suffix: str) -> str:
+    if not suffix:
+        return result
+    images = getattr(result, "images", None)
+    if images:
+        from core.llm.provider import ToolOutput
+        return ToolOutput(str(result) + suffix, images)
+    return str(result) + suffix
+
+
 # 资产越界闸（agent-path-intent-loop M3，2026-10-09）：被主控分配资产的子代理
 # （ToolDispatcher.assigned_asset_ids 非空）只能在分配集内工作——**新资产仅通过
 # bb_add_asset 上报，等主控派发后才能测**。本表列「引用具体资产 id 的工具 → 承载
@@ -690,7 +700,8 @@ class ToolDispatcher:
         result = self._maybe_spill(name, result)  # H1：超限结果落盘+预览，防淹没上下文
         # 游离发现登记仍是独立的业务硬约束；其拒绝回执也带上通用软提醒。
         if name == "bb_add_finding" and "[拒绝] 本会话当前没有 open 意图" in result:
-            result += "\n[提示] 意图先行：请先 declare_intent，再执行验证并登记发现。"
+            result = _append_tool_text(
+                result, "\n[提示] 意图先行：请先 declare_intent，再执行验证并登记发现。")
         # 统一补发软提醒：_dispatch_once 内的专用校验可能提前返回，故此处
         # 覆盖文本结果。结构化 JSON 和知识正文保持原始契约，不能把提醒拼进
         # JSON（会破坏调用方 json.loads）或大段正文（会污染知识内容）。
@@ -706,7 +717,8 @@ class ToolDispatcher:
                     " AND author=? LIMIT 1",
                     (self.project_id, self.author)).fetchone() is not None
                 if not has_open:
-                    result += (
+                    result = _append_tool_text(
+                        result,
                         "\n[提示] 意图先行：本次工具调用已返回，但本会话当前没有 open 意图。"
                         "请尽快调用 declare_intent，把方向落成一句可证伪假设。"
                         + _intent_scope_hint(self.track))
@@ -849,7 +861,7 @@ class ToolDispatcher:
                     "可证伪假设；上一条意图已收尾时，也请先声明下一条再继续实质动作。"
                     + _intent_scope_hint(self.track))
         def _with_intent_hint(result: str) -> str:
-            return f"{result}{intent_hint}"
+            return _append_tool_text(result, intent_hint)
 
         # raw_arguments 解包垫片（2026-09-26）：部分模型在长文本参数上会把全部参数
         # 包成 {"raw_arguments": "<JSON 字符串>"}（实测 ark-code-latest 调

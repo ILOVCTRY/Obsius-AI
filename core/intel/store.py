@@ -14,7 +14,7 @@ from pathlib import Path
 from core.blackboard.store import new_id  # 复用 <前缀>-<12hex> 约定
 from core.intel.ranking import normalize_day
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -64,8 +64,22 @@ CREATE TABLE IF NOT EXISTS learning_plans (       -- E10：周学习计划（周
     inputs TEXT NOT NULL DEFAULT '{}', -- 输入摘要统计（不含笔记正文）
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS search_history (
+    id TEXT PRIMARY KEY,
+    query TEXT NOT NULL,
+    cache_key TEXT NOT NULL UNIQUE,
+    rows TEXT NOT NULL DEFAULT '[]',
+    meta TEXT NOT NULL DEFAULT '{}',
+    total INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_search_history_created ON search_history(created_at DESC);
+CREATE TABLE IF NOT EXISTS resolved_urls (
+    source_url TEXT PRIMARY KEY,
+    target_url TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
-
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -119,6 +133,72 @@ class IntelStore:
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+    # ---- 搜索历史 ----
+
+    def save_search(self, query: str, rows: list[dict], meta: dict,
+                    *, cache_key: str, limit: int = 20) -> dict:
+        query = str(query or "").strip()[:120]
+        cache_key = str(cache_key or "").strip()[:100]
+        if not query or not cache_key:
+            raise ValueError("搜索词和缓存键不能为空")
+        created_at = now()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO search_history(id,query,cache_key,rows,meta,total,created_at) "
+                "VALUES(?,?,?,?,?,?,?) ON CONFLICT(cache_key) DO UPDATE SET "
+                "query=excluded.query,rows=excluded.rows,meta=excluded.meta,"
+                "total=excluded.total,created_at=excluded.created_at",
+                (new_id("search"), query, cache_key,
+                 json.dumps(rows, ensure_ascii=False),
+                 json.dumps(meta, ensure_ascii=False), len(rows), created_at))
+            self._conn.execute(
+                "DELETE FROM search_history WHERE id NOT IN ("
+                "SELECT id FROM search_history ORDER BY created_at DESC LIMIT ?)",
+                (max(1, min(int(limit or 20), 100)),))
+            self._conn.commit()
+        return {"query": query, "cache_key": cache_key, "total": len(rows),
+                "created_at": created_at, "meta": meta}
+
+    def list_searches(self, limit: int = 20) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id,query,cache_key,total,created_at,meta FROM search_history "
+                "ORDER BY created_at DESC LIMIT ?",
+                (max(1, min(int(limit or 20), 100)),)).fetchall()
+        out = []
+        for row in rows:
+            item = dict(row)
+            item["meta"] = json.loads(item.get("meta") or "{}")
+            out.append(item)
+        return out
+
+    def get_search(self, cache_key: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM search_history WHERE cache_key=?", (str(cache_key),)
+            ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        item["rows"] = json.loads(item.get("rows") or "[]")
+        item["meta"] = json.loads(item.get("meta") or "{}")
+        return item
+
+    def get_resolved_url(self, source_url: str) -> str | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT target_url FROM resolved_urls WHERE source_url=?", (source_url,)
+            ).fetchone()
+        return str(row["target_url"]) if row else None
+
+    def save_resolved_url(self, source_url: str, target_url: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO resolved_urls(source_url,target_url,created_at) VALUES(?,?,?) "
+                "ON CONFLICT(source_url) DO UPDATE SET target_url=excluded.target_url, "
+                "created_at=excluded.created_at", (source_url, target_url, now()))
+            self._conn.commit()
 
     # ---- 文章池 ----
 

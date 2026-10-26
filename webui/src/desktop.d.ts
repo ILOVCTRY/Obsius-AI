@@ -22,6 +22,8 @@ declare global {
     terminalKill: (id: string) => Promise<void>
     /** 原生目录选择（仅桌面壳）：返回绝对路径，用户取消返回空串。 */
     pickDirectory?: (defaultPath?: string) => Promise<string>
+    /** 交系统浏览器打开已算好的 http(s) 地址；拒绝非 http(s) 返回 false。 */
+    openExternal?: (url: string) => Promise<boolean>
   }
   interface Window { desktopBrowser?: DesktopBrowserApi }
   interface DesktopWindowApi {

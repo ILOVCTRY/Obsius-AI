@@ -9,7 +9,7 @@ import {
   Loader2, Plug, Plus, RefreshCw, RotateCcw, Send, Sparkles, Square, Trash2,
   Wrench, X, Zap,
 } from "lucide-react"
-import { api, ApiError } from "@/lib/api"
+import { api, ApiError, errText } from "@/lib/api"
 import type {
   AttachmentInfo, ChatAgent, ChatMcpServer, ChatMessage, ChatThread, ChatThreadError,
   ModelInfo, Asset, ChallengeFlag,
@@ -73,7 +73,7 @@ const CHIPS = [
 
 type PanelTab = "agents" | "skills" | "mcp" | null
 type SlashState = { mode: "menu" | "skills" | "mcp" }
-/** 待发附件（粘贴/拖拽即上传；chip 三态） */
+/** 待发附件（粘贴/拖拽即上传；chip 三态 + 分片进度） */
 type PendingFile = {
   key: string
   status: "uploading" | "ready" | "error"
@@ -81,6 +81,10 @@ type PendingFile = {
   size: number
   file: File
   att?: AttachmentInfo
+  /** 已上传字节（分片通道逐片推进；小文件一次到位=size） */
+  loaded?: number
+  /** 失败原因（ApiError.message），chip 会显示出来，不再是"红了但不知道为什么" */
+  error?: string
 }
 
 // 斜杠命令（K9-C）；CTX_LIMIT：上下文窗口分母，默认按 256K 计
@@ -688,11 +692,20 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
     setRefsDraft({ skills: [], mcps: [] })
   }, [tid, input])
 
-  // 附件随发（2026-10-08）：粘贴/拖拽即上传为 artifact（服务端同 sha 去重），chip 三态。
+  // 附件随发（2026-10-08）：粘贴/拖拽即上传为 artifact（服务端同 sha 去重），
+  // chip 三态 + 进度。2026-10-25：**不再有大小限制**——大于 32MB 自动走分片续传
+  // （16MB/片），几 GB 的 pcapng/内存 dump 也能传，进度实时显示在 chip 上。
   const uploadOne = (key: string, file: File) => {
-    api.uploadAttachment(pid, file)
-      .then((att) => setPendingFiles((fs) => fs.map((x) => x.key === key ? { ...x, status: "ready", att } : x)))
-      .catch(() => setPendingFiles((fs) => fs.map((x) => x.key === key ? { ...x, status: "error" } : x)))
+    api.uploadAttachmentAuto(pid, file, {
+      onProgress: (sent) => setPendingFiles((fs) =>
+        fs.map((x) => x.key === key ? { ...x, loaded: sent } : x)),
+    })
+      .then((att) => setPendingFiles((fs) => fs.map((x) =>
+        x.key === key ? { ...x, status: "ready", att, loaded: att.size } : x)))
+      // 之前是无参 catch：ApiError 里「超过 64MB 上限」这类原因被整条丢掉，
+      // 界面上只剩一条红边。现在把原因带到 chip 上（截断显示，title 里给全文）。
+      .catch((e: unknown) => setPendingFiles((fs) => fs.map((x) =>
+        x.key === key ? { ...x, status: "error", error: errText(e) } : x)))
   }
   const pickFiles = (files: FileList | null) => {
     for (const f of Array.from(files ?? [])) {
@@ -704,7 +717,9 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
   const retryFile = (key: string) => {
     const f = pendingFiles.find((x) => x.key === key)
     if (!f?.file) return
-    setPendingFiles((fs) => fs.map((x) => x.key === key ? { ...x, status: "uploading" } : x))
+    // 重试要清掉上一轮的失败原因与进度，否则红字会跟着新的一轮一直挂着。
+    setPendingFiles((fs) => fs.map((x) => x.key === key
+      ? { ...x, status: "uploading", error: undefined, loaded: 0 } : x))
     uploadOne(key, f.file)
   }
   const removeFile = (key: string) => setPendingFiles((fs) => fs.filter((x) => x.key !== key))
@@ -1296,6 +1311,7 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
                 className="mb-2 px-0.5"
                 items={pendingFiles.map((f) => ({
                   key: f.key, name: f.name, size: f.size, status: f.status,
+                  loaded: f.loaded, error: f.error,
                 }))}
                 onRemove={removeFile}
                 onRetry={retryFile}

@@ -27,9 +27,17 @@
 故代码只产**计划**，由 LLM 在同一轮用多个 call_expert 并发执行计划——而
 ``_tool_call_expert`` 会校验「这条派发在计划内」，越权派发被代码拒收。
 
-**不落库**：方向状态是会话内的易变状态（30 分钟 TTL 的租约、本轮计数），
-不是知识。落库会让上次会话的死锁留在图里，还要写清扫逻辑。真值（flag 台账、
-发现、能力）本来就在黑板，本模块只读它们、不写。
+**落库边界（ctf-direction-ledger，2026-10-25 修正）**：本模块的判据与计数仍是
+**代码侧唯一真值**，但方向账本会**镜像**到黑板（`core/ctf/ledger.py`）：
+`CtfSession` 可被传入一个 `ledger`，此时
+
+1. 构造时从账本恢复 `rounds` 与已派方向（跨轮不再「尚无方向记账」，分诊闸也
+   不会因为新开一轮而重新拦）；
+2. 准派/记账时把 `DirectionState` 回写账本（失败只记日志，不阻断调度）；
+3. 每新增 5 个**终态**方向组切一个摘要批次（幂等键在 `ctf_summary_items`）。
+
+镜像**不改判据**：租约仍是进程内 TTL 表（秒级易变状态不该落库），scheduler
+的 verdict 仍只看 `DirectionState`。账本坏了，调度照跑。
 """
 
 from __future__ import annotations
@@ -39,6 +47,8 @@ import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
+
+import logging
 
 from core.ctf import scheduler as sched
 from core.ctf.attest import (
@@ -52,6 +62,8 @@ from core.ctf.fold import DEFAULT_BUDGET, Section, fold, render as render_fold
 from core.ctf.lease import ClaimTable, direction_key
 from core.ctf.observe import parse_linktypes, parse_script_names
 from core.ctf.pacing import Pacing
+
+log = logging.getLogger(__name__)
 
 __all__ = [
     "DirectionState",
@@ -392,7 +404,7 @@ class CtfSession:
     def __init__(self, pacing: Pacing, *, claims: ClaimTable | None = None,
                  holder: str = "ctf-controller",
                  budget: int = DEFAULT_BUDGET,
-                 clock: Any = None):
+                 clock: Any = None, ledger: Any = None):
         self.pacing = pacing
         self.claims = claims or ClaimTable()
         self.holder = holder
@@ -404,6 +416,40 @@ class CtfSession:
         # plan/record 会被主线程与并发派发的子线程同时触碰（先返先触发模式下
         # worker 完成即记账），故所有状态变更都要过这把锁。
         self._lock = threading.Lock()
+        # 持久账本（可选）。None = 纯内存行为，与引入前完全一致（测试/独立
+        # 调用不被迫建库）。有它才恢复跨轮状态、才切摘要批次。
+        self.ledger = ledger
+        if ledger is not None:
+            self._restore_from_ledger()
+
+    def _restore_from_ledger(self) -> None:
+        """从账本恢复轮次与方向状态（线程内一次性，构造时跑）。
+
+        **恢复的不是「权威判据」而是「上一轮的观测」**：passes/flags/状态都从
+        库里读回，`DirectionState` 里无法持久化的部分（自证 challenge/attest、
+        linktype 收集）保持初值——那些是单轮内的核验动作，跨轮重放反而会让
+        「已出题未核验」的旧 nonce 重新生效。
+        """
+        try:
+            self.rounds = self.ledger.rounds()
+            for g in self.ledger.list_groups():
+                key = str(g.get("key") or "")
+                if not key:
+                    continue
+                self.dirs[key] = DirectionState(
+                    subgoal=str(g.get("subgoal") or ""), key=key,
+                    expert=str(g.get("expert") or "worker"),
+                    passes=int(g.get("passes") or 0),
+                    correct=int(g.get("correct") or 0),
+                    need=(int(g["need"]) if g.get("need") is not None else None),
+                    status=str(g.get("status") or STATUS_OPEN),
+                    first_at=float(g.get("first_epoch") or 0.0),
+                    last_progress_at=float(g.get("first_epoch") or 0.0),
+                    last_flag_at=float(g.get("first_epoch") or 0.0),
+                    last_summary=str(g.get("last_summary") or ""),
+                    flags_got=int(g.get("flags_got") or 0))
+        except Exception:  # noqa: BLE001 —— 账本故障退回纯内存调度
+            log.exception("ctf 账本恢复失败 holder=%s", self.holder)
 
     # ---------- 方向准入 ----------
 
@@ -421,6 +467,7 @@ class CtfSession:
     def _plan_locked(self, directions: list[dict], *, breadth_starved: bool,
                      default_expert: str) -> DispatchPlan:
         self.rounds += 1
+        self._persist_rounds()
         now = self._clock()
         plan = DispatchPlan()
         # 无条件首轮分诊闸（ctf-triage-first，P0-5）：**分诊还没得出结论之前**
@@ -540,8 +587,63 @@ class CtfSession:
             })
             plan.keys.add(key)
 
+        # 准派结果镜像到账本（ctf-direction-ledger）：**准派即登记**，而不是
+        # 等子线程跑完才记。理由：主控可能派了但子线程被删/主控被停，那条方向
+        # 仍然「已经提出并获准」，下一轮复核必须看得见它。登记失败的日志在
+        # ledger 内部吞掉，调度不受影响。
+        self._persist_granted(plan.granted)
         self._last_plan = plan
         return plan
+
+    # ---------- 账本镜像（失败不阻断调度） ----------
+
+    def _persist_rounds(self) -> None:
+        if self.ledger is None:
+            return
+        try:
+            self.ledger.set_rounds(self.rounds)
+        except Exception:  # noqa: BLE001 —— 账本故障不该让主控停摆
+            log.exception("ctf 轮次落库失败 holder=%s", self.holder)
+
+    def _persist_granted(self, granted: list[dict]) -> None:
+        if self.ledger is None or not granted:
+            return
+        for g in granted:
+            try:
+                st = self.dirs.get(g.get("key") or "")
+                self.ledger.ensure_group(
+                    subgoal=str(g.get("subgoal") or ""),
+                    key=str(g.get("key") or ""),
+                    expert=str(g.get("expert") or ""),
+                    need=(int(st.need) if st is not None and st.need else None),
+                    first_at=(st.first_at if st is not None else 0.0))
+                if st is not None:
+                    self.ledger.sync_from_state(st)
+            except Exception:  # noqa: BLE001
+                log.exception("ctf 方向组登记失败 key=%s", g.get("key"))
+
+    def _persist_state(self, st) -> None:
+        if self.ledger is None:
+            return
+        try:
+            self.ledger.sync_from_state(st)
+            # 终态组攒够 BATCH_SIZE 就切批次；摘要正文由 `run_pending_batches`
+            # 单独触发（`ctf_review` 里做），派发热路径上只做「切批」这一件
+            # 轻活，避免在 call_expert 收尾时多跑一次文本生成。
+            self.ledger.ensure_batches()
+        except Exception:  # noqa: BLE001 —— 账本故障不该让记账失败
+            log.exception("ctf 方向组回写失败 key=%s", getattr(st, "key", ""))
+
+    def flush_summaries(self) -> list[dict]:
+        """生成所有 pending 批次的摘要并返回结果（供 `ctf_review` 调用）。"""
+        if self.ledger is None:
+            return []
+        try:
+            self.ledger.ensure_batches()
+            return self.ledger.run_pending_batches()
+        except Exception:  # noqa: BLE001
+            log.exception("ctf 摘要批次处理失败 holder=%s", self.holder)
+            return []
 
     def _task_text(self, st: DirectionState, subgoal: str) -> str:
         """生成自包含的 worker 任务文本（代码拼装，LLM 不用操心格式）。
@@ -693,6 +795,9 @@ class CtfSession:
             elif verdict.action == sched.ACTION_REQUEUE:
                 st.status = STATUS_REQUEUED
                 self.claims.release(lease_text, self.holder)
+        # 回写账本：**在 verdict 落定之后**，否则会把「本轮判定前」的 open
+        # 状态写进去，跨轮恢复后看到的方向状态永远慢一拍。
+        self._persist_state(st)
         return {"verdict": verdict, "attest_issued": issued,
                 "attest_note": attest_note, "state": st}
 
@@ -814,8 +919,19 @@ class CtfSession:
         now = self._clock()
         budget = float(self.pacing.hard_total_cap_s())
         lines = ["## 代码侧复核（放弃判据由代码判定，你无权推翻）"]
+        # 账本段单独算：内存为空但库里有记录时，正是「跨轮恢复」最关键的那一
+        # 次复核——不能在这里早退成「尚无方向记账」（用户复盘现场）。
+        ledger_lines: list[str] = []
+        if self.ledger is not None:
+            ledger_lines = self.ledger.review_lines()
         if not self.dirs:
             lines.append("- （尚无方向记账：先用 ctf_dispatch 提出方向）")
+            if ledger_lines:
+                # 库里有、内存里没有 = 恢复失败（不该发生，但要说清而不是装作
+                # 没派过）。正常路径下 ledger 里的组在构造时已装进 self.dirs。
+                lines.append("- 注意：库里存在历史方向组但未能载入内存，"
+                             "下面的账本段仍可作为参考；派发前请先 ctf_dispatch。")
+                lines.extend(ledger_lines)
             return "\n".join(lines)
         # 分诊结论置顶（ctf-triage-first，P0-5）：它是后续所有方向的**输入**，
         # 不是普通轮次。埋在表格里会被模型当「又一条侦察笔记」略过，于是
@@ -885,6 +1001,8 @@ class CtfSession:
         if table:
             lines.append("\n## 进行中的方向（互斥表）")
             lines.append(table)
+        if ledger_lines:
+            lines.extend(ledger_lines)
         return "\n".join(lines)
 
     def _cost_line_locked(self, now: float) -> str:

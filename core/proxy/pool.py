@@ -67,7 +67,7 @@ class ProxyConfig:
     startup_timeout_s: float = 40.0
     python: str | None = None            # 显式解释器；None=自动解析
     auto_start: bool = False             # 项目首个代理动作时是否自动起服务
-    validate_timeout_s: int = 5          # 单代理验证超时（check runner --timeout）
+    validate_timeout_s: int = 12         # 单代理验证总超时；连接阶段由 runner 限制，读取阶段允许更宽
     # 验证基准网站（**2026-10-15 由 i.zut.edu.cn 改为 Cloudflare 204 探测点**）：原站整站
     # 返 502（实测站点根与 https 均不可达），会让**所有**代理被判 Failed 而全量剔除——
     # 抓得再多也留不下。改用 204 探测点：http 明文（大多代理能做，不大量剔除纯 HTTP 转发型）、
@@ -1023,10 +1023,22 @@ class ProxyPool:
             results = raw.get("results") or []
             baseline = raw.get("baseline")
         results = [r for r in results if isinstance(r, dict)]
+        baseline_valid = bool((baseline or {}).get("ok"))
+        for row in results:
+            confirmation = row.get("confirmation") or {}
+            if confirmation.get("confirmed") is False:
+                if row.get("blocked") is True:
+                    row["blocked"] = False
+                    row["reason"] = f"二出口复测未复现异常；{row.get('reason', '')}".strip()
+                elif row.get("ok") is False and confirmation.get("ok") is True:
+                    row["ok"] = True
+                    row["status_code"] = confirmation.get("status_code")
+                    row["latency"] = confirmation.get("latency")
+                    row["reason"] = "第二出口复测可达，首出口异常未确认"
         reachable = [r for r in results if r.get("ok")]
-        blocked = [r for r in results if r.get("blocked")]
+        blocked = [r for r in results if r.get("blocked") is True]
         usable = sorted(
-            (r for r in results if r.get("ok") and not r.get("blocked")),
+            (r for r in results if baseline_valid and r.get("ok") and r.get("blocked") is False),
             key=lambda r: (r.get("latency") if isinstance(r.get("latency"), (int, float))
                            else float("inf")))
         report("check-url", len(results), len(results), "完成")
@@ -1034,10 +1046,12 @@ class ProxyPool:
             "url": url,
             "total": len(results),
             "reachable": len(reachable),
-            "blocked": len(blocked),
+            "blocked": len(blocked) if baseline_valid else None,
             "usable": [{"proxy": r.get("proxy"), "protocol": r.get("protocol"),
                         "latency": r.get("latency"), "status_code": r.get("status_code")}
                        for r in usable[: max(0, limit)]],
+            "verdict": "comparable" if baseline_valid else "indeterminate",
+            "baseline_valid": baseline_valid,
             "results": results,
             "baseline": baseline,
         }

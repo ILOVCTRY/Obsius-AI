@@ -452,6 +452,27 @@ app.whenReady().then(async () => {
   })
   ipcMain.handle("window:is-maximized", () => Boolean(mainWindow?.isMaximized()))
   ipcMain.handle("window:close", () => mainWindow?.close())
+  // 显式外链通道（2026-10-25）：渲染进程不能靠 window.open 承接异步结果——
+  // guardTopLevelNavigation 的 setWindowOpenHandler 对**任何** window.open（含
+  // about:blank）都返回 deny，调用方拿到的是 null（曾误报成「浏览器拦截弹窗」）。
+  // 情报检索需要「先把 Google News 中转 token 解析成真实地址，再打开」，故提供
+  // 这个入口。只放行 http(s)；其余返回 false，绝不把任意 scheme 交给系统。
+  ipcMain.handle("shell:open-external", async (_event, url) => {
+    if (typeof url !== "string" || !/^https?:\/\//i.test(url)) {
+      logLine(`shell:open-external 拒绝非法 url=${String(url).slice(0, 80)}`)
+      return false
+    }
+    try {
+      // 成功也留痕：此前只记失败，成功路径在主进程完全不可见，
+      // 排查「点了没反应」时拿不到任何证据。
+      await shell.openExternal(url)
+      logLine(`shell:open-external 已交系统浏览器 url=${url}`)
+      return true
+    } catch (error) {
+      logLine(`shell:open-external 失败 url=${url} ${error}`)
+      return false
+    }
+  })
   ipcMain.handle("browser:create", (_event, args) => createBrowserTab(args?.pid || process.env.CS_PROJECT_ID || "", args?.sid))
   ipcMain.handle("terminal:create", (_event, args) => createTerminalTab(args?.pid, args?.cwd))
   ipcMain.handle("tab:close", (_event, id) => closeTab(id))

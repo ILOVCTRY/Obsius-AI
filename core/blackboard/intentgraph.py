@@ -34,12 +34,24 @@ findings 摊成一张**单向**的「样本 → 意图 → 收尾（发现 | 死
 
 from __future__ import annotations
 
+import logging
+
 from core.blackboard.intents import list_intents
 from core.blackboard.store import _loads
+
+log = logging.getLogger(__name__)
 
 #: 兜底样本节点：意图/发现没有任何可归资产锚点时挂这里（有需要才建）
 UNATTACHED_ID = "__unattached__"
 UNATTACHED_LABEL = "未归属样本"
+
+#: CTF 方向组节点的 id 前缀（ctf-direction-ledger，2026-10-25）。
+#: 加前缀是为了**与 intents 的行 id 硬隔离**：两者都可能以随机 hex 结尾，
+#: 混用会让前端把「方向组」当意图点开（详情面板字段全空）。
+CTF_GROUP_PREFIX = "ctfg:"
+
+#: `--ctf-ledger=off` 时整层关掉（前端/CLI 想只看证据链时用）
+CTF_GROUP_EDGE = "direction"
 
 
 # ---------- 主入口 ----------
@@ -47,12 +59,18 @@ UNATTACHED_LABEL = "未归属样本"
 def build_intent_graph(bb, project_id: str, *,
                        assets: list[dict] | None = None,
                        findings: list[dict] | None = None,
-                       intents: list[dict] | None = None) -> dict:
+                       intents: list[dict] | None = None,
+                       include_ctf_groups: bool = True) -> dict:
     """项目级意图推导图。
 
     返回 ``{nodes, edges, counts}``。bb 鸭子依赖（list_assets/list_findings）；
     intents 走 `intents.list_intents`（与写入面同源）；各输入可注入快照
     （测试与跨库复用）。**纯读**，不写任何状态。
+
+    ``include_ctf_groups``（ctf-direction-ledger，2026-10-25）：把 CTF 主控的
+    方向组投影成独立节点层（`sample → direction → run`）。它们**不是** intent：
+    intent 是「可证伪假设」，方向组是「派过的一条活」。混进同一节点类型会让
+    「收尾为发现/死路」的语义失效，故单独一层、单独的边类型。
     """
     if assets is None:
         assets = bb.list_assets(project_id)
@@ -109,13 +127,53 @@ def build_intent_graph(bb, project_id: str, *,
             if finding_sample[f["id"]] is None:
                 finding_sample[f["id"]] = UNATTACHED_ID
 
+    # ---- CTF 方向组层（ctf-direction-ledger）----
+    #
+    # **为什么在样本层之前算**：方向组的锚点是题目资产（challenge），它通常
+    # 不是 binary、也可能一条 intent/finding 都没有——若按「意图/发现的锚点」
+    # 决定样本集，这个题目根本不在图里，方向组的边就会指向不存在的节点
+    # （`_assert_dag` 直接抛「边端点不在节点集」）。
+    #
+    # 只投影**末次尝试**（一组一个节点），不把每次重试都画出来：5 组内部各跑
+    # 3 次就有 15 个点，图上会把真正的推导链挤散。重试次数放在节点字段里
+    # （`attempts`），要看每次的原文去工作台开子线程。
+    #
+    # 归属：方向组自带 `challenge_id`（题目资产）。**未绑定题目就不上图**——
+    # 挂到「未归属样本」会让它看起来像某个样本的推导产物，语义错。
+    ctf_groups: list[dict] = []
+    ctf_runs_by_group: dict[str, list[dict]] = {}
+    if include_ctf_groups and bb is not None:
+        try:
+            rows = bb.conn.execute(
+                "SELECT * FROM ctf_direction_groups WHERE project_id=?"
+                " ORDER BY rowid ASC", (project_id,)).fetchall()
+            for r in rows:
+                g = dict(r)
+                cid = str(g.get("challenge_id") or "")
+                if cid and cid in by_id:
+                    g["sample_id"] = sample_of(cid) or cid
+                else:
+                    g["sample_id"] = None   # 未绑定题目 → 不上图（见上）
+                if g["sample_id"]:
+                    ctf_groups.append(g)
+                    ctf_runs_by_group[g["id"]] = [
+                        dict(x) for x in bb.conn.execute(
+                            "SELECT * FROM ctf_direction_runs WHERE project_id=?"
+                            " AND group_id=? ORDER BY rowid ASC",
+                            (project_id, g["id"])).fetchall()]
+        except Exception:  # noqa: BLE001 —— 图投影失败不该让整张图 500
+            log.exception("意图图 CTF 方向组投影失败 project=%s", project_id)
+            ctf_groups, ctf_runs_by_group = [], {}
+
     # ---- 节点：样本层（全部 binary + 被用到的锚点资产）----
     nodes: list[dict] = []
     sample_ids: list[str] = []
     for a in assets:
         if a.get("type") == "binary":
             sample_ids.append(a["id"])
-    for sid in list(intent_sample.values()) + list(finding_sample.values()):
+    anchors = (list(intent_sample.values()) + list(finding_sample.values())
+               + [g["sample_id"] for g in ctf_groups])
+    for sid in anchors:
         if sid and sid not in sample_ids:
             sample_ids.append(sid)
 
@@ -165,6 +223,25 @@ def build_intent_graph(bb, project_id: str, *,
     edges: list[dict] = []
     edge_keys: set[tuple] = set()
 
+    for g in ctf_groups:
+        node_id = CTF_GROUP_PREFIX + g["id"]
+        runs = ctf_runs_by_group.get(g["id"]) or []
+        last = runs[-1] if runs else {}
+        nodes.append({
+            "id": node_id, "type": "direction",
+            "subgoal": g.get("subgoal", ""),
+            "status": g.get("status", "open"),
+            "expert": g.get("expert", ""),
+            "attempts": int(g.get("passes") or 0),
+            "flags_got": int(g.get("flags_got") or 0),
+            "terminal": bool(g.get("terminal")),
+            "last_summary": (g.get("last_summary") or "")[:400],
+            "last_run": {"status": last.get("status", ""),
+                         "sub_thread_id": last.get("sub_thread_id", ""),
+                         "at": last.get("finished_at") or last.get("started_at") or ""},
+            "sample_id": g["sample_id"],
+        })
+
     def add_edge(src: str | None, dst: str, kind: str) -> None:
         if not src or src == dst:
             return
@@ -210,21 +287,27 @@ def build_intent_graph(bb, project_id: str, *,
     for src, dst in _bypass_edges(edges, hidden):
         add_edge(src, dst, "bypass")
 
+    # 方向组：题目/sample → 方向组（一条方向从哪道题派出来的）
+    for g in ctf_groups:
+        add_edge(g["sample_id"], CTF_GROUP_PREFIX + g["id"], CTF_GROUP_EDGE)
+
     _assert_dag(nodes, edges)
 
     closed = [it for it in intents if it.get("status") == "closed"]
-    return {
-        "nodes": nodes,
-        "edges": edges,
-        "counts": {
-            "samples": len(sample_ids),
-            "intents": len(intents),
-            "open": sum(1 for it in intents if it.get("status") == "open"),
-            "closed": len(closed),
-            "dead_end": len(hidden),
-            "findings": len(graph_findings),
-        },
+    counts = {
+        "samples": len(sample_ids),
+        "intents": len(intents),
+        "open": sum(1 for it in intents if it.get("status") == "open"),
+        "closed": len(closed),
+        "dead_end": len(hidden),
+        "findings": len(graph_findings),
     }
+    # `directions` **只在真有时才出现**：既有调用方（前端计数条、测试）按
+    # 「counts 的键集固定」写断言，无条件加键会让它们全部变成失败——为零时
+    # 省略，语义上就是「这台项目没有 CTF 方向层」。
+    if ctf_groups:
+        counts["directions"] = len(ctf_groups)
+    return {"nodes": nodes, "edges": edges, "counts": counts}
 
 
 # ---------- 归属 / 推导 ----------

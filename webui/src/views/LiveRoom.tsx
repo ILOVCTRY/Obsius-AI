@@ -6,7 +6,7 @@ import { TeamRunReport } from "./live/TeamRunReport"
 import { TeamConfigDialog } from "@/components/team/TeamConfigDialog"
 import { PersonaEditor } from "./live/editors"
 import { EventRow, type StreamItem } from "./live/EventRow"
-import { ApiError, api, pollJob } from "@/lib/api"
+import { ApiError, api, errText, pollJob } from "@/lib/api"
 import { eventStyle } from "@/lib/events"
 import { roleName, sessionLabel } from "@/lib/roles"
 import { useEvents } from "@/lib/useEvents"
@@ -29,7 +29,8 @@ const MAX_DOM = 300
 
 type Tab = { key: string; label: string; sessionId: string | null }
 
-// 附件随发（2026-09-19）：chips 三态（上传中灰显 / 就绪可发 / 失败标红可重试）；File 留本地态供重试
+// 附件随发（2026-09-19）：chips 三态（上传中灰显 / 就绪可发 / 失败标红可重试）；
+// File 留本地态供重试。2026-10-25 起带分片进度（大文件不再有大小上限）。
 type PendingFile = {
   key: string
   status: "uploading" | "ready" | "error"
@@ -37,6 +38,10 @@ type PendingFile = {
   size: number
   file: File
   att?: AttachmentInfo
+  /** 已上传字节（分片通道逐片推进；小文件一次到位=size） */
+  loaded?: number
+  /** 失败原因（ApiError.message），chip 会显示出来，不再只是"红了" */
+  error?: string
 }
 
 // 输入行模式徽章（2026-09-19 Claude Code 化；2026-09-20 会话窗对话化改双模式；
@@ -700,11 +705,18 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
     }
   }
 
-  // 附件随发（2026-09-19）：选文件即上传为 artifact（服务端同 sha 去重），chip 三态
+  // 附件随发（2026-09-19）：选文件即上传为 artifact（服务端同 sha 去重），chip 三态。
+  // 2026-10-25：大于 32MB 自动走分片续传（16MB/片），几 GB 也能传，进度实时可见。
   const uploadOne = (key: string, file: File) => {
-    api.uploadAttachment(pid, file)
-      .then((att) => setPendingFiles((fs) => fs.map((x) => x.key === key ? { ...x, status: "ready", att } : x)))
-      .catch(() => setPendingFiles((fs) => fs.map((x) => x.key === key ? { ...x, status: "error" } : x)))
+    api.uploadAttachmentAuto(pid, file, {
+      onProgress: (sent) => setPendingFiles((fs) =>
+        fs.map((x) => x.key === key ? { ...x, loaded: sent } : x)),
+    })
+      .then((att) => setPendingFiles((fs) => fs.map((x) =>
+        x.key === key ? { ...x, status: "ready", att, loaded: att.size } : x)))
+      // 无参 catch 会把 ApiError 的原因整条丢掉（只留一条红边）→ 现在带到 chip 上
+      .catch((e: unknown) => setPendingFiles((fs) => fs.map((x) =>
+        x.key === key ? { ...x, status: "error", error: errText(e) } : x)))
   }
   const pickFiles = (files: FileList | null) => {
     for (const f of Array.from(files ?? [])) {
@@ -716,7 +728,9 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
   const retryFile = (key: string) => {
     const f = pendingFiles.find((x) => x.key === key)
     if (!f?.file) return
-    setPendingFiles((fs) => fs.map((x) => x.key === key ? { ...x, status: "uploading" } : x))
+    // 重试要清掉上一轮的失败原因与进度，否则红字会跟着新的一轮一直挂着。
+    setPendingFiles((fs) => fs.map((x) => x.key === key
+      ? { ...x, status: "uploading", error: undefined, loaded: 0 } : x))
     uploadOne(key, f.file)
   }
   const removeFile = (key: string) => setPendingFiles((fs) => fs.filter((x) => x.key !== key))
@@ -1542,6 +1556,7 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
             className={cn("mb-2", inputMode === "orch" && "opacity-50")}
             items={pendingFiles.map((f) => ({
               key: f.key, name: f.name, size: f.size, status: f.status,
+              loaded: f.loaded, error: f.error,
             }))}
             onRemove={removeFile}
             onRetry={retryFile}
@@ -1597,7 +1612,7 @@ export function LiveRoom({ pid, focusSession }: { pid: string; focusSession?: { 
             <button type="button"
               disabled={inputMode === "orch"}
               title={inputMode === "orch" ? "与编排对话不支持附件"
-                : "添加附件（exe/elf/图片等，单文件 ≤64MB，随「对话/任务」下发，Agent 可 run_cmd 读取）"}
+                : "添加附件（exe/elf/图片/抓包等，不限大小，大文件自动分片续传并显示进度，随「对话/任务」下发，Agent 可 run_cmd 读取）"}
               onClick={() => fileInputRef.current?.click()}
               className={cn("flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
                 inputMode === "orch" && "cursor-not-allowed opacity-40 hover:bg-transparent hover:text-muted-foreground")}>

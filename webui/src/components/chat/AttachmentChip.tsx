@@ -25,6 +25,12 @@ export interface AttachmentChipItem {
   name: string
   size: number
   status: AttachmentChipStatus
+  /** 已上传字节（0..size）。有值就画进度条与百分比——几个 G 的文件最需要
+   *  「还在动」的反馈，只转个圈用户没法判断是卡住还是在走。 */
+  loaded?: number
+  /** 失败原因（来自 ApiError.message）。此前一律只显示「上传失败」，用户
+   *  分不清是超限、断网还是权限问题。 */
+  error?: string
 }
 
 export function AttachmentChip({ item, onRemove, onRetry }: {
@@ -36,21 +42,41 @@ export function AttachmentChip({ item, onRemove, onRetry }: {
   const Icon = FILE_ICONS[icon]
   const isError = item.status === "error"
   const isUploading = item.status === "uploading"
+  // 进度：只在真正知道总量时算百分比（size=0 的极端情况退化成不确定态转圈）
+  const pct = isUploading && item.size > 0 && item.loaded != null
+    ? Math.min(100, Math.round((item.loaded / item.size) * 100))
+    : null
+  const errorText = item.error?.trim() || ""
 
   return (
     <span
       className={cn(
-        "group inline-flex h-8 max-w-[17.5rem] min-w-0 items-center gap-2 rounded-full border pr-1.5 pl-1",
+        "group relative inline-flex h-8 max-w-[17.5rem] min-w-0 items-center gap-2 overflow-hidden rounded-full border pr-1.5 pl-1",
         "text-[11px] shadow-[0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-150",
         isError
           ? "border-destructive/45 bg-destructive/8 hover:border-destructive/60"
           : "border-border/70 bg-card/70 hover:-translate-y-px hover:border-(--brand-border) hover:bg-card/90 hover:shadow-[0_3px_10px_rgba(0,0,0,0.08)]",
-        isUploading && "opacity-75",
       )}
       title={isError
-        ? "上传失败，右侧「重试」可再传一次"
-        : `${item.name}\n${badge} · ${fmtBytes(item.size)}`}
+        ? `上传失败${errorText ? `：${errorText}` : ""}\n右侧「重试」可再传一次`
+        : isUploading
+          ? `${item.name}\n${badge} · ${fmtBytes(item.size)}${pct != null ? ` · 已传 ${pct}%` : " · 上传中"}`
+          : `${item.name}\n${badge} · ${fmtBytes(item.size)}`}
     >
+      {/* 上传进度条：贴胶囊内底部的 2px 细线，**不占额外高度**——胶囊必须保持
+          h-8 定高，否则待发区会在开始/结束上传时上下跳一下（旧版为不跳变刻意
+          让三态共用同一骨架，这个约束继续守）。transition 让跨分片的推进连续。 */}
+      {isUploading && pct != null && (
+        <span
+          aria-hidden
+          className="pointer-events-none absolute inset-x-0 bottom-0 h-[2px] bg-(--brand)/15"
+        >
+          <span
+            className="block h-full bg-(--brand) transition-[width] duration-200 ease-out"
+            style={{ width: `${pct}%` }}
+          />
+        </span>
+      )}
       {/* 类型图标：圆角方牌 + 「类型色 / 类型色 12% 底」。
           底不能用 --accent：五套配色里 accent 与背景同色系，亮底上图标块整块消失
           （rose-light 实测：灰牌溶进白底）。用类型色自己的淡底 = 有色彩身份且两套底色都立得住。 */}
@@ -70,12 +96,19 @@ export function AttachmentChip({ item, onRemove, onRetry }: {
         {item.name}
       </span>
 
-      {/* 第三层：字节数。**不用 font-mono**——等宽字体在 9.5px 下字距散（"4 . 0  K B" 观感），
-          且这里是「弱提示」不是要对齐的数字列；改 sans + tabular-nums 稳列宽不散字。 */}
+      {/* 第三层：字节数 / 上传百分比 / 失败原因。
+          **不用 font-mono**——等宽字体在 9.5px 下字距散（"4 . 0  K B" 观感），
+          且这里是「弱提示」不是要对齐的数字列；改 sans + tabular-nums 稳列宽不散字。
+          大文件（几 GB）走分片上传时，这里显示百分比而不是「上传中」——只看转圈
+          无法判断是卡死还是在走，几十分钟的传输里这一点很要命。 */}
       {isUploading ? (
-        <span className="flex shrink-0 items-center gap-1 text-[9.5px] text-muted-foreground">
+        <span className="flex shrink-0 items-center gap-1 text-[9.5px] tabular-nums text-muted-foreground">
           <Loader2 className="size-2.5 animate-spin" />
-          上传中
+          {pct != null ? `${pct}%` : "上传中"}
+        </span>
+      ) : isError && errorText ? (
+        <span className="max-w-[9rem] shrink-0 truncate text-[9.5px] text-destructive/80" title={errorText}>
+          {errorText}
         </span>
       ) : (
         <span className="shrink-0 text-[9.5px] tabular-nums text-muted-foreground/75">

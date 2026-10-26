@@ -13,8 +13,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Callable
-from urllib.parse import urlparse
+from typing import Any, Callable
+from urllib.parse import quote, urlparse
 
 def _persisted_secret(config: dict, suffix: str) -> str:
     raw_path = str(config.get("settings_path") or "").strip()
@@ -81,6 +81,12 @@ class _RelayHandler(socketserver.BaseRequestHandler):
             upstream = socket.create_connection(self.server.upstream, timeout=5)
             upstream.sendall(clean_head + b"\r\n\r\n" + remainder)
             self.request.settimeout(None)
+            # upstream 也必须解除超时。`create_connection(timeout=5)` 给 socket
+            # 留下了 5 秒超时，只清 client 侧不够：隧道建立后若 TLS 握手超过 5 秒，
+            # `upstream.recv` 抛 `socket.timeout`（OSError 子类）→ 被 except 吞掉
+            # → finally 关闭两端，客户端看到 `SSL_connect: Connection closed
+            # abruptly`。实测表现为「同一代理时通时不通」（6 次里 1 次失败）。
+            upstream.settimeout(None)
         except OSError:
             return
 
@@ -94,11 +100,13 @@ class _RelayHandler(socketserver.BaseRequestHandler):
             except OSError:
                 pass
             finally:
-                for stream in (source, target):
-                    try:
-                        stream.shutdown(socket.SHUT_RDWR)
-                    except OSError:
-                        pass
+                # 只关目标方向的写端，让另一方向把剩余数据读完。
+                # 若在这里 shutdown 两端，先结束的那个方向会连带砍掉还在传输的
+                # 另一个方向（TLS 握手/响应体中途被截断的另一个来源）。
+                try:
+                    target.shutdown(socket.SHUT_WR)
+                except OSError:
+                    pass
 
         threading.Thread(target=forward, args=(self.request, upstream), daemon=True).start()
         forward(upstream, self.request)
@@ -110,6 +118,10 @@ class _ThreadingRelay(socketserver.ThreadingTCPServer):
     daemon_threads = True
 
 
+# 不能只写 "google"：google 的出口 IP 常被 403 风控、bing 偶发超时，单引擎
+# 会让整次检索直接归零。这里给一组已验证可用的组合，坏一个还有别的顶上。
+DEFAULT_ENGINES = "google,bing,brave"
+
 DEFAULTS = {
     "enabled": False,
     "auto_start": False,
@@ -118,9 +130,29 @@ DEFAULTS = {
     "port": 8888,
     "relay_port": 7891,
     "upstream_proxy": "",
-    "engines": "google",
+    "engines": DEFAULT_ENGINES,
     "settings_path": "",
 }
+
+# `engines` 配置是逗号分隔的引擎名，直接拼进 SearXNG 的 settings 时只认
+# `{"name","engine","shortcut","disabled"}` 结构。只允许已知引擎名，避免把
+# 随意字符串当模块名注入（SearXNG 会按 `engine` 字段动态 import）。
+_KNOWN_ENGINES = ("google", "bing", "brave", "duckduckgo")
+
+
+def _enabled_engines(raw: Any) -> list[dict]:
+    """把 `"google,bing,brave"` 转成 SearXNG settings 的 engines 列表。"""
+    names: list[str] = []
+    for token in str(raw or "").replace("，", ",").split(","):
+        name = token.strip().lower()
+        if name in _KNOWN_ENGINES and name not in names:
+            names.append(name)
+    if not names:
+        names = [n.strip() for n in DEFAULT_ENGINES.split(",")]
+    return [
+        {"name": name, "engine": name, "shortcut": name[:2], "disabled": False}
+        for name in names
+    ]
 
 
 class SearXNG:
@@ -240,18 +272,38 @@ class SearXNG:
         p.parent.mkdir(parents=True, exist_ok=True)
         proxy = str(self.config.get("upstream_proxy") or "").strip()
         relay_port = int(self.config.get("relay_port") or 0)
-        auth_token = str(self.config.get("relay_auth_token") or "")
-        credentials_raw = f"cyberstrike:{_relay_password(self.config)}"
-        encoded_credentials = base64.b64encode(credentials_raw.encode("ascii")).decode("ascii") if proxy else ""
-        credentials = f"{encoded_credentials}@" if encoded_credentials else ""
+        # userinfo 必须是**明文** `cyberstrike:<密码>`，不能预编码成 base64。
+        # curl 拿到 userinfo 后会自己 base64 出 `Proxy-Authorization: Basic ...`；
+        # 若这里再放已编码的串，实际发出的就是 base64(base64(...))，relay 校验
+        # `expected = "Basic " + auth_token` 必然不等 → relay 直接 return 关连接，
+        # curl 报 `(56) Proxy CONNECT aborted`，SearXNG 记成 `proxy error`、结果 0 条。
+        # `token_urlsafe` 会产出 `-`/`_`，且密码可能被手工改成含 `+`/`/`/`=`；
+        # 这些字符在 URL 的 userinfo 里有特殊含义，必须转义后才能可靠解析。
+        credentials = (f"cyberstrike:{quote(_relay_password(self.config), safe='')}@"
+                       if proxy else "")
         container_proxy = f"http://{credentials}host.docker.internal:{relay_port}" if proxy else ""
         settings = {
             "use_default_settings": True,
             "server": {"secret_key": _settings_secret(self.config), "limiter": False},
             "search": {"safe_search": 0, "formats": ["html", "json"]},
+            # SearXNG 上游默认把 `google` 标成 `disabled: true`（只有 brave/
+            # duckduckgo/wikipedia 等默认开启，而这些在国内出口基本不可达）。
+            # 不显式覆盖，即使请求里写了 `engines=google` 也拿不到任何结果，
+            # 且 google 不会出现在 `unresponsive_engines` 里——表现为「0 条结果
+            # 但没有任何报错」，极难定位。
+            # 只写死 google/bing 是不够的：google 的出口 IP 常被 403 风控、
+            # bing 偶发超时，两者同时失效就是「0 条结果」。必须把配置里声明的
+            # 引擎全部显式启用，否则 `brave` 这类默认开启的引擎虽能供结果，
+            # 但一旦上游默认值变化就静默归零。
+            "engines": _enabled_engines(self.config.get("engines")),
         }
         if container_proxy:
-            settings["outgoing"] = {"proxies": {"all://": [container_proxy]}}
+            # 值必须是**字符串**，不能是列表。
+            # SearXNG 的 `_proxy_kwargs()` 把 `all://` 映射成 `{"proxy": <值>}` 后
+            # 直接交给 curl_cffi；curl_cffi 的 `proxy` 参数只接受 str，传 list 会
+            # 抛 ProxyError，SearXNG 记成 `unresponsive_engines: [["google","proxy error"]]`
+            # —— 结果数为 0，但网络其实是通的（实测容器经 relay 可完成 TLS1.3 握手）。
+            settings["outgoing"] = {"proxies": {"all://": container_proxy}}
         temp = p.with_suffix(p.suffix + ".tmp")
         temp.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
         temp.replace(p)
@@ -305,7 +357,7 @@ class SearXNG:
 
     def validate_search(self, query: str = "权限提升") -> dict:
         params = urllib.parse.urlencode({"q": query or "权限提升", "format": "json",
-                                         "engines": self.config.get("engines") or "google",
+                                         "engines": self.config.get("engines") or DEFAULT_ENGINES,
                                          "time_range": "week"})
         url = f"http://127.0.0.1:{int(self.config['port'])}/search?{params}"
         try:
@@ -313,7 +365,11 @@ class SearXNG:
                 data = json.loads(response.read().decode("utf-8"))
             rows = data.get("results", [])
             degraded = data.get("unresponsive_engines") or []
-            return {"ok": bool(rows) and not degraded, "count": len(rows),
+            # 判据是「拿没拿到结果」，不是「有没有引擎降级」。多引擎配置下
+            # （google 常被 403、bing 偶发超时）必然有引擎降级，若把 degraded
+            # 也算失败，就会出现「验证检索失败：15 条」这种自相矛盾的结论。
+            # 降级只作为提示信息返回，交给调用方展示。
+            return {"ok": bool(rows), "count": len(rows),
                     "results": rows[:5],
                     "engines": sorted({r.get("engine", "") for r in rows if r.get("engine")}),
                     "dated": sum(1 for r in rows if r.get("publishedDate")),
