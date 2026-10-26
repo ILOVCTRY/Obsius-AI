@@ -1,4 +1,0 @@
-13. [GET] https://ins.sjtu.edu.cn/api/ins/topics/seminar.json => [200] OK
-19. [GET] https://ins.sjtu.edu.cn/api/ins/peoples/caoyu.json => [200] OK
-
-Note: 18 static requests not shown, run with "static" option to see them.

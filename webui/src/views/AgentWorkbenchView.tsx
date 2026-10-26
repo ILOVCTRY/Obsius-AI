@@ -35,7 +35,7 @@ import { EFFORT_GEARS, EFFORT_DEFAULT, EFFORT_HINT, EFFORT_LABEL, gearIndex,
 import { cn } from "@/lib/utils"
 import { paneMaxWidth } from "@/lib/paneWidth"
 import { useNavRailSlot } from "@/lib/navRail"
-import { useEvents } from "@/lib/useEvents"
+import { useEvents, type ThinkingFrame } from "@/lib/useEvents"
 
 // 智能体工作台（K9，2026-09-29）：对话式挖洞入口（蛙池式）。
 // K9-UI（2026-09-29）：蛙池式结构语言 × 深色黑客风精修——左栏 agent 切换 +
@@ -168,9 +168,20 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
     () => paneMaxWidth(splitterRef.current, ASIDE_RESERVE, ASIDE_RESERVE_EXTRA), [])
   const scrollRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  // 思考瞬时帧（v51，thinking-delta-snapshot）：后端已把 `chat.thinking.delta`
+  // 从事件流降级为 `chat_delta_state` 状态快照（每线程每步一行，覆盖语义），
+  // 流式内容改由无 id 的 `ws.thinking` 帧推送——不进事件窗口、不写缓存。
+  // 这里只收当前线程的帧；别家子代理的帧直接丢，避免无关重渲。
+  const [thinkFrame, setThinkFrame] = useState<ThinkingFrame | null>(null)
+  const onThinking = useCallback((f: ThinkingFrame) => {
+    if (f.thread_id !== tid || !f.text) return
+    setThinkFrame(f)
+  }, [tid])
+  // 切线程丢弃旧帧：帧是**状态**不是记录，跨线程复用会让新线程短暂显示别人的思考。
+  useEffect(() => { setThinkFrame(null) }, [tid])
   // flushMs=50（≈20Hz）：工作台流式期要跟得上后端 ~20Hz 的 delta 投递，否则前端
   // 100ms 批合并会把输出压成「一顿顿的」（2026-10-04 顺滑化）。
-  const { events } = useEvents(pid, null, { flushMs: 50 })
+  const { events } = useEvents(pid, null, { flushMs: 50, onThinking })
 
   // 待审批（2026-10-04）：工作台时间线是 ChatMessage[]，审批事件不在其中 → 用「贴 composer
   // 的悬浮卡」呈现项目待审批单；新 approval.requested 到达即唤醒重拉。
@@ -581,22 +592,41 @@ export function AgentWorkbenchView({ pid, meta, focusThread, onFocusConsumed }: 
   }, [events, tid])
   // 思考内容与回复分开组装：后端发送的是累计全文，因此每个新事件直接覆盖。
   // 只消费当前用户消息之后的事件，避免上一轮思考在新消息等待时短暂闪现。
+  //
+  // v51（thinking-delta-snapshot）：流式增量已不在事件表里，走 `ws.thinking`
+  // 瞬时帧（见上面的 thinkFrame）。两路合流靠**新鲜度水位** mark：
+  //   本轮 user 消息时间 → 每条 chat.thinking(.delta) 的 created_at → 逐次抬升；
+  //   帧带服务端 ts（浮点秒），比水位新就用帧，否则用已落库的终稿。
+  // 帧与终稿携带的是同一段文本的累计前缀，帧更旧时让位给终稿才不会「越显示越短」。
+  // created_at 是秒级精度（store.now 的 timespec="seconds"），所以同一秒内的
+  // 先后可能判反——影响只在这一秒的显示，下一帧/终稿立即纠正。
   const liveThinking = useMemo(() => {
     let text = ""
     let started = false
+    let mark = 0
     for (const e of events) {
       const p = e.payload as { thread_id?: string; role?: string; text?: string; thinking?: string }
       if (e.kind === "chat.message" && p?.thread_id === tid && p.role === "user") {
         started = true
         text = ""
+        mark = Date.parse(e.created_at) || 0
         continue
       }
       if (!started || p?.thread_id !== tid) continue
-      if (e.kind === "chat.thinking.delta" && typeof p.text === "string") text = p.text
-      else if (e.kind === "chat.thinking" && typeof p.thinking === "string") text = p.thinking
+      if (e.kind === "chat.thinking.delta" && typeof p.text === "string") {
+        text = p.text
+        mark = Math.max(mark, Date.parse(e.created_at) || 0)
+      } else if (e.kind === "chat.thinking" && typeof p.thinking === "string") {
+        text = p.thinking
+        mark = Math.max(mark, Date.parse(e.created_at) || 0)
+      }
+    }
+    if (started && thinkFrame && thinkFrame.thread_id === tid
+        && thinkFrame.ts * 1000 > mark) {
+      return thinkFrame.text
     }
     return text
-  }, [events, tid])
+  }, [events, tid, thinkFrame])
   // assistant(tool_calls) 已落库但部分调用尚无结果行 → 锚定转圈块（轮询滞后 ≤2s）
   const hasPendingCall = useMemo(() => messages.some((m) =>
     m.role === "assistant" && (m.tool_calls ?? []).some((tc) =>

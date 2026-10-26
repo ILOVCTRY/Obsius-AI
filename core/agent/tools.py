@@ -3122,6 +3122,39 @@ class ToolDispatcher:
                  "assets": [_asset_row(a, verbose=verbose) for a in rows]},
                 ensure_ascii=False)
         if what == "events":
+            # kind 白名单校验（2026-10-26 事故）：未知 kind 直接报错并给出可用值。
+            #
+            # 为什么必须在这里拦：`recent_events` 的 `kind IN (…)` 在 events 上
+            # 没有可用索引时，**0 匹配也要扫完整个项目的事件表**才能返回空。
+            # 实测 82 万条事件的项目上，模型猜的 `chat.failed` / `chat.finished`
+            # （两者本仓根本不存在）各花 2.1~2.4 秒，运行期并发写争锁后涨到 27
+            # 秒——同批后续工具全部堵在「排队中」，用户看到的就是「卡住了」。
+            #
+            # 为什么不在 `recent_events` 里校验：那是前端/直播间/编排器的内部
+            # 入口，传的都是代码里的合法常量，不该被拦；只有 LLM 会猜错名字。
+            if kinds:
+                known = self.bb.distinct_event_kinds(self.project_id)
+                # 新项目还没落过事件时 known 为空：此时任何 kind 都无从判断，
+                # 放行让查询正常返回空数组（不能把「空项目」报成「参数非法」）。
+                if known:
+                    unknown = [k for k in kinds if k not in known]
+                    if unknown:
+                        # 缓存可能过期（新 kind 刚出现，如本轮才有的 chat.wrapup）
+                        # → 绕过缓存再确认一次。只有「刷新后仍不存在」才报错，
+                        # 否则会把合法的新 kind 误判成未知（假阴性）。
+                        known = self.bb.distinct_event_kinds(
+                            self.project_id, use_cache=False)
+                        unknown = [k for k in kinds if k not in known]
+                    if unknown:
+                        return json.dumps({
+                            "error": "unknown_event_kinds",
+                            "unknown_kinds": unknown,
+                            "available_kinds": known,
+                            "hint": ("这些 kind 在本项目从未出现过（多半是猜的名字）。"
+                                     "按 available_kinds 里的真实名字重查；"
+                                     "只想看某个会话就传 session_id，"
+                                     "想看全部事件就不要传 kinds。"),
+                        }, ensure_ascii=False)
             rows = self.bb.recent_events(
                 self.project_id, tail=limit if limit is not None else 50,
                 kinds=kinds, session_id=session_id)

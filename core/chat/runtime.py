@@ -18,10 +18,16 @@
 call_expert：spawn 持久子线程（parent_thread_id 留档）→ 隔离上下文跑完
 → 摘要+线程引用回传主控（不审批，全程事件流可见）。
 
-流式：llm 的 text/thinking 回调分别攒 delta → 节流落 chat.delta /
-chat.thinking.delta 事件（前端按 thread_id 组装）；每步思考完成落
+流式：llm 的 text/thinking 回调分别攒 delta → 节流落 chat.delta 事件 /
+chat_delta_state 状态快照（前端按 thread_id 组装）；每步思考完成落
 chat.thinking 终稿；工具调用落 chat.tool 事件；回复终稿落 chat.message 事件。
 消息全文以 chat_messages 表为准，事件只承担实时可见性。
+
+**思考增量不是事件**（v51，2026-10-26）：`chat.thinking.delta` 曾是事件，每条
+携带累计全文，形成平方级放大（一条 9,147 字的思考块写成 6,547 行 / 57 MB，
+全量 8.19 GB）。它信息量为零（恒是终稿前缀），故降级为「每 (线程, 步) 一行」
+的状态快照，由 ws_events 轮询推无 id 的 `ws.thinking` 瞬时帧。正文 chat.delta
+仍是事件（它带的是真正的逐步增量，且条数受节流约束，不构成放大）。
 """
 
 from __future__ import annotations
@@ -172,6 +178,14 @@ _INTENT_TOOLS = ("declare_intent", "close_intent", "reopen_intent", "bb_delete_i
 # - `call_expert`：新任务、新上下文、新线程；产出是摘要。
 # - `ask_expert`：同一任务、沿用原上下文；产出是追问答案或后续动作。
 ASK_EXPERT_TOOL = "ask_expert"
+
+# 续跑（`ask_expert(resume=true)`）的墙钟预算（2026-10-26）。**为什么必须给**：
+# 事故复盘里 `ask_expert` 追问跑出 2268 秒不返回——子轮只有 `_EXPERT_MAX_STEPS
+# = 200` 步上限、**没有墙钟上限**（`run_budget_s` 缺省 0.0），而子专家会把
+# 「追问」理解成「再派一次活」，一头扎回任务书里没测尽的面。续跑通道专门治
+# 这个失败形态，所以必须自带时间闸；超时走既有 `REASON_TIMEOUT` 收尾，且
+# **回收块在子轮之外拼装**——即便续跑被预算截断，上一轮的成果也照样回传。
+_RESUME_BUDGET_S = 1200.0
 
 # 走 `_dispatch_inner` **早拦截分支**的工具：它们的 schema 由
 # `_orch_tool_specs` 单独挂（带动态枚举/说明），**不能**再经
@@ -3850,7 +3864,15 @@ class ChatTurn:
                     "**review=true（已解出后复盘用）**：本题台账已 solved 时普通"
                     "追问会被拦，传 review=true 走**只读复盘通道**——那条通道里"
                     "没有执行/派发/写黑板工具，专家只能读既有结论并回答，"
-                    "所以能用来捞一手报错原文、补沉淀，**不能**借它继续解题。",
+                    "所以能用来捞一手报错原文、补沉淀，**不能**借它继续解题。\n"
+                    "**resume=true（意外中断后回收并续跑）**：工具结果里出现"
+                    "「进程重启，本轮工具执行中断」「database is locked」这类"
+                    "**非专家自身原因**的中断时用。它先**只读回收**该线程已产出"
+                    "的成果（最后一次 deliver 全文 + 最后结论 + 未答工具调用），"
+                    "再让它接着上次继续；`message` 可省略（自动起草「先报告、"
+                    "只补缺口、不要从头重试」的指令）。回收块**不花 LLM**，"
+                    "续跑被墙钟截断也照常回传——**不要因为一次中断就重派**，"
+                    "那会把已经干完的活整轮白烧。与 review 互斥。",
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -3862,7 +3884,18 @@ class ChatTurn:
                         "message": {
                             "type": "string",
                             "description": "要追加给该专家的消息（自包含：说清"
-                                           "你要什么、为什么需要）",
+                                           "你要什么、为什么需要）。"
+                                           "resume=true 时可省略，由代码按已产出"
+                                           "内容自动起草。",
+                        },
+                        "resume": {
+                            "type": "boolean",
+                            "description": (
+                                "意外中断后续跑：先只读回收该线程已产出的成果"
+                                "（交付全文/最后结论/未答调用），再让它接着上次"
+                                "继续。用于「进程重启」「database is locked」这类"
+                                "非专家自身原因的中断——**别重派**，重派等于把"
+                                "已经干完的活再烧一遍。message 可省略。"),
                         },
                         "review": {
                             "type": "boolean",
@@ -3870,10 +3903,10 @@ class ChatTurn:
                                 "只读复盘：本题已解出、想追问一手结论时传 true。"
                                 "该模式剥夺执行/派发/写黑板能力（只留读文件、"
                                 "查黑板、读手册、交结论），因此不会被「已解出」闸拦。"
-                                "未解出时无需传。"),
+                                "未解出时无需传。与 resume 互斥。"),
                         },
                     },
-                    "required": ["thread_id", "message"],
+                    "required": ["thread_id"],
                 },
             })
         # artex_* / ctf_* 这些**控制器专属**工具同样按勾选下发
@@ -4197,6 +4230,10 @@ class ChatTurn:
                     "问它「凭什么判定这条路不通」「把 payload 构造写具体」都行。"
                     "**不要为了问细节重新 call_expert**：新线程从零开始，"
                     "原来那轮的观察全丢，还得把活重干一遍。"
+                    "**工具结果里出现「进程重启，本轮工具执行中断」「database is "
+                    "locked」这类非专家自身原因的中断时，用 ask_expert(resume=true) "
+                    "而不是重派**：它先只读回收那条线程已产出的交付与结论，再让它"
+                    "接着上次继续；重派等于把已经干完的活再烧一遍。"
                     "**提案只能由你提**：子代理没有提案权（只有主控能提），"
                     "所以沉淀细节要靠 ask_expert 问够，再自己写 propose_pack_edit。")
                 parts.append(self._situation_context())
@@ -4857,6 +4894,10 @@ class ChatTurn:
             # 中断路径不调用（残留 delta = 被中断思考的现场审计）。
             try:
                 self.bb.prune_chat_thread_deltas(self.project_id, self.thread_id)
+                # v51：思考快照是**状态**不是记录，收尾必须删——留着会让下次重连
+                # 把上一轮的思考当成本轮的显示出来（events 里的 delta 没这问题：
+                # 它们是带 id 的历史事件，前端按游标回放不会错位）。
+                self.bb.prune_delta_states(self.project_id, self.thread_id)
             except Exception:  # noqa: BLE001 —— 清剪失败不影响收尾
                 log.exception("chat delta 清剪失败 thread=%s", self.thread_id)
             self._maybe_kb_iteration()
@@ -4877,6 +4918,10 @@ class ChatTurn:
             chat_store.update_thread(self.bb, self.thread_id, status="idle")
             try:
                 self.bb.prune_chat_thread_deltas(self.project_id, self.thread_id)
+                # v51：思考快照是**状态**不是记录，收尾必须删——留着会让下次重连
+                # 把上一轮的思考当成本轮的显示出来（events 里的 delta 没这问题：
+                # 它们是带 id 的历史事件，前端按游标回放不会错位）。
+                self.bb.prune_delta_states(self.project_id, self.thread_id)
             except Exception:  # noqa: BLE001 —— 清剪失败不影响收尾
                 log.exception("chat delta 清剪失败 thread=%s", self.thread_id)
             return final
@@ -4978,14 +5023,30 @@ class ChatTurn:
 
         组装逻辑与任务链共用 `core.agent.tools.compose_delivery_summary`——两处
         各写一份必然漂移，同一次交付在 `call_expert` 与直播间就会长得不一样。
+
+        **返回值出口是伪工具调用二次扩散的唯一闸口**（2026-10-26 事故）：
+        这个字符串会原样变成 `call_expert` 的「收尾摘要」、ARTEX Intent 的
+        `result`、CTF 账本的 `result`——任何一处残留 `<｜｜DSML｜｜ …>` 都会被
+        回放进**主控**的上下文，教它模仿该格式。上游各分支已各自清洗（主循环
+        与 `_wrapup`），这里再兜一道：宁可多剥一次，也不让泄漏出这个函数。
         """
         try:
             from core.agent.tools import compose_delivery_summary
-            return compose_delivery_summary(
+            out = compose_delivery_summary(
                 getattr(self._dispatcher, "deliveries", None), final)
         except Exception:  # noqa: BLE001 —— 组装失败退回原文，绝不炸整轮
             log.exception("chat 收尾组装失败 thread=%s", self.thread_id)
-            return final
+            out = final
+        if has_pseudo_tool_call(out or ""):
+            clean = strip_pseudo_tool_calls(out)
+            self._emit("chat.pseudo_toolcall", {
+                "phase": "strip", "scope": "compose_final",
+                "chars": len(out or ""), "clean_chars": len(clean)})
+            log.warning("本轮终稿含伪工具调用标记，已在出口剥离 thread=%s "
+                        "chars=%d clean=%d", self.thread_id, len(out or ""),
+                        len(clean))
+            out = clean or PSEUDO_TC_FINAL_TEXT
+        return out
 
     def _loop(self, user_text: str) -> str:
         """入口包装：整轮标记为本线程会话作用域（请求体留痕归属，2026-10-17）。"""
@@ -5109,8 +5170,15 @@ class ChatTurn:
                 self._emit("chat.delta", {"text": text, "seq": _pub["seq"]})
 
             def on_thinking(delta: str, _acc=thinking_acc,
-                            _pub=thinking_pub) -> None:
-                """思考增量按累计全文发布，前端可直接覆盖当前内容。"""
+                            _pub=thinking_pub, _st=_step) -> None:
+                """思考增量按累计全文发布，前端可直接覆盖当前内容。
+
+                v51 起**不再 append 事件**，改写成状态快照（每步一行）：
+                原实现每帧一条 `chat.thinking.delta` 事件且带累计全文，平方级
+                放大（实测 9,147 字思考块 → 6,547 行 / 57 MB）。delta 的信息量
+                恒为零（是终稿前缀），投递侧由 ws_events 轮询快照推无 id 的
+                `ws.thinking` 瞬时帧。
+                """
                 if not delta:
                     return
                 _acc.append(delta)
@@ -5124,8 +5192,7 @@ class ChatTurn:
                 _pub["chars"] = len(thinking)
                 _pub["seq"] += 1
                 _pub["at"] = now
-                self._emit("chat.thinking.delta", {
-                    "text": thinking, "seq": _pub["seq"]})
+                self._emit_delta_state(_st, thinking, _pub["seq"])
 
             def _reset_delta(_acc=acc, _pub=pub) -> None:
                 """截断整轮重试前：清空累加与节流基准，防「半截+新流」拼接上屏
@@ -5226,8 +5293,8 @@ class ChatTurn:
             if thinking and len(thinking) > thinking_pub["chars"]:
                 thinking_pub["chars"] = len(thinking)
                 thinking_pub["seq"] += 1
-                self._emit("chat.thinking.delta", {
-                    "text": thinking, "seq": thinking_pub["seq"]})
+                # v51：与 on_thinking 同一落库形态（状态快照），见该处注释
+                self._emit_delta_state(_step, thinking, thinking_pub["seq"])
             if thinking:
                 self._emit("chat.thinking", {
                     "thinking": thinking,
@@ -5668,6 +5735,10 @@ class ChatTurn:
         # 混进来会让「收尾无产出」也误报成捞回成功。
         wrap_text: list[str] = []
         salvaged = ""
+        # 收尾阶段自己的伪工具调用推回计数：主循环的 `pseudo_tc_nudges` 是
+        # `_loop_turn` 的局部变量，这里拿不到——独立计数即可，收尾轮数本就有
+        # `wrapup_max_turns` 兜底，不需要与主循环共享额度。
+        wrap_pseudo_nudges = 0
         try:
             for _step in range(wrapup_max_turns(agent_key)):
                 if self._aborted():
@@ -5679,6 +5750,49 @@ class ChatTurn:
                 text = str(getattr(resp, "text", "") or "").strip()
                 thinking = str(getattr(resp, "thinking", "") or "")
                 calls = getattr(resp, "tool_calls", None) or []
+                # 伪工具调用守卫（2026-10-26 事故，`_wrapup` 是主循环之外的
+                # **唯一遗漏区**）：收尾阶段同样会撞上网关把
+                # `<｜｜DSML｜｜ calls>` 漏进 content 的情况。此前这里没有任何
+                # 检查，泄漏文本会 ① 原样落库（回放教模型模仿）② 进 `salvaged`
+                # ③ 经 `_compose_final` 变成 `call_expert` 的「收尾摘要」二次
+                # 扩散到主控上下文。实测样本（pentest-20261011-87f5 msg 49636）：
+                # `现在收尾三个意图。<｜｜DSML｜｜ calls>` —— 主控读不到结论，
+                # 只能再发一次 `ask_expert` 追问，而那次追问又跑了 2268 秒。
+                #
+                # 处置分三种（与主循环同源，复用同一套纯函数）：
+                # - 剥净仍有正文 → 用剩余正文继续（不白烧一轮）；
+                # - 有真实 `tool_calls` → 正文只是污染的叙述，丢掉正文、保留
+                #   调用（**绝不能因为正文脏就把有效工具调用一起丢**）；
+                # - 无调用且剥净为空 → 非末步推回让它用工具通道/直接给结论，
+                #   末步 `step_tools=None` 推回也调不出工具 → 落明确文案。
+                if text and has_pseudo_tool_call(text):
+                    clean = strip_pseudo_tool_calls(text)
+                    if clean:
+                        self._emit("chat.pseudo_toolcall", {
+                            "phase": "strip", "scope": "wrapup",
+                            "chars": len(text), "clean_chars": len(clean)})
+                        text = clean
+                    elif calls:
+                        self._emit("chat.pseudo_toolcall", {
+                            "phase": "strip", "scope": "wrapup",
+                            "chars": len(text), "clean_chars": 0,
+                            "kept_tool_calls": len(calls)})
+                        text = ""
+                    else:
+                        can_retry = (wrap_pseudo_nudges < PSEUDO_TC_MAX
+                                     and step_tools is not None)
+                        self._emit("chat.pseudo_toolcall", {
+                            "phase": "nudge" if can_retry else "giveup",
+                            "scope": "wrapup",
+                            "chars": len(text), "clean_chars": 0,
+                            "nudges": wrap_pseudo_nudges, "total": PSEUDO_TC_MAX})
+                        if can_retry:
+                            wrap_pseudo_nudges += 1
+                            _inject_nudge(messages, PSEUDO_TC_NUDGE)
+                            continue
+                        # 末步死结（同主循环）：`step_tools` 为 None 时推回也
+                        # 调不出工具，但**绝不能把原文落库**——换明确文案。
+                        text = PSEUDO_TC_FINAL_TEXT
                 if not calls:
                     # 无工具调用 = 收尾终稿（可能为空：模型没话可说，直接结束）
                     if text:
@@ -6720,11 +6834,32 @@ class ChatTurn:
         **为什么串行**：它写的是**已有线程的上下文**。同轮并发两条 ask 打同一
         线程会互相踩历史（各自 `_load_history` 后追加，后写覆盖前写的顺序）。
         `_dispatch_inner` 走单线程分支，不进 `_parallel_expert_dispatch`。
+
+        **续跑（`resume=true`，2026-10-26 事故修复）**：这是本工具的第二形态，
+        治「意外中断后成果拿不回来」。
+
+        事故：主控一轮并发 5 个 `call_expert`，进程在 2h44m 后重启，
+        `_repair_dangling_tool_calls` 给 4 个调用补了「进程重启，本轮工具执行
+        中断」占位。可那 4 条线程**早就干完了**——其中两条 `deliver` 过完整
+        报告、关掉全部 intent、把资产标成 `tested_clean`。成果全在
+        `chat_messages` 里，主控却只看到一句墓碑，只能从头重派，2h44m 白烧。
+
+        `resume=true` 时本工具先**只读回收**那条线程的已产出成果
+        （`chat_store.harvest_thread`：最后一次 `deliver` 全文 + 最后一条实质
+        结论 + 未答工具调用），再起子轮续跑。`message` 可省略——由
+        `_resume_draft_message` 用回收内容自动起草，明确要求「先报告已完成
+        什么、再补没做完的、**不要从头重试**」，这正是 2268s 那个失败形态的
+        反面。子轮带 `_RESUME_BUDGET_S` 墙钟预算，续跑不会变成第二个 2268s。
         """
         thread_id = str(args.get("thread_id") or "").strip()
         message = str(args.get("message") or "").strip()
-        if not thread_id or not message:
-            return "[错误] ask_expert 失败：thread_id 与 message 必填"
+        # 续跑开关：意外中断后回收成果并接着跑（见 docstring 末段）。
+        resume = bool(args.get("resume"))
+        if not thread_id:
+            return "[错误] ask_expert 失败：thread_id 必填"
+        if not message and not resume:
+            return ("[错误] ask_expert 失败：message 必填"
+                    "（只有 resume=true 可省略——由代码按已产出内容自动起草）")
         if not self.is_orchestrator or self._is_spawned_subagent:
             return "[错误] ask_expert 失败：只有主控能续跑专家（spawn 深度=1）"
         # 只读复盘通道（solved-review-channel，2026-10-23）：`review=true` 时
@@ -6733,6 +6868,14 @@ class ChatTurn:
         # 「已解出」那道闸对它放行是安全的：它没有继续烧预算的能力。
         # 这是唯一能让「从实战反哺手册」在收尾后still成立的口子。
         review = bool(args.get("review"))
+        # review 与 resume 互斥：review 是**只读复盘**（工具面剥到
+        # `_REVIEW_ALLOWED_TOOLS`，无执行/派发/写黑板），resume 要它接着干活
+        # ——同时传等于「让一个被绑住手的专家继续执行」，只会得到一句
+        # 「我没法执行」。这里直接拒，别让模型猜。
+        if review and resume:
+            return ("[拒绝] ask_expert：review 与 resume 互斥。"
+                    "只想让它复述已产出的内容 → 用 resume=true（回收块本身就是"
+                    "只读的，且不花 LLM）；要它接着执行 → 去掉 review。")
         # 已解出闸：与 call_expert 同源（`_solved_challenge_block`）。题目已解出
         # 后让专家继续跑，产出的是对本题无用的动作——与再派一个新专家同样该拦。
         solved_block = self._solved_challenge_block(review=review)
@@ -6763,6 +6906,27 @@ class ChatTurn:
             return (f"[拒绝] ask_expert：线程 {thread_id} 正在运行，"
                     "它的上下文此刻锁在那一轮里，追加消息读不进去。"
                     "等它跑完（工作台显示空闲）再问；或先用 call_expert 派新任务。")
+        # 续跑：先**只读回收**上一轮已产出的成果（零 LLM、零副作用）。
+        # 放在这里（状态校验之后、记账之前）：回收要在「确认这线程归我、
+        # 且它没在跑」之后才有意义，而记账要用最终生效的 message。
+        harvest: dict | None = None
+        if resume:
+            try:
+                harvest = chat_store.harvest_thread(self.bb, thread_id)
+            except Exception:  # noqa: BLE001 —— 回收失败不阻断续跑
+                log.exception("ask_expert 回收已产出成果失败 thread=%s", thread_id)
+                harvest = None
+            if not message:
+                message = self._resume_draft_message(harvest)
+        # 回收块在**子轮之外**拼好：续跑被预算截断、子轮抛错、甚至线程刚被
+        # 人工删掉，这半段都要照常回传——它是「不重跑就能拿到」的成果本身，
+        # 不该被子轮的任何失败路径带走。
+        head = ""
+        if harvest is not None:
+            head = self._format_harvest(
+                harvest, thread_id,
+                status=str(row.get("status") or ""),
+                updated_at=str(row.get("updated_at") or "")) + "\n\n"
         # 续跑也要落一条执行尝试，但**挂在原方向组下**（同组不重复计组；
         # `ctf_summary_items` 的唯一键在 group 上，续跑不会多切一批）。
         # 反查失败（不是 CTF 派发的子线程 / 账本不可用）就静默跳过。
@@ -6808,6 +6972,10 @@ class ChatTurn:
                 assigned_asset_ids=(
                     [] if self.is_aggressive
                     else self._thread_assigned_assets(thread_id)),
+                # 续跑自带墙钟预算（见 `_RESUME_BUDGET_S`）：这条通道专门治
+                # 「追问变成再派一次活、2268 秒不返回」。普通追问维持 0.0
+                # （无墙钟上限）——那是既有行为，不在本次改动范围。
+                run_budget_s=_RESUME_BUDGET_S if resume else 0.0,
                 recovery=self.recovery)
         except Exception as e:  # noqa: BLE001 —— 构造失败回文本，别炸整轮
             log.exception("ask_expert 子轮构造失败 thread=%s", thread_id)
@@ -6823,8 +6991,8 @@ class ChatTurn:
                                                error="子线程被人工删除")
                 except Exception:  # noqa: BLE001
                     log.exception("ask_expert ctf 尝试取消失败 run=%s", ctf_run_id)
-            return (f"专家线程 {thread_id} 已被人工删除，本次续跑中止。"
-                    "需要这个方向请重新 call_expert 派发。")
+            return head + (f"专家线程 {thread_id} 已被人工删除，本次续跑中止。"
+                           "需要这个方向请重新 call_expert 派发。")
         except Exception as e:  # noqa: BLE001 —— 续跑失败回文本，主控可改道
             log.exception("ask_expert 续跑失败 thread=%s", thread_id)
             if ctf_run_id and ctf_sess is not None:
@@ -6832,19 +7000,131 @@ class ChatTurn:
                     ctf_sess.ledger.finish_run(ctf_run_id, "failed", error=str(e))
                 except Exception:  # noqa: BLE001
                     log.exception("ask_expert ctf 尝试失败回写失败 run=%s", ctf_run_id)
-            return (f"[错误] ask_expert 续跑失败：{e}"
-                    f"（线程 {thread_id} 已留档，可改用 call_expert 重派）")
+            return head + (f"[错误] ask_expert 续跑失败：{e}"
+                           f"（线程 {thread_id} 已留档，可改用 call_expert 重派）")
         if ctf_run_id and ctf_sess is not None:
             try:
                 ctf_sess.ledger.finish_run(ctf_run_id, "completed", result=reply)
             except Exception:  # noqa: BLE001
                 log.exception("ask_expert ctf 尝试完成回写失败 run=%s", ctf_run_id)
         expert = str(row.get("agent_id") or "")
-        return (f"专家线程 {thread_id}（{expert}）已续跑完成。\n"
+        return (head
+                + f"专家线程 {thread_id}（{expert}）已续跑完成。\n"
                 f"答复：\n{reply[:4000]}\n"
                 "（如需继续追问同一线程，可再调 ask_expert）")
 
+    def _resume_draft_message(self, harvest: dict | None) -> str:
+        """`resume=true` 且没给 message 时，自动起草续跑指令。
+
+        **为什么必须由代码起草**（2268s 事故的反面）：`ask_expert` 的续跑是
+        一次完整子轮，会继承原线程的全部工具面与任务纪律。只把「请回答」当
+        成 user 消息发过去，子专家会把它理解成「再派一次活」，一头扎回任务书
+        里没测尽的面——实测追问后新增 95 条消息、连续 20+ 次 `run_cmd`，
+        一句都没回答。这里把三件事**逐条写死**：先报告已完成什么、只补没做完
+        的、**不要从头重试**。措辞是能力约束，不是礼貌请求。
+        """
+        done = ""
+        if harvest:
+            if harvest.get("delivery"):
+                done = (f"\n（你上一轮已经交付过 {harvest['delivery_n']} 次，"
+                        "最后一次交付的全文已由主控收到，不必重发。）")
+            elif harvest.get("final_text"):
+                done = "\n（你上一轮已经留下过结论，主控已收到，不必重发。）"
+        return (
+            "【续跑 · 上一轮执行被意外中断】\n"
+            "你上一次跑这条线程时**没有走正常收尾**就中断了（进程重启 / 写库失败等），"
+            "主控当时只收到一句「中断」占位。" + done + "\n\n"
+            "现在按这三步做，**按顺序**：\n"
+            "1. **先报告**：用一段话说清「你已经完成了什么、结论是什么、"
+            "还有什么没做完」。这段是主控最需要的东西，放在最前面。\n"
+            "2. **只补缺口**：如果确实还有没做完的部分，接着做**剩下的**。"
+            "**不要从头重试**——重跑已经做过的步骤纯属浪费，主控要的是"
+            "「接着上次继续」，不是「再来一遍」。\n"
+            "3. **做完就收**：如果其实已经做完了，直接收尾。不要为了"
+            "「再确认一次」重复执行已经验证过的动作。\n\n"
+            "注意：你这一轮有墙钟上限，超时会被强制收尾。所以先给结论，"
+            "再补动作。")
+
+    def _format_harvest(self, harvest: dict, thread_id: str, *,
+                        status: str = "", updated_at: str = "") -> str:
+        """把 `chat_store.harvest_thread` 的结果排成主控能直接读的块。
+
+        顺序刻意是「结论 → 交付全文 → 现场断点」：主控最常只需要一个判断
+        （这活到底干完没有），结论在前能省掉它读几千字。
+        """
+        delivery = str(harvest.get("delivery") or "")
+        final_text = str(harvest.get("final_text") or "")
+        unanswered = harvest.get("unanswered") or []
+        interrupted = harvest.get("interrupted") or []
+        lines = [
+            f"—— 上一轮已产出的成果（回收自线程 {thread_id}，未重跑）——",
+            f"线程状态：{status or '未知'}｜最后活动：{updated_at or '未知'}"
+            f"｜消息 {harvest.get('messages', 0)} 条",
+        ]
+        if not delivery and not final_text and not unanswered and not interrupted:
+            lines.append(
+                "这条线程**没有可回收的内容**：它没有交付记录、没留下结论、"
+                "也没有未完成的工具调用——多半是刚起头就被打断了。"
+                "按原任务描述接着干即可，不必担心重复。")
+            return "\n".join(lines)
+        if final_text:
+            lines.append("")
+            # 位置决定措辞：出现在最后一次工具调用**之前**的那句话不是结论，
+            # 是中途的一句话（实测有线程最后一句非空文本是开头的「我先检查
+            # 任务环境」）。把它当结论转述给主控就是误导。
+            if harvest.get("final_after_tools"):
+                lines.append("【它最后留下的结论】")
+            else:
+                lines.append("【它最后说过的话（在后续工具调用之前，不是结论）】")
+            lines.append(final_text[:2000])
+        if delivery:
+            lines.append("")
+            lines.append(f"【它最后一次交付的全文 · 第 {harvest.get('delivery_n')} 次】")
+            # 8000 字上限：实测渗透/CTF 的完整交付普遍 2000~6000 字，再长会
+            # 把整条 tool 结果顶到 `_clip_tool_result` 的裁剪线上，反而两头都
+            # 看不全。真需要全文可直接在工作台打开该线程。
+            lines.append(delivery[:8000])
+        else:
+            lines.append("")
+            lines.append("【交付】无——它一次 `deliver` 都没调用过，"
+                         "上面的内容是从收尾文本里取的，完整度不如正式交付。")
+        # 现场断点两路并报：`interrupted` 是「结果行是中断占位」（清扫跑过
+        # 之后只剩这个信号），`unanswered` 是「连结果行都没有」。
+        if interrupted:
+            names = "、".join(sorted({u.get("name") or "?" for u in interrupted}))
+            lines.append("")
+            lines.append(f"【现场断点】{len(interrupted)} 个调用被中断、没有结果"
+                         f"（{names}）——这是它被打断时正在做的事。")
+        elif unanswered:
+            names = "、".join(sorted({u.get("name") or "?" for u in unanswered}))
+            lines.append("")
+            lines.append(f"【现场断点】{len(unanswered)} 个工具调用没有结果"
+                         f"（{names}）——这是它被打断时正要做的事。")
+        lines.append("")
+        lines.append("**接下来由你决定**：内容够用 → 直接采信并往下走，"
+                     "不要再派一次；还差一点 → `ask_expert(resume=true)` 让它"
+                     "接着上次继续；确实要换方向 → `call_expert` 重新派。")
+        return "\n".join(lines)
+
     # ---------- 事件 ----------
+
+    def _emit_delta_state(self, step: int, text: str, seq: int) -> None:
+        """写一步思考的当前快照（v51，替代 `chat.thinking.delta` 事件）。
+
+        为什么不是 `_emit`：事件表是**追加**语义，而思考增量每帧都带累计全文，
+        追加就是平方级放大（实测 8.19 GB / 306 万行，其中一条 9,147 字的思考块
+        写了 6,547 行）。快照是**覆盖**语义，每 (线程, 步) 恒一行，体积只与步数
+        线性相关。投递侧由 ws_events 轮询 `recent_delta_states` 推无 id 的
+        `ws.thinking` 帧，前端覆盖式渲染，观感与原来一致。
+
+        失败只记日志不阻断对话轮（同 `_emit` 纪律）。
+        """
+        try:
+            self.bb.upsert_delta_state(
+                self.project_id, self.thread_id, step, text, seq)
+        except Exception:  # noqa: BLE001 —— 快照失败不阻断对话轮
+            log.exception("思考快照写入失败 thread=%s step=%s",
+                          self.thread_id, step)
 
     def _emit(self, kind: str, payload: dict) -> None:
         try:

@@ -11,6 +11,7 @@ import json
 import logging
 import sqlite3
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -25,6 +26,13 @@ NODE_TABLES = {"finding": "findings", "func_kb": "func_kb", "artifact": "artifac
 
 # 哨兵：区分"参数不传"与"传空值"（risk_tags=[] 语义=清空标签）
 UNSET = object()
+
+# 事件 kind 清单的进程内缓存（2026-10-26）：只为「快速放行已知 kind」服务，
+# 见 `Blackboard.distinct_event_kinds`。判为未知时必须绕过缓存再确认一次，
+# 否则新出现的 kind 会被误报成「未知」。
+_KINDS_CACHE_TTL_S = 60.0
+_kinds_cache: dict[str, tuple[float, list[str]]] = {}
+_kinds_cache_lock = threading.Lock()
 
 # findings 状态机白名单（研究轨 verified = 人工确认或带日志产物的动态验证）
 FINDING_STATUSES = ("unverified", "verified", "false-positive")
@@ -461,11 +469,13 @@ class Blackboard:
         conn.execute("PRAGMA busy_timeout=5000")
         # synchronous=NORMAL（2026-10-12 CPU 优化）：WAL 下默认仍是 FULL——每次提交
         # 都 fsync 主库（实测 20KB 载荷 300 次提交 1.11s vs NORMAL 0.11s，**10×**）。
-        # 流式 chat.thinking.delta 达 20Hz 且每条带累计全文，多项目并发时写路径成
+        # 流式 chat.delta 达 20Hz 且每条带累计全文，多项目并发时写路径成
         # CPU 首耗（实测 append_event/_tx 占 ~36%）。NORMAL 在 WAL 下**不损坏库**
         # （提交不 fsync WAL，仅在 checkpoint 时同步），代价是系统级断电可能丢最近
         # 数次已提交事务；应用崩溃/进程被杀安全（用户已确认接受）。per-connection
         # pragma，故每条连接都要设（journal_mode 才是一次性库级设置）。
+        # v51 起思考增量改走 chat_delta_state 快照（每步一行），这条 pragma 的
+        # 收益随之下降，但 chat.delta 与其它高频事件仍受益，保持不变。
         conn.execute("PRAGMA synchronous=NORMAL")
         return conn
 
@@ -1157,6 +1167,43 @@ class Blackboard:
             "SELECT MAX(id) FROM events WHERE project_id=?", (project_id,)).fetchone()
         return int(row[0] or 0)
 
+    def distinct_event_kinds(self, project_id: str, *, use_cache: bool = True) -> list[str]:
+        """本项目实际出现过的事件 kind（升序去重）。
+
+        给 LLM 入口做**白名单校验**用（2026-10-26）：`bb_query(what="events")`
+        原先对 `kinds` 不做任何校验，模型猜错名字（实测猜 `chat.failed` /
+        `chat.finished`，两者在本仓根本不存在）就直接拼进 SQL —— 0 匹配也要
+        扫完整个项目的事件表才返回空，82 万条的项目上花 27 秒，把同批后续
+        工具全堵住。先校验再查，猜错立刻被告知可用值，一轮就能改对。
+
+        走 `idx_events_project_kind`（`(project_id, kind, id)`）做索引扫描去重，
+        不读 payload，也不回表——事件再多也只扫 kind 一列。
+
+        ``use_cache``：进程内 60 秒缓存。**为什么要缓存**——索引未建成的旧库
+        （平台还没重启）上，这条 DISTINCT 自己就是一次全表扫；模型一轮里常连着
+        好几次 `bb_query`，不缓存等于把省下的时间又花回去。缓存只服务「快速
+        放行已知 kind」，**判为未知时必须用 `use_cache=False` 再确认一次**——
+        新 kind（如刚出现的 `chat.wrapup`）还没进缓存，直接按缓存报「未知」是
+        假阴性，会让模型以为该类型没事件。
+        """
+        if use_cache:
+            now = time.monotonic()
+            with _kinds_cache_lock:
+                hit = _kinds_cache.get(project_id)
+                if hit is not None and now - hit[0] < _KINDS_CACHE_TTL_S:
+                    return list(hit[1])
+        rows = self.conn.execute(
+            "SELECT DISTINCT kind FROM events WHERE project_id=?",
+            (project_id,)).fetchall()
+        kinds = sorted(str(r[0]) for r in rows if str(r[0] or "").strip())
+        # **空结果不入缓存**：空 = 「这个项目还没有任何事件」，是个会立刻失效的
+        # 状态。缓存它会让新项目在本轮第一批事件落库后的 60 秒内一直返回空，
+        # 校验分支（`if known:`）于是整体被跳过——语义从「校验」退化成「不校验」。
+        if kinds:
+            with _kinds_cache_lock:
+                _kinds_cache[project_id] = (time.monotonic(), kinds)
+        return list(kinds)
+
     def prune_thinking_deltas(self, project_id: str, stream_id: str) -> int:
         """思考流式增量行清剪（2026-09-19）：终稿 llm.thinking 落库后删掉同流
         的 llm.thinking.delta 过渡行——审计只留终稿一条，事件表与流式化之前
@@ -1183,13 +1230,78 @@ class Blackboard:
         """智能体工作台流式增量清剪（2026-10-04）：一轮正常收尾后删该线程的
         chat.delta / chat.thinking.delta 过渡行——终稿全文在 chat_messages，事件
         只承担实时可见；不删则每条携带累计全文的 delta 行会持续膨胀事件表。
-        异常/中断路径不调用（残留 delta = 被中断思考的现场审计，同
-        prune_thinking_deltas 纪律）。"""
+
+        只在**正常收尾 + 手动停止**两条路径调用，异常/中断路径不调 —— 这也正是
+        实测 17 个库攒到 18.65 GB 的成因（错误路径与进程被杀都不清）。
+
+        **v51 起 `chat.thinking.delta` 已不再产生**（降级为 `chat_delta_state`
+        快照，见 `upsert_delta_state`），这里保留该 kind 只为清老库残留。
+        原注释称「残留 delta = 被中断思考的现场审计」——**该说法已证伪**：
+        抽 30 条 delta 全部是 `chat.thinking` 终稿的前缀，最长那条与终稿完全
+        相等，审计现场就是终稿本身，delta 零信息量。"""
         with self._tx():
             cur = self.conn.execute(
                 "DELETE FROM events WHERE project_id=? AND kind IN"
                 " ('chat.delta','chat.thinking.delta')"
                 " AND json_extract(payload,'$.thread_id')=?",
+                (project_id, thread_id))
+            return cur.rowcount
+
+    # ---------- 思考增量状态快照（v51，thinking-delta-snapshot） ----------
+
+    def upsert_delta_state(
+        self, project_id: str, thread_id: str, step: int,
+        text: str, seq: int = 0,
+    ) -> None:
+        """写一步思考的**当前快照**（覆盖，不追加）。
+
+        这是 v51 起 `chat.thinking.delta` 的唯一落库形态：每 (线程, 步) 恒一行。
+        原实现每帧 append 一条携带累计全文的事件，平方级放大（实测一条 9,147 字
+        的思考块 → 6,547 行 / 57 MB）。快照语义把写入量压到「每步一行」。
+
+        **不要在这里 append 或保留历史**：delta 的信息量恒为零（它是终稿前缀），
+        要审计现场就看 `chat_messages.thinking` 终稿。
+
+        `updated_at` 用 `time.time()` 浮点——读侧（ws_events）每 50ms 按它增量
+        轮询，浮点比较比 ISO 文本解析便宜一个数量级。
+        """
+        with self._tx():
+            self.conn.execute(
+                "INSERT INTO chat_delta_state"
+                "(project_id,thread_id,step,seq,text,updated_at)"
+                " VALUES(?,?,?,?,?,?)"
+                " ON CONFLICT(project_id,thread_id,step) DO UPDATE SET"
+                " seq=excluded.seq, text=excluded.text,"
+                " updated_at=excluded.updated_at",
+                (project_id, thread_id, int(step), int(seq), text, time.time()),
+            )
+
+    def recent_delta_states(
+        self, project_id: str, since_ts: float = 0.0, limit: int = 50,
+    ) -> list[dict]:
+        """读 `since_ts` 之后更新过的思考快照（升序），供 ws_events 增量推送。
+
+        严格 `>` 而非 `>=`：调用方把游标推进到返回集里最大的 `updated_at`，
+        用 `>=` 会每轮把同一批重推一遍（50ms 一轮 × 8 KB 文本）。同微秒内
+        两次 upsert 理论上会漏掉后者——但下一帧携带的是更长的累计全文，且该步
+        收尾时还有 `chat.thinking` 终稿兜底，不会缺内容。
+        """
+        rows = self.conn.execute(
+            "SELECT thread_id, step, seq, text, updated_at FROM chat_delta_state"
+            " WHERE project_id=? AND updated_at>? ORDER BY updated_at ASC LIMIT ?",
+            (project_id, float(since_ts), int(limit)),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def prune_delta_states(self, project_id: str, thread_id: str) -> int:
+        """删该线程的思考快照（线程收尾时随 prune_chat_thread_deltas 一起调）。
+
+        与 events 的 delta 不同，这里**没有「残留 = 现场审计」的说法**：快照是
+        状态不是记录，留着只会让下次重连把上一轮的思考当成本轮的显示出来。
+        """
+        with self._tx():
+            cur = self.conn.execute(
+                "DELETE FROM chat_delta_state WHERE project_id=? AND thread_id=?",
                 (project_id, thread_id))
             return cur.rowcount
 

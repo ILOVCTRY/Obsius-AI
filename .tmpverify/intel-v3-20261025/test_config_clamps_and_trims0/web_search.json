@@ -1,1 +1,0 @@
-{"searxng_url": " http://sx.local/ ", "timeout_s": 999, "num": 100, "engines": " google ", "language": "zh-CN", "proxy": " http://127.0.0.1:7890 ", "bing_market": " en-US ", "disable_ddg": true, "disable_bing": true, "strict": false}

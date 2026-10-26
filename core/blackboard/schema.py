@@ -9,7 +9,29 @@
 
 import sqlite3
 
-SCHEMA_VERSION = 50
+SCHEMA_VERSION = 51
+
+# v50→v51（思考增量降级为状态快照，thinking-delta-snapshot，2026-10-26）：新增
+# chat_delta_state 表，`chat.thinking.delta` 从**事件流**改为**状态快照**。
+#
+# **为什么改**：原实现每条 delta 都 `INSERT INTO events` 并携带**累计全文**，
+# 形成平方级放大——实测一条 9,147 字的思考块被写成 6,547 行、57 MB（6,400×），
+# 全量 8.19 GB / 306 万行。而 delta 的信息量**恒为零**：它是 `chat.thinking`
+# 终稿的前缀（抽 30/30 命中，最长那条与终稿完全相等），删掉不损失任何审计现场。
+#
+# **为什么不能「不落库只推流」**：`/api/ws/projects/{pid}` 不是推送，是 50ms
+# 轮询 `recent_events`（app.py `poll_s=0.05`）——不落库就没有可轮询的载体；
+# 合成 id 也不行（前端 `e.id > cursorRef` 过滤 + 重连回放会跳游标）。
+#
+# **快照语义**：每 (线程, 步) 恒一行，`ON CONFLICT DO UPDATE` 覆盖。写入量从
+# 「每帧一行」降到「每步一行」，体积与思考长度的平方无关、只与步数线性相关。
+# 投递侧在 `ws_events` 循环里按 `updated_at` 增量读出，推 `ws.thinking` 瞬时帧
+# （无 id，前端在 `ws.tick` 那行旁边拦截，不推进游标）。`updated_at` 用 REAL
+# 秒级浮点（不是 ISO 文本）——轮询每 50ms 比一次，文本比较要走两次解析。
+#
+# **清理**：线程收尾时随 `prune_chat_thread_deltas` 一起删（见
+# `Blackboard.prune_delta_states`）。历史行不回溯删除——由 scripts/db_compact.py
+# 统一处理（它删的是 events 里的旧 delta，与本表无关）。
 
 # v49→v50（CTF 方向组账本，ctf-direction-ledger，2026-10-25）：新增
 # ctf_session_state / ctf_direction_groups / ctf_direction_runs /
@@ -386,6 +408,15 @@ CREATE TABLE IF NOT EXISTS events (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_events_project ON events(project_id, id);
+-- kind 过滤索引（2026-10-26 事故）：`bb_query(what="events", kinds=[...])` 走
+-- `recent_events` 的 `kind IN (…)` + `ORDER BY id`，而 events 上原先只有
+-- `(project_id, id)` —— kind 不在索引里，**0 匹配也必须扫完该项目全部事件**才能
+-- 确认「没有」。实测 82 万条事件的项目上，查两个不存在的 kind 各花 2.1~2.4 秒，
+-- 运行期并发写争锁后涨到 27 秒，把同批后续工具全堵在「排队中」。
+-- 带 kind 的复合索引让 `kind IN (…)` 变成索引 seek，未知 kind 毫秒级返回空。
+-- 写放大：events 是高频写表（thinking.delta 峰值 ~76 条/秒），多维护一个索引约
+-- +10~15% 写入，换来「按类型查事件」从秒级到毫秒级，值得。
+CREATE INDEX IF NOT EXISTS idx_events_project_kind ON events(project_id, kind, id);
 
 CREATE TABLE IF NOT EXISTS approvals (
     id          TEXT PRIMARY KEY,
@@ -911,6 +942,27 @@ CREATE TABLE IF NOT EXISTS execution_audits (
 );
 CREATE INDEX IF NOT EXISTS idx_execution_audits_project ON execution_audits(project_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_execution_audits_run ON execution_audits(run_id, status);
+
+-- v50→v51（thinking-delta-snapshot，2026-10-26）：思考增量的**状态快照**。
+-- 不是事件流——每 (线程, 步) 恒一行，写就覆盖。原 events 里的
+-- `chat.thinking.delta` 每条带累计全文，平方级放大到 8.19 GB；快照把写入量
+-- 压到「每步一行」，体积只与步数线性相关。读侧由 ws_events 按 updated_at
+-- 增量轮询，推无 id 的 ws.thinking 瞬时帧。
+--
+-- **不要给这张表加 append 语义**：一旦每帧一行，就退化成原来的事件表。
+-- **不要用 created_at/ISO 文本**：轮询 20 次/秒，浮点比较比字符串解析便宜。
+CREATE TABLE IF NOT EXISTS chat_delta_state (
+    project_id  TEXT NOT NULL REFERENCES projects(id),
+    thread_id   TEXT NOT NULL,
+    step        INTEGER NOT NULL,               -- 本轮第几步（每步一个快照）
+    seq         INTEGER NOT NULL DEFAULT 0,     -- 该步内的发布序号（前端判新旧）
+    text        TEXT NOT NULL DEFAULT '',       -- 累计全文（覆盖，不追加）
+    updated_at  REAL NOT NULL,                  -- time.time()，读侧增量游标
+    PRIMARY KEY(project_id, thread_id, step)
+);
+-- 读侧唯一查询形态：WHERE project_id=? AND updated_at>? ORDER BY updated_at
+CREATE INDEX IF NOT EXISTS idx_chat_delta_state_ts
+    ON chat_delta_state(project_id, updated_at);
 """
 
 
@@ -973,7 +1025,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
       ctf_summary_batches / ctf_summary_items 由 DDL 的 IF NOT EXISTS 直接建表
       （CTF 方向组账本，无 ALTER，旧库打开即建）。**历史方向不回溯补建**：内存
       账本从未落库，凭消息文本反推方向会把「讨论过」当成「派过」；需要历史
-      归档时另做显式导入。"""
+      归档时另做显式导入。
+    - v50→v51：chat_delta_state 由 DDL 的 IF NOT EXISTS 直接建表（思考增量从
+      事件流降级为状态快照，无 ALTER，旧库打开即建）。**存量 events 里的
+      `chat.thinking.delta` 不在此清理**——那是 8.19 GB 的历史数据，须停平台后
+      用 scripts/db_compact.py 批删 + VACUUM，放在迁移里会卡死启动。"""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(projects)")}
     if "track" not in cols:
         conn.execute("ALTER TABLE projects ADD COLUMN track TEXT NOT NULL DEFAULT ''")

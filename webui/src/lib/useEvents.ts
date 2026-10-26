@@ -40,6 +40,21 @@ const CACHE_LIMIT = 2000
 const DELTA_KINDS = new Set(["chat.delta", "chat.thinking.delta"])
 const DELTA_KEEP = 80
 
+/** 思考增量瞬时帧（v51，后端 ws_events 推的 `ws.thinking`）。
+ *
+ * **不是事件**：无 id、不进事件窗口、不推游标。后端把 `chat.thinking.delta`
+ * 从事件流降级为 `chat_delta_state` 状态快照（每线程每步一行，覆盖语义），
+ * 轮询时按 `updated_at` 增量读出并推这一帧。`text` 恒为**累计全文**，前端
+ * 直接覆盖渲染即可。 */
+export interface ThinkingFrame {
+  thread_id: string
+  step: number
+  seq: number
+  text: string
+  /** 服务端出帧时间（time.time()，秒），用于与 chat.thinking 终稿比新旧 */
+  ts: number
+}
+
 /** 只保留最新的 DELTA_KEEP 条流式增量，其余原样保留。已是压缩态则原样返回。 */
 function compactDeltas(events: BBEvent[]): BBEvent[] {
   let n = 0
@@ -88,13 +103,18 @@ function writeCache(key: string, incoming: BBEvent[], loadedAll?: boolean): BBEv
 
 export function useEvents(
   pid: string | null, sessionId?: string | null,
-  opts?: { flushMs?: number },
+  opts?: { flushMs?: number; onThinking?: (f: ThinkingFrame) => void },
 ) {
   const cacheKey = sessionId ? `${pid}:${sessionId}` : `${pid ?? ""}`
   // WS 增量批量 flush 窗口：默认 100ms（≈10Hz，直播间/审计够用）；**工作台流式期
   // 传更小值**（2026-10-04 顺滑化：50ms≈20Hz）——否则前端 10Hz 封顶会把后端 20Hz
   // 的投递合并成「一顿顿的」。只取原始值进依赖，调用方传的字面量对象不会触发重跑。
   const flushMs = opts?.flushMs ?? 100
+  // 思考瞬时帧回调（v51）：帧不走事件窗口，只能靠回调递给消费方。
+  // 用 ref 转存——回调若没被 useCallback 包住，每次渲染都是新引用，直接进
+  // useEffect 依赖会让 WS 反复重连（那是这条 hook 最贵的操作）。
+  const onThinkingRef = useRef(opts?.onThinking)
+  useEffect(() => { onThinkingRef.current = opts?.onThinking }, [opts?.onThinking])
   const [events, setEvents] = useState<BBEvent[]>([])
   const [connected, setConnected] = useState(false)
   // 更早历史是否已取尽（取尽后上翻不再请求）；loadingEarlier=翻页请求在途
@@ -187,6 +207,13 @@ export function useEvents(
         // 应用层心跳帧：只证明管道活着，不进窗口、不推游标（无 id 字段，
         // 必须拦在游标赋值之前，否则 undefined 污染游标与缓存排序）
         if (e.kind === "ws.tick") return
+        // 思考瞬时帧（v51）：同样无 id，**必须拦在游标赋值之前**。它是状态快照
+        // 不是事件——不进事件窗口、不写缓存、不参与 compactDeltas，只经回调交给
+        // 消费方覆盖渲染（消费方负责按 thread_id 过滤）。
+        if (e.kind === "ws.thinking") {
+          onThinkingRef.current?.(e as unknown as ThinkingFrame)
+          return
+        }
         if (e.id <= cursorRef.current) return
         cursorRef.current = e.id
         // 会话源：不属于本会话的事件只推游标不进窗口（游标恒前进，

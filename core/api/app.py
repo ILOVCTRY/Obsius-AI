@@ -12294,6 +12294,10 @@ def create_app(
         poll_s = 0.05
         tick_loops = max(1, round(tick_s / poll_s))
         idle_loops = 0
+        # 思考快照的增量游标（浮点秒，v51）。与 events 的 cursor **完全独立**：
+        # 快照不是事件、没有 id，混进同一条游标会让重连回放跳号。0.0 起步 =
+        # 连上就把当前正在流的那一步推一遍（收尾会 prune，正常只剩在跑的一步）。
+        state_ts = 0.0
         try:
             while True:
                 if pid in app.state.projects_closing:
@@ -12318,6 +12322,25 @@ def create_app(
                 for e in events:
                     await ws.send_json(e)
                     cursor = e["id"]
+                # 思考增量快照（v51，thinking-delta-snapshot）：状态快照不是事件，
+                # 无 id、不推游标，前端在 `ws.tick` 那行旁边拦截（必须拦在
+                # `e.id <= cursor` 之前，否则 undefined 污染游标）。
+                # 独立 try：快照读失败只丢思考面板的帧，不能连带掐断消息推送。
+                try:
+                    states = await run_in_threadpool(
+                        proj.bb.recent_delta_states, pid, state_ts, 20)
+                except Exception:  # noqa: BLE001
+                    states = []
+                for st in states:
+                    state_ts = max(state_ts, float(st["updated_at"]))
+                    await ws.send_json({
+                        "kind": "ws.thinking",
+                        "thread_id": st["thread_id"],
+                        "step": st["step"],
+                        "seq": st["seq"],
+                        "text": st["text"],
+                        "ts": time.time(),
+                    })
                 if not events:
                     idle_loops += 1
                     if idle_loops >= tick_loops:

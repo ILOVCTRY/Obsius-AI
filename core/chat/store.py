@@ -9,6 +9,7 @@ pentest-controller + 专家池专家）独立线程；主控 call_expert spawn �
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from typing import Any
 
@@ -378,11 +379,175 @@ def _repair_dangling_tool_calls(bb, running: set[str] | None = None) -> int:
                             " tool_calls, tool_use_id, created_at)"
                             " VALUES(?,?,?,?,?,?)",
                             (tid, "tool",
-                             "[错误] 进程重启，本轮工具执行中断（未完成）",
+                             _dangling_placeholder(str((tc or {}).get("name") or "")),
                              "[]", tcid, ts))
                         answered.add(tcid)
                         fixed += 1
     return fixed
+
+
+# 悬空 tool_call 的占位文案。**必须写清「怎么救」**（2026-10-26 事故）：
+# 旧文案只说「中断（未完成）」，主控读到就以为活白干了，于是整批重派——
+# 实测 4 个专家跑了 2h44m，其中两条已经 `deliver` 过完整报告、关掉全部
+# intent、把资产标成 tested_clean，成果全在库里，却被从头重派一遍。
+# 中断 ≠ 失败：占位行本身就是「没有结果」，而成果可能在 chat_messages 里。
+#
+# 前缀单独抽常量：`harvest_thread` 靠它认出「这一行是被打断的调用」（清扫
+# 跑过之后 `unanswered` 恒为空，只剩这个信号）。两处各写一遍必然漂移。
+_DANGLING_TOOL_PREFIX = "[错误] 本轮工具执行中断（进程重启，未完成）。"
+
+# 识别用的**稳定子串**，不能拿 `_DANGLING_TOOL_PREFIX` 整串去匹配：
+# 库里已经有一批用旧文案写的占位（「[错误] 进程重启，本轮工具执行中断（未完成）」），
+# 按新前缀匹配会一条都认不出来——实测 5 条事故线程 `interrupted` 全空，
+# 而它们明明都是被打断的。只认「本轮工具执行中断」这一段，新旧都覆盖。
+_DANGLING_MARK = "本轮工具执行中断"
+
+_DANGLING_TOOL_NOTE = (
+    _DANGLING_TOOL_PREFIX
+    + "**中断不等于失败**——该调用很可能已经跑完，成果仍在库里。"
+    "重跑普通工具即可；若是 call_expert，先找到它派生的子线程"
+    "（该线程的子线程，形如 chat-xxxxxxxx），用 "
+    "ask_expert(thread_id=..., resume=true) 回收它的交付内容再决定要不要续跑，"
+    "**不要直接重派**——那会把已经干完的活整轮白烧。"
+)
+
+
+def _dangling_placeholder(tool_name: str) -> str:
+    """按工具类型给悬空占位文案：只有派发类工具才需要「去回收子线程」这段。"""
+    if tool_name in ("call_expert", "ask_expert"):
+        return _DANGLING_TOOL_NOTE
+    return (_DANGLING_TOOL_PREFIX
+            + "重跑一次即可——它是幂等读/写工具，没有需要回收的中间产物。")
+
+
+# 交付回执的开头标记（`_tool_deliver` 生成，见 core/agent/tools.py）。
+# 只认这个前缀：子线程里 role=tool 的行动辄上千条，靠前缀定位交付行比「取最后
+# 一条 tool 行」稳——专家常在交付之后又跑几十步工具，最后一条通常是 run_cmd。
+_DELIVERY_MARK = "[已交付 · 第 "
+
+# 平台墓碑文案（`recover_running_threads` 的 note 与手动停止的收尾说明）。
+# 回收「最后结论」时必须跳过：那不是专家说的话，是平台替它写的墓碑。
+_INTERRUPT_NOTE_MARKERS = (
+    "进程重启，本轮执行中断",
+    "本轮执行线程已意外终止",
+    "已按人类要求停止本轮执行",
+)
+
+
+def is_interrupt_note(text: str) -> bool:
+    """这条 assistant 文本是不是平台写的中断墓碑（而非专家自己的结论）。"""
+    t = (text or "").strip()
+    return bool(t) and t.startswith("（") and any(
+        m in t for m in _INTERRUPT_NOTE_MARKERS)
+
+
+def is_interrupt_placeholder(text: str) -> bool:
+    """这条 tool 结果是不是「被打断」的占位（而不是工具的真实输出）。
+
+    兼容新旧两版文案：旧版是「[错误] 进程重启，本轮工具执行中断（未完成）」，
+    新版在同样子串后面补了回收指引。判据只看 `_DANGLING_MARK`，别按整串匹配
+    ——那样老库里的占位一条都认不出来。
+    """
+    t = (text or "")
+    return t.startswith("[错误]") and _DANGLING_MARK in t[:160]
+
+
+def split_delivery(content: str) -> tuple[int, str]:
+    """从 `deliver` 的 tool 回执里剥出「第 N 次」与正文。
+
+    回执结构（`_tool_deliver` 拼的）::
+
+        [已交付 · 第 3 次] 主控已收到本次内容；...
+        <空行>
+        本次交付内容（原样回显，核对一下你交的是不是这个）：
+        ---
+        <正文，可能自带 --- 分隔线>
+        ---
+        [你说的下一步：...]
+        <空行>
+        接下来**你自己判断**：...
+
+    **必须 `split` 再 `join(parts[1:-1])`**：取 `parts[1]` 会在正文自带
+    Markdown 分隔线时截断（实测渗透/CTF 报告里普遍有 `---` 分段），而
+    split+join 是无损的——正文里的分隔线被切进中间段，join 回来逐字还原。
+    """
+    m = re.match(r"\[已交付 · 第 (\d+) 次\]", content or "")
+    n = int(m.group(1)) if m else 0
+    parts = (content or "").split("\n---\n")
+    if len(parts) >= 3:
+        return n, "\n---\n".join(parts[1:-1]).strip()
+    return n, (content or "").strip()
+
+
+def harvest_thread(bb, thread_id: str) -> dict[str, Any]:
+    """回收一条线程**已经产出**的成果——意外中断后的续跑依据（2026-10-26）。
+
+    **为什么需要**（实测事故，`workspaces/pentest-20261011-c3c7`）：主控一轮
+    并发 5 个 `call_expert`，进程在 2h44m 后重启，4 个专家的工具结果被
+    `_repair_dangling_tool_calls` 补成「进程重启，本轮工具执行中断」。可那 4
+    条线程**早就干完了**——其中两条 `deliver` 过完整报告、关掉全部 intent、
+    把资产标成 `tested_clean`。成果全在 `chat_messages` 里，主控却只看到一句
+    墓碑，只能从头重派（2h44m 白烧）。
+
+    回收三样，都是「不重跑就能拿到」的事实：
+
+    - ``delivery`` / ``delivery_n``：最后一次 `deliver` 的正文全文——专家自己
+      认定要交给主控的东西，比事后猜它的结论可靠；
+    - ``final_text`` / ``final_after_tools``：最后一条**实质** assistant 文本
+      （跳过平台墓碑），以及它是否出现在最后一次工具调用**之后**——之后才算
+      「结论」，之前只是中途的一句话（实测有线程最后一句非空文本是开头的
+      「我先检查任务环境」，当结论转述给主控就是误导）；
+    - ``unanswered`` / ``interrupted``：现场断点。前者是「落了 tool_calls 却没
+      结果行」，后者是「结果行是中断占位」——**两者都要**：清扫跑过之后
+      `_repair_dangling_tool_calls` 已经把前者填成占位，只看 `unanswered` 会
+      恒为空（实测 5 条事故线程全是 []），真正被打断的是 `interrupted`。
+
+    只读，不加锁，不写库。
+    """
+    msgs = list_messages(bb, thread_id)
+    answered = {str(m.get("tool_use_id") or "")
+                for m in msgs if m.get("role") == "tool"}
+    names_by_id: dict[str, str] = {}
+    delivery, delivery_n = "", 0
+    final_text, final_idx = "", -1
+    unanswered: list[dict[str, str]] = []
+    last_tool_idx = -1
+    for i, m in enumerate(msgs):
+        role = m.get("role")
+        content = str(m.get("content") or "")
+        if role == "tool":
+            last_tool_idx = i
+            if content.startswith(_DELIVERY_MARK):
+                n, body = split_delivery(content)
+                if body and n >= delivery_n:   # 后写优先；同序号取后出现的
+                    delivery, delivery_n = body, n
+        elif role == "assistant":
+            if content.strip() and not is_interrupt_note(content):
+                final_text, final_idx = content.strip(), i
+            for tc in (m.get("tool_calls") or []):
+                tcid = str((tc or {}).get("id") or "").strip()
+                name = str((tc or {}).get("name") or "")
+                if not tcid:
+                    continue
+                names_by_id[tcid] = name
+                if tcid not in answered:
+                    unanswered.append({"id": tcid, "name": name})
+    interrupted = [
+        {"id": str(m.get("tool_use_id") or ""),
+         "name": names_by_id.get(str(m.get("tool_use_id") or ""), "")}
+        for m in msgs
+        if m.get("role") == "tool"
+        and is_interrupt_placeholder(str(m.get("content") or ""))
+    ]
+    return {
+        "delivery": delivery,
+        "delivery_n": delivery_n,
+        "final_text": final_text,
+        "final_after_tools": final_idx > last_tool_idx,
+        "unanswered": unanswered,
+        "interrupted": interrupted,
+        "messages": len(msgs),
+    }
 
 
 def _row(r: sqlite3.Row) -> dict[str, Any]:
